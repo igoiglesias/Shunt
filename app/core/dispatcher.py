@@ -49,13 +49,19 @@ PATHS = {
     ("anthropic", "chat"): "/v1/messages",
 }
 
-TRANSPARENT_DROP = frozenset({"host", "content-length", "accept-encoding"})
+# `host` names the wrong destination once we re-address the request; the other
+# four all describe the inbound body, which we re-serialise before sending.
+TRANSPARENT_DROP = frozenset(
+    {"host", "content-length", "content-encoding", "transfer-encoding", "accept-encoding"}
+)
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 
 class ChainExhausted(Exception):
-    pass
+    """Never raised by `dispatch`, which reports an exhausted chain as a
+    `ShuntResult` carrying the last upstream status and the full trace. Do not
+    write `except ChainExhausted` around `dispatch`: the branch would not fire."""
 
 
 @dataclass
@@ -87,14 +93,23 @@ def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings
     return headers
 
 
+def _cap(candidate: Candidate, settings: Settings) -> int:
+    if candidate.alias:
+        return settings.models[candidate.alias].max_output_tokens
+    return DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def _payload(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
-    if candidate.transparent or candidate.protocol == req.protocol:
+    if candidate.transparent:
+        # No candidate configuration exists here and no ceiling of ours applies:
+        # the client's own number is the only one we are entitled to send.
         return {**req.body, "model": candidate.model}
-    cap = (
-        settings.models[candidate.alias].max_output_tokens
-        if candidate.alias
-        else DEFAULT_MAX_OUTPUT_TOKENS
-    )
+    if candidate.protocol == req.protocol:
+        out = {**req.body, "model": candidate.model}
+        if candidate.alias and out.get("max_tokens") is not None:
+            out["max_tokens"] = min(int(out["max_tokens"]), _cap(candidate, settings))
+        return out
+    cap = _cap(candidate, settings)
     if req.protocol == "anthropic":
         return anthropic_request_to_openai(req.body, candidate.model, cap)
     return openai_request_to_anthropic(req.body, candidate.model, cap)
@@ -126,13 +141,24 @@ def _error_message(response: httpx.Response) -> str:
         except ValueError:
             return response.text
         if isinstance(body, dict):
-            return str((body.get("error") or {}).get("message", response.text))
+            error = body.get("error")
+            # Ollama and friends answer `{"error": "model not found"}` -- a bare
+            # string where OpenAI puts an object. Reading `.get` off it raised.
+            if isinstance(error, str):
+                return error
+            if isinstance(error, dict):
+                return str(error.get("message", response.text))
     return response.text
 
 
 async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) -> ShuntResult:
     resolution = resolve(req.body.get("model", ""), settings)
-    probe = _payload(req, resolution.chain[0], settings)
+    try:
+        probe = _payload(req, resolution.chain[0], settings)
+    except Exception:  # noqa: BLE001 - a translator that cannot render the probe
+        # must not decide the whole request. The untranslated body is a worse
+        # estimate, not a fatal one, and a later candidate may take it as-is.
+        probe = req.body
     chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
     trace = [f"{alias}: {reason}" for alias, reason in dropped]
 
@@ -148,7 +174,13 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
             continue
-        payload = _payload(req, candidate, settings)
+        try:
+            payload = _payload(req, candidate, settings)
+        except Exception as err:  # noqa: BLE001 - one candidate we cannot render
+            # the request for is one candidate skipped, not a dead chain: the
+            # next one may speak the client's protocol and need no translation.
+            trace.append(f"{label}: request translation failed: {err}")
+            continue
         client = pool.get(candidate.provider)
         for attempt in range(1, MAX_ATTEMPTS + 1):
             if time.monotonic() > deadline:
@@ -164,8 +196,17 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             outcome = classify(
                 response.status_code if response else None, exc, _retry_after(response))
             if outcome is Outcome.OK and response is not None:
-                data = _translate_response(response.json(), req, candidate)
-                return ShuntResult(200, data, candidate.model, trace)
+                try:
+                    raw = response.json()
+                except ValueError:
+                    # A 2xx whose body is not JSON -- an HTML page from an
+                    # interposed gateway, a truncated response. The error path
+                    # was already lenient about this; the success path was not.
+                    last_status, last_message = 502, "upstream 2xx body is not JSON"
+                    trace.append(f"{label}: unreadable body (attempt {attempt})")
+                    break
+                data = _translate_response(raw, req, candidate)
+                return ShuntResult(response.status_code, data, candidate.model, trace)
             if response is not None:
                 last_status, last_message = response.status_code, _error_message(response)
             else:

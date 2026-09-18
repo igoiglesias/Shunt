@@ -28,11 +28,20 @@ def estimate_tokens(payload: dict) -> int:
     return len(text) // 4
 
 
+# OpenAI puts an image in a content part typed `image_url`; Anthropic types the
+# same thing `image` and carries it under `source`. The dispatcher probes the
+# requirements with the first candidate's payload, so when that candidate speaks
+# the client's own protocol the probe is the untranslated body -- an Anthropic
+# request with a screenshot in it. Recognising only the OpenAI spelling made the
+# vision requirement vanish there and let a blind model take the request.
+IMAGE_PART_TYPES = frozenset({"image_url", "image"})
+
+
 def _has_image(payload: dict) -> bool:
     for message in payload.get("messages", []):
         content = message.get("content")
         if isinstance(content, list) and any(
-            part.get("type") == "image_url" for part in content if isinstance(part, dict)
+            part.get("type") in IMAGE_PART_TYPES for part in content if isinstance(part, dict)
         ):
             return True
     return False

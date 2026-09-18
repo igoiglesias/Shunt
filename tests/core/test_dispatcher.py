@@ -470,3 +470,370 @@ async def test_a_successful_result_still_reports_what_happened_before_it():
         await pool.aclose()
     assert result.real_model == "vendor/backup"
     assert result.trace == ["free: no tool support", "cheap: 400 (attempt 1)"]
+
+
+# --- rodada 1 de correcoes ---------------------------------------------------
+
+VISION = Settings(
+    providers={"openrouter": ProviderConfig(base_url="https://api.test/v1",
+                                            protocol="openai", api_key_env=None)},
+    models={
+        "cego": ModelConfig(provider="openrouter", model="vendor/cego",
+                            supports=ModelCaps(vision=False),
+                            context_window=64000, max_output_tokens=8192),
+        "enxerga": ModelConfig(provider="openrouter", model="vendor/enxerga",
+                               supports=ModelCaps(vision=True),
+                               context_window=64000, max_output_tokens=8192),
+    },
+    routes=[("opus", ["cego", "enxerga"])], default_model=None,
+)
+
+ANTHROPIC_IMAGE_BODY = {
+    "model": "claude-opus-4-5", "max_tokens": 64,
+    "messages": [{"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                     "data": "iVBORw0KGgo="}},
+        {"type": "text", "text": "o que e isso?"}]}],
+}
+
+
+@respx.mock
+async def test_an_anthropic_image_drops_a_candidate_without_vision():
+    """C1: o probe usa o payload do primeiro candidato. Quando ele fala o mesmo
+    protocolo do cliente o corpo chega sem traducao, e a grafia Anthropic da
+    imagem precisa contar como exigencia de visao — senao a captura de tela vai
+    parar num modelo cego."""
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/enxerga")))
+    pool = UpstreamPool(VISION)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", ANTHROPIC_IMAGE_BODY, {}), VISION, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert result.real_model == "vendor/enxerga"
+    assert result.trace == ["cego: no vision support"]
+
+
+ANTHROPIC_PAIR = Settings(
+    providers={"anthropic": ProviderConfig(base_url="https://api.anthropic.test",
+                                           protocol="anthropic", api_key_env=None)},
+    models={
+        "a": ModelConfig(provider="anthropic", model="claude-a",
+                         context_window=200000, max_output_tokens=8192),
+        "b": ModelConfig(provider="anthropic", model="claude-b",
+                         context_window=200000, max_output_tokens=8192),
+    },
+    routes=[("opus", ["a", "b"])], default_model=None,
+)
+
+
+@respx.mock
+async def test_a_2xx_body_that_is_not_json_falls_through_to_the_next_candidate():
+    """I1: um gateway interposto devolvendo HTML com status 200 nao pode virar
+    500 para o usuario; e falha deste candidato, como qualquer outra."""
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        side_effect=[httpx.Response(200, content=b"<html>desculpe</html>",
+                                    headers={"content-type": "text/html"}),
+                     httpx.Response(200, json={
+                         "id": "msg_2", "model": "claude-b", "stop_reason": "end_turn",
+                         "content": [{"type": "text", "text": "ok"}], "usage": {}})])
+    pool = UpstreamPool(ANTHROPIC_PAIR)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), ANTHROPIC_PAIR, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 2
+    assert result.status == 200
+    assert result.real_model == "claude-b"
+    assert "a: unreadable body (attempt 1)" in result.trace
+
+
+@respx.mock
+async def test_every_2xx_body_that_is_not_json_exhausts_the_chain_with_502():
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, content=b"<html>desculpe</html>",
+                                    headers={"content-type": "text/html"}))
+    pool = UpstreamPool(ANTHROPIC_PAIR)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), ANTHROPIC_PAIR, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 2
+    assert result.status == 502
+    assert "not JSON" in result.body["error"]["message"]
+
+
+@respx.mock
+async def test_a_bare_string_error_envelope_becomes_the_message():
+    """I2: o envelope nativo do Ollama e `{"error": "..."}` — string, nao objeto.
+    Ler `.get` dela levantava AttributeError e matava a requisicao inteira."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(404, json={"error": "model not found"}))
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 404
+    # Equality, not `in`: falling through to `response.text` would also contain
+    # the phrase, and would have let the unhandled-string regression back in.
+    assert result.body["error"]["message"].startswith("model not found - tried:")
+
+
+@respx.mock
+async def test_an_error_object_without_a_message_falls_back_to_the_raw_text():
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"code": "bad"}}))
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 400
+    assert '"code"' in result.body["error"]["message"]
+
+
+MIXED_PROTOCOLS = Settings(
+    providers={
+        "openrouter": ProviderConfig(base_url="https://api.test/v1",
+                                     protocol="openai", api_key_env=None),
+        "anthropic": ProviderConfig(base_url="https://api.anthropic.test",
+                                    protocol="anthropic", api_key_env=None),
+    },
+    models={
+        "openai_um": ModelConfig(provider="openrouter", model="vendor/free",
+                                 context_window=200000, max_output_tokens=8192),
+        "anthropic_um": ModelConfig(provider="anthropic", model="claude-a",
+                                    context_window=200000, max_output_tokens=8192),
+    },
+    routes=[("opus", ["openai_um", "anthropic_um"])], default_model=None,
+)
+
+
+@respx.mock
+async def test_a_translator_failure_skips_the_candidate_instead_of_killing_the_chain():
+    """I3: mais de 4 stop sequences faz `anthropic_request_to_openai` levantar.
+    Isso e um defeito daquele candidato, nao do pedido: o candidato Anthropic
+    logo abaixo leva o corpo sem traducao nenhuma."""
+    openai_route = respx.post("https://api.test/v1/chat/completions")
+    anthropic_route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={
+            "id": "msg_1", "model": "claude-a", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
+    body = {**BODY, "stop_sequences": ["a", "b", "c", "d", "e"]}
+    pool = UpstreamPool(MIXED_PROTOCOLS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", body, {}), MIXED_PROTOCOLS, pool)
+    finally:
+        await pool.aclose()
+    assert openai_route.call_count == 0
+    assert anthropic_route.call_count == 1
+    assert result.status == 200
+    assert result.real_model == "claude-a"
+    assert any("openai_um: request translation failed" in line for line in result.trace)
+
+
+BLIND_THEN_SEEING = Settings(
+    providers={
+        "openrouter": ProviderConfig(base_url="https://api.test/v1",
+                                     protocol="openai", api_key_env=None),
+        "anthropic": ProviderConfig(base_url="https://api.anthropic.test",
+                                    protocol="anthropic", api_key_env=None),
+    },
+    models={
+        "cego": ModelConfig(provider="openrouter", model="vendor/cego",
+                            supports=ModelCaps(vision=False),
+                            context_window=200000, max_output_tokens=8192),
+        "enxerga": ModelConfig(provider="anthropic", model="claude-a",
+                               supports=ModelCaps(vision=True),
+                               context_window=200000, max_output_tokens=8192),
+    },
+    routes=[("opus", ["cego", "enxerga"])], default_model=None,
+)
+
+
+@respx.mock
+async def test_the_probe_degrades_to_the_untranslated_body_instead_of_raising():
+    """I3, metade do probe: o probe usa o primeiro candidato, que aqui nao
+    consegue traduzir (5 stop sequences). Se ele levantasse, nenhum candidato
+    seria tentado. Caindo para o corpo cru, o filtro ainda ve a imagem e
+    descarta o modelo cego antes de qualquer chamada."""
+    openai_route = respx.post("https://api.test/v1/chat/completions")
+    anthropic_route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={
+            "id": "msg_1", "model": "claude-a", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
+    body = {**ANTHROPIC_IMAGE_BODY, "stop_sequences": ["a", "b", "c", "d", "e"]}
+    pool = UpstreamPool(BLIND_THEN_SEEING)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", body, {}), BLIND_THEN_SEEING, pool)
+    finally:
+        await pool.aclose()
+    assert openai_route.call_count == 0
+    assert anthropic_route.call_count == 1
+    assert result.real_model == "claude-a"
+    assert result.trace == ["cego: no vision support"]
+
+
+PATH_SETTINGS = Settings(
+    providers={
+        "openrouter": ProviderConfig(base_url="https://api.test/v1",
+                                     protocol="openai", api_key_env=None),
+        "anthropic": ProviderConfig(base_url="https://api.anthropic.test",
+                                    protocol="anthropic", api_key_env=None),
+    },
+    models={
+        "openai_um": ModelConfig(provider="openrouter", model="vendor/free",
+                                 context_window=200000, max_output_tokens=8192),
+        "anthropic_um": ModelConfig(provider="anthropic", model="claude-a",
+                                    context_window=200000, max_output_tokens=8192),
+    },
+    routes=[("rota-openai", ["openai_um"]), ("rota-anthropic", ["anthropic_um"])],
+    default_model=None,
+)
+
+PATH_CASES = [
+    ("openai", "chat", "rota-openai", "https://api.test/v1/chat/completions"),
+    ("openai", "messages", "rota-openai", "https://api.test/v1/chat/completions"),
+    ("openai", "completions", "rota-openai", "https://api.test/v1/completions"),
+    ("openai", "embeddings", "rota-openai", "https://api.test/v1/embeddings"),
+    ("anthropic", "messages", "rota-anthropic", "https://api.anthropic.test/v1/messages"),
+    ("anthropic", "chat", "rota-anthropic", "https://api.anthropic.test/v1/messages"),
+]
+
+
+def test_the_path_cases_cover_every_row_of_paths():
+    import app.core.dispatcher as dispatcher
+
+    assert {(p, e) for p, e, _, _ in PATH_CASES} == set(dispatcher.PATHS)
+
+
+@pytest.mark.parametrize(("protocol", "endpoint", "model", "url"), PATH_CASES)
+@respx.mock
+async def test_each_protocol_endpoint_pair_lands_on_its_own_path(protocol, endpoint, model, url):
+    route = respx.post(url).mock(return_value=httpx.Response(200, json={}))
+    pool = UpstreamPool(PATH_SETTINGS)
+    client_protocol = "anthropic" if protocol == "anthropic" else "openai"
+    try:
+        await dispatch(
+            ShuntRequest(client_protocol, {"model": model, "max_tokens": 8,
+                                           "messages": [{"role": "user", "content": "oi"}]},
+                         {}, endpoint=endpoint),
+            PATH_SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert str(route.calls[0].request.url) == url
+
+
+@respx.mock
+async def test_openai_in_openai_out_passes_through_rewriting_only_the_model():
+    upstream = ok_payload("vendor/free")
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=upstream))
+    body = {"model": "opus", "max_tokens": 32, "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("openai", body, {}, endpoint="chat"), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content) == {**body, "model": "vendor/free"}
+    assert result.body == upstream
+
+
+@respx.mock
+async def test_the_pass_through_branch_also_clamps_max_tokens_to_the_candidate_cap():
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={
+            "id": "msg_1", "model": "claude-a", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
+    pool = UpstreamPool(ANTHROPIC_PAIR)
+    try:
+        await dispatch(ShuntRequest("anthropic", {**BODY, "max_tokens": 999999}, {}),
+                       ANTHROPIC_PAIR, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content)["max_tokens"] == 8192
+
+
+@respx.mock
+async def test_transparent_mode_never_rewrites_the_clients_max_tokens():
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={
+            "id": "msg_1", "model": "claude-sonnet-9", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
+    pool = UpstreamPool(TRANSPARENT)
+    body = {**BODY, "model": "claude-sonnet-9", "max_tokens": 999999}
+    try:
+        await dispatch(ShuntRequest("anthropic", body, {}), TRANSPARENT, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content)["max_tokens"] == 999999
+
+
+def test_payload_without_an_alias_falls_back_to_the_default_cap():
+    import app.core.dispatcher as dispatcher
+
+    payload = dispatcher._payload(
+        ShuntRequest("anthropic", {**BODY, "max_tokens": 999999}, {}),
+        Candidate(alias=None, provider="openrouter", model="m", protocol="openai"),
+        SETTINGS)
+    assert payload["max_tokens"] == dispatcher.DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_transparent_drop_also_covers_the_body_describing_headers():
+    import app.core.dispatcher as dispatcher
+
+    candidate = Candidate(alias=None, provider="anthropic", model="m",
+                          protocol="anthropic", transparent=True)
+    headers = outbound_headers(
+        ShuntRequest("anthropic", BODY, {"Content-Encoding": "gzip",
+                                         "Transfer-Encoding": "chunked",
+                                         "X-Api-Key": "sk"}),
+        candidate, TRANSPARENT)
+    assert headers == {"X-Api-Key": "sk"}
+    assert {"content-encoding", "transfer-encoding"} <= dispatcher.TRANSPARENT_DROP
+
+
+@respx.mock
+async def test_a_2xx_that_is_not_200_is_reported_with_its_own_status():
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(201, json=ok_payload("vendor/free")))
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 201
+    assert result.real_model == "vendor/free"
+
+
+def test_chain_exhausted_documents_that_dispatch_never_raises_it():
+    from app.core.dispatcher import ChainExhausted
+
+    assert ChainExhausted.__doc__ is not None
+    assert "never raised" in ChainExhausted.__doc__.lower()
+
+
+@respx.mock
+async def test_transparent_mode_never_translates_the_request_even_across_protocols():
+    """O repasse e repasse: mesmo quando o protocolo do cliente difere do
+    provedor, o corpo do cliente sai como veio, com o modelo reescrito. Sem o
+    retorno antecipado do modo transparente ele seria traduzido."""
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={
+            "id": "msg_1", "model": "claude-sonnet-9", "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
+    body = {"model": "claude-sonnet-9", "max_tokens": 999999,
+            "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(TRANSPARENT)
+    try:
+        await dispatch(ShuntRequest("openai", body, {}), TRANSPARENT, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content) == body

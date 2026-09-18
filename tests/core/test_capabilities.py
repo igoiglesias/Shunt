@@ -155,3 +155,28 @@ def test_transparent_flag_bypasses_filter_even_with_an_unfit_real_alias():
     kept, dropped = filter_chain([unfit_but_transparent], req, SETTINGS)
     assert kept == [unfit_but_transparent]
     assert dropped == []
+
+
+def test_anthropic_image_block_also_requires_vision_support():
+    """Uma requisicao Anthropic carrega a imagem como `{"type": "image"}` com
+    `source`, nao como o `image_url` da OpenAI. Reconhecer so a grafia OpenAI
+    fazia a exigencia de visao sumir quando o corpo chegava sem traducao, e um
+    modelo cego passava no filtro."""
+    payload = {"messages": [
+        {"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "iVBORw0KGgo="}}]}
+    ]}
+    req = requirements_of(payload)
+    assert req.vision is True
+
+
+def test_candidate_without_vision_is_dropped_for_an_anthropic_image_block():
+    req = requirements_of({"messages": [
+        {"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                         "data": "iVBORw0KGgo="}}]}
+    ]})
+    kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_vision"]
+    assert dropped == [("sem_vision", "no vision support")]
