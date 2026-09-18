@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from app.config.settings import ModelConfig, ProviderConfig, Settings
+from app.config.settings import ModelConfig, ProviderConfig, Settings, load_settings
 
 
 def make_settings(**over):
@@ -38,6 +38,30 @@ def test_route_pointing_to_unknown_model_fails_at_boot():
 def test_default_model_pointing_to_unknown_model_fails_at_boot():
     with pytest.raises(ValidationError, match="default_model"):
         make_settings(default_model="inexistente")
+
+
+def test_load_settings_builds_valid_settings_from_the_real_config():
+    settings = load_settings()
+    assert "free" in settings.models
+    assert settings.models["free"].provider in settings.providers
+
+
+def test_load_settings_does_not_swallow_the_validator(monkeypatch):
+    from app.config import config
+
+    monkeypatch.setattr(config, "routes", [("haiku", ["inexistente"])])
+    with pytest.raises(ValidationError, match="unknown model"):
+        load_settings()
+
+
+def test_route_with_empty_pattern_fails_at_boot():
+    with pytest.raises(ValidationError, match="empty"):
+        make_settings(routes=[("", ["free"])])
+
+
+def test_route_with_empty_candidate_list_fails_at_boot():
+    with pytest.raises(ValidationError, match="empty candidate list"):
+        make_settings(routes=[("haiku", [])])
 
 
 def test_api_key_is_read_from_environment(monkeypatch):

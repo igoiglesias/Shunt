@@ -37,6 +37,13 @@ class Settings(BaseModel):
                 raise ValueError(f"model {alias!r} points to unknown provider {model.provider!r}")
         known = set(self.models)
         for pattern, candidates in self.routes:
+            if pattern == "":
+                raise ValueError(
+                    "route pattern must not be empty; it is a substring of every "
+                    "model name and would swallow all traffic ahead of every other rule"
+                )
+            if not candidates:
+                raise ValueError(f"route {pattern!r} has an empty candidate list")
             for candidate in candidates:
                 if candidate not in known:
                     raise ValueError(f"route {pattern!r} points to unknown model {candidate!r}")
