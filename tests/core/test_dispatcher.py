@@ -1342,6 +1342,7 @@ def test_the_error_envelope_for_an_openai_caller_is_openai_shaped():
         (401, "authentication_error"),
         (403, "permission_error"),
         (404, "not_found_error"),
+        (422, "invalid_request_error"),
         (429, "rate_limit_error"),
         (418, "invalid_request_error"),  # 4xx desconhecido: culpa do pedido
         (500, "server_error"),

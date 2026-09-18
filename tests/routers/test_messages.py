@@ -3,6 +3,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from app.config.settings import ModelConfig, ProviderConfig, Settings
+from app.core.tokens import estimate_input_tokens
 from app.core.upstream import UpstreamPool
 from app.main import app
 from tests.core.test_dispatcher import SETTINGS
@@ -184,15 +185,50 @@ def test_an_unknown_model_is_refused_before_a_single_stream_byte_goes_out():
 
 
 def test_count_tokens_answers_locally_when_the_target_is_not_anthropic():
+    ask = {
+        "model": "claude-opus-4-5",
+        "messages": [{"role": "user", "content": "uma frase de teste"}],
+    }
     with client() as c:
-        body = c.post(
-            "/v1/messages/count_tokens",
-            json={
-                "model": "claude-opus-4-5",
-                "messages": [{"role": "user", "content": "uma frase de teste"}],
-            },
-        ).json()
+        body = c.post("/v1/messages/count_tokens", json=ask).json()
     assert body["input_tokens"] > 0
+    # O numero e a estimativa DESTE corpo, nao uma constante qualquer: um
+    # `input_tokens` fixo tambem seria `> 0` e nao serviria para nada.
+    assert body["input_tokens"] == estimate_input_tokens(ask)
+
+
+@respx.mock
+def test_count_tokens_asks_the_candidate_that_would_actually_serve():
+    """A pergunta vale para o PRIMEIRO candidato da cadeia -- o que serviria o
+    pedido. Um candidato Anthropic mais atras na cadeia nao torna a contagem
+    dele a correta, e consultar o ultimo mandaria o corpo para um provedor que
+    nem vai responder a mensagem."""
+    settings = ANTHROPIC_SETTINGS.model_copy(
+        update={
+            "providers": {
+                **ANTHROPIC_SETTINGS.providers,
+                "openrouter": ProviderConfig(
+                    base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                ),
+            },
+            "models": {
+                "free": ModelConfig(
+                    provider="openrouter",
+                    model="vendor/free",
+                    context_window=64000,
+                    max_output_tokens=8192,
+                ),
+                **ANTHROPIC_SETTINGS.models,
+            },
+            "routes": [("opus", ["free", "native"])],
+        }
+    )
+    route = respx.post("https://api.anthropic.test/v1/messages/count_tokens")
+    ask = {"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]}
+    with client(settings) as c:
+        body = c.post("/v1/messages/count_tokens", json=ask).json()
+    assert route.call_count == 0
+    assert body == {"input_tokens": estimate_input_tokens(ask)}
 
 
 @respx.mock

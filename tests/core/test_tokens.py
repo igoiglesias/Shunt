@@ -9,9 +9,9 @@ def test_longer_conversation_estimates_more_tokens():
 
 def test_system_and_tools_count_towards_the_estimate():
     base = {"messages": [{"role": "user", "content": "oi"}]}
-    assert estimate_input_tokens({**base, "system": "instrução longa " * 50}) > estimate_input_tokens(
-        base
-    )
+    assert estimate_input_tokens(
+        {**base, "system": "instrução longa " * 50}
+    ) > estimate_input_tokens(base)
     assert estimate_input_tokens({**base, "tools": [{"name": "x" * 500}]}) > estimate_input_tokens(
         base
     )
@@ -36,3 +36,17 @@ def test_a_falsy_system_or_tools_field_adds_nothing():
     contribute the two characters of its own JSON rendering."""
     base = {"messages": [{"role": "user", "content": "x" * 100}]}
     assert estimate_input_tokens({**base, "system": "", "tools": []}) == estimate_input_tokens(base)
+
+
+def test_accents_do_not_inflate_the_estimate():
+    """`ensure_ascii=False`: with the default escaping, `ç` would serialise as
+    six characters and a Portuguese prompt would be counted at several times
+    its real size -- the client would compact context it did not need to."""
+    acentuado = {"messages": [{"role": "user", "content": "çãéõ" * 25}]}
+    simples = {"messages": [{"role": "user", "content": "caeo" * 25}]}
+    assert estimate_input_tokens(acentuado) == estimate_input_tokens(simples)
+    # A mesma regra vale para as partes opcionais: um `system` em portugues
+    # passa pelo mesmo `json.dumps`.
+    assert estimate_input_tokens({**acentuado, "system": "instrucao"}) == estimate_input_tokens(
+        {**simples, "system": "instruçãa"}
+    )
