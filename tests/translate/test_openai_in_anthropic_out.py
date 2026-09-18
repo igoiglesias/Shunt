@@ -154,25 +154,32 @@ def test_every_known_stop_reason_maps_to_its_own_finish_reason():
         assert out["choices"][0]["finish_reason"] == expected, stop_reason
 
 
-def test_anthropic_response_id_is_rewritten_to_a_chatcmpl_shaped_id():
-    # Pins the CURRENT transform (raw_id.replace("msg", "chatcmpl", 1)) --
-    # nothing exercised this field before. Note: this is the mirror of the
-    # bug fixed in to_anthropic.py's id transform (a bare substring
-    # replace leaves the original separator in place), so "msg_1" becomes
-    # "chatcmpl_1" here rather than the hyphenated "chatcmpl-1" shape real
-    # OpenAI ids use. Task 11 only fixes the named direction
-    # (openai_response_to_anthropic); this test documents the reverse
-    # direction's current behaviour so a change to it is a deliberate,
-    # visible decision rather than a silent one -- see the task report for
-    # the follow-up recommendation.
+def test_msg_id_becomes_a_chatcmpl_id_with_hyphen():
+    # Real OpenAI completion ids are hyphenated -- chatcmpl-01ABC. A prior
+    # version of this transform did a bare raw_id.replace("msg", "chatcmpl",
+    # 1), which left the original underscore in place and produced
+    # "chatcmpl_01ABC" -- a shape no real OpenAI id has. Reverting the
+    # hyphen fix would turn this green again.
     out = anthropic_response_to_openai({
-        "id": "msg_1", "model": "m", "stop_reason": "end_turn",
+        "id": "msg_01ABC", "model": "m", "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "oi"}],
         "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
-    assert out["id"] == "chatcmpl_1"
+    assert out["id"] == "chatcmpl-01ABC"
 
 
-def test_anthropic_response_missing_id_falls_back_to_msg_shunt_shape():
+def test_id_not_starting_with_msg_still_gets_a_sane_chatcmpl_form():
+    # An id that never had the "msg" prefix must not be passed through
+    # unchanged (that would leak a raw Anthropic-shaped id into an
+    # OpenAI-shaped field) -- it still gets rewritten into "chatcmpl-" form.
+    out = anthropic_response_to_openai({
+        "id": "weird-vendor-id-123", "model": "m", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "oi"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
+    assert out["id"] == "chatcmpl-weird-vendor-id-123"
+    assert not out["id"].startswith("weird")
+
+
+def test_anthropic_response_missing_id_falls_back_to_chatcmpl_shunt_shape():
     out = anthropic_response_to_openai({
         "model": "m", "stop_reason": "end_turn",
         "content": [{"type": "text", "text": "oi"}],

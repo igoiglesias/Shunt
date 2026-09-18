@@ -216,6 +216,24 @@ def anthropic_request_to_openai(body: dict, target_model: str, max_output_tokens
     return out
 
 
+def _to_chatcmpl_id(raw_id: str | None) -> str:
+    """Turn an Anthropic response id into a sane, hyphen-joined OpenAI one.
+
+    Real OpenAI completion ids look like `chatcmpl-01ABC...` -- hyphen,
+    never an underscore. A bare `raw_id.replace("msg", "chatcmpl", 1)` on
+    `msg_01ABC` used to leave the original underscore in place and
+    produce `chatcmpl_01ABC`, a shape no real OpenAI id has. This is the
+    mirror of `_to_msg_id` above; see that function's docstring for why
+    an id lacking the expected prefix is still rewritten rather than
+    passed through unchanged.
+    """
+    if not raw_id:
+        return "chatcmpl_shunt"
+    suffix = raw_id.removeprefix("msg")
+    suffix = suffix.lstrip("-_")
+    return f"chatcmpl-{suffix}" if suffix else "chatcmpl_shunt"
+
+
 def anthropic_response_to_openai(resp: dict, requested_model: str) -> dict:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
@@ -239,9 +257,8 @@ def anthropic_response_to_openai(resp: dict, requested_model: str) -> dict:
         message["tool_calls"] = tool_calls
 
     usage = resp.get("usage") or {}
-    raw_id = resp.get("id") or "msg_shunt"
     return {
-        "id": raw_id.replace("msg", "chatcmpl", 1),
+        "id": _to_chatcmpl_id(resp.get("id")),
         "object": "chat.completion",
         "created": 0,
         "model": requested_model,
