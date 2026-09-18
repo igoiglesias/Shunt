@@ -1,0 +1,102 @@
+from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
+from app.core.capabilities import filter_chain, requirements_of
+from app.core.resolver import Candidate
+
+SETTINGS = Settings(
+    providers={"openrouter": ProviderConfig(base_url="https://x/v1",
+                                            protocol="openai", api_key_env=None)},
+    models={
+        "sem_tools": ModelConfig(provider="openrouter", model="a",
+                                 supports=ModelCaps(tools=False),
+                                 context_window=64000, max_output_tokens=8192),
+        "com_tools": ModelConfig(provider="openrouter", model="b",
+                                 supports=ModelCaps(tools=True),
+                                 context_window=64000, max_output_tokens=8192),
+        "curto": ModelConfig(provider="openrouter", model="c",
+                             supports=ModelCaps(tools=True),
+                             context_window=1000, max_output_tokens=256),
+        "sem_vision": ModelConfig(provider="openrouter", model="d",
+                                  supports=ModelCaps(tools=True, vision=False),
+                                  context_window=64000, max_output_tokens=8192),
+        "com_vision": ModelConfig(provider="openrouter", model="e",
+                                  supports=ModelCaps(tools=True, vision=True),
+                                  context_window=64000, max_output_tokens=8192),
+        "sem_streaming": ModelConfig(provider="openrouter", model="f",
+                                     supports=ModelCaps(tools=True, streaming=False),
+                                     context_window=64000, max_output_tokens=8192),
+        "com_streaming": ModelConfig(provider="openrouter", model="g",
+                                     supports=ModelCaps(tools=True, streaming=True),
+                                     context_window=64000, max_output_tokens=8192),
+    },
+    routes=[], default_model=None,
+)
+
+
+def cand(alias):
+    return Candidate(alias=alias, provider="openrouter",
+                     model=SETTINGS.models[alias].model, protocol="openai")
+
+
+def test_request_with_tools_requires_tool_support():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
+    assert req.tools is True
+
+
+def test_candidate_without_tool_support_is_dropped_with_reason():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
+    kept, dropped = filter_chain([cand("sem_tools"), cand("com_tools")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_tools"]
+    assert dropped == [("sem_tools", "no tool support")]
+
+
+def test_candidate_with_smaller_context_window_is_dropped():
+    req = requirements_of({"messages": [{"role": "user", "content": "x" * 40000}]})
+    kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_tools"]
+    assert dropped[0][1] == "context window too small"
+
+
+def test_transparent_candidate_is_never_filtered():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
+    passthrough = Candidate(alias=None, provider="openrouter", model="x",
+                            protocol="openai", transparent=True)
+    kept, dropped = filter_chain([passthrough], req, SETTINGS)
+    assert kept == [passthrough]
+    assert dropped == []
+
+
+def test_request_with_image_requires_vision_support():
+    req = requirements_of({"messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
+    ]})
+    assert req.vision is True
+
+
+def test_candidate_without_vision_support_is_dropped_with_reason():
+    req = requirements_of({"messages": [
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
+    ]})
+    kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_vision"]
+    assert dropped == [("sem_vision", "no vision support")]
+
+
+def test_request_with_stream_requires_streaming_support():
+    req = requirements_of({"messages": [], "stream": True})
+    assert req.streaming is True
+
+
+def test_candidate_without_streaming_support_is_dropped_with_reason():
+    req = requirements_of({"messages": [], "stream": True})
+    kept, dropped = filter_chain([cand("sem_streaming"), cand("com_streaming")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_streaming"]
+    assert dropped == [("sem_streaming", "no streaming support")]
+
+
+def test_transparent_candidate_with_none_alias_never_filtered_even_when_unfit():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}], "stream": True})
+    passthrough = Candidate(alias=None, provider="openrouter", model="x",
+                            protocol="openai", transparent=False)
+    kept, dropped = filter_chain([passthrough], req, SETTINGS)
+    assert kept == [passthrough]
+    assert dropped == []
