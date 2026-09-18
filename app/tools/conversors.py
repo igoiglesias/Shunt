@@ -1,8 +1,9 @@
+from typing import Any
+
 from app.schemas.schemas import AnthropicRequest
-from typing import Any, Dict
 
 
-def transform_anthropic_to_openai(req: AnthropicRequest) -> Dict[str, Any]:
+def transform_anthropic_to_openai(req: AnthropicRequest) -> dict[str, Any]:
     """Converte o payload de envio da Anthropic para o formato OpenAI."""
     openai_messages = []
 
@@ -37,7 +38,7 @@ def transform_anthropic_to_openai(req: AnthropicRequest) -> Dict[str, Any]:
         "stream": req.stream
     }
 
-def transform_openai_to_anthropic(openai_resp: Dict[str, Any]) -> Dict[str, Any]:
+def transform_openai_to_anthropic(openai_resp: dict[str, Any]) -> dict[str, Any]:
     """Converte a resposta recebida da OpenAI para a estrutura exigida pelo Claude Code."""
     finish_map = {
         "stop": "end_turn",

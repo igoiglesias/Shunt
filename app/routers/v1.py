@@ -1,15 +1,14 @@
+
 import httpx
-from typing import Optional
-from fastapi import APIRouter, HTTPException, Request, Header
-from fastapi.responses import StreamingResponse
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Header, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+
 from app.config.config import model_sources
 from app.schemas.schemas import (
+    AnthropicRequest,
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
-    AnthropicMessage,
-    AnthropicRequest
 )
 from app.tools.conversors import transform_anthropic_to_openai, transform_openai_to_anthropic
 
@@ -99,8 +98,8 @@ async def create_embeddings(body: EmbeddingRequest):
 @router.post("/messages")
 async def create_anthropic_message(
     body: AnthropicRequest,
-    authorization: Optional[str] = Header(None),
-    x_api_key: Optional[str] = Header(None)
+    authorization: str | None = Header(None),
+    x_api_key: str | None = Header(None)
 ):
     # O Claude Code envia a chave via header 'x-api-key' ou 'Authorization'
     api_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
@@ -128,4 +127,4 @@ async def create_anthropic_message(
             return JSONResponse(content=anthropic_response)
 
         except httpx.RequestError as err:
-            raise HTTPException(status_code=502, detail=f"Erro de conexão com o servidor destino: {str(err)}")
+            raise HTTPException(status_code=502, detail=f"Erro de conexão com o servidor destino: {err!s}")

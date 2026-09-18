@@ -31,10 +31,10 @@ def estimate_tokens(payload: dict) -> int:
 def _has_image(payload: dict) -> bool:
     for message in payload.get("messages", []):
         content = message.get("content")
-        if isinstance(content, list):
-            if any(part.get("type") == "image_url" for part in content
-                   if isinstance(part, dict)):
-                return True
+        if isinstance(content, list) and any(
+            part.get("type") == "image_url" for part in content if isinstance(part, dict)
+        ):
+            return True
     return False
 
 

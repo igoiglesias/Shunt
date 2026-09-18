@@ -1,33 +1,34 @@
+from typing import Any
+
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any, Union
 
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: List[Dict[str, Any]]
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
-    stream: Optional[bool] = False
+    messages: list[dict[str, Any]]
+    temperature: float | None = 1.0
+    top_p: float | None = 1.0
+    stream: bool | None = False
 
 class CompletionRequest(BaseModel):
     model: str
-    prompt: Union[str, List[str]]
-    max_tokens: Optional[int] = 16
-    temperature: Optional[float] = 1.0
-    stream: Optional[bool] = False
+    prompt: str | list[str]
+    max_tokens: int | None = 16
+    temperature: float | None = 1.0
+    stream: bool | None = False
 
 class EmbeddingRequest(BaseModel):
     model: str
-    input: Union[str, List[str]]
+    input: str | list[str]
 
 class AnthropicMessage(BaseModel):
     role: str  # "user" ou "assistant"
-    content: Union[str, List[Dict[str, Any]]]
+    content: str | list[dict[str, Any]]
 
 class AnthropicRequest(BaseModel):
     model: str
-    messages: List[AnthropicMessage]
-    system: Optional[Union[str, List[Dict[str, Any]]]] = None
+    messages: list[AnthropicMessage]
+    system: str | list[dict[str, Any]] | None = None
     max_tokens: int = 1024
-    temperature: Optional[float] = 1.0
-    stream: Optional[bool] = False
+    temperature: float | None = 1.0
+    stream: bool | None = False
