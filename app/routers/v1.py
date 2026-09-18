@@ -1,127 +1,36 @@
+"""The Anthropic-facing surface the dispatcher answers through.
 
-import httpx
-from fastapi import APIRouter, Header, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+Deliberately minimal: one non-streaming route. `dispatch` never raises on an
+upstream failure -- it always returns a `ShuntResult`, already translated
+into Anthropic error shape when every candidate failed -- so the only
+exception this route needs to catch is `UnknownProviderError`, which escapes
+`dispatch` before any candidate is tried (no provider is known for the
+requested model, so there is nothing to retry or fall back to). Task 21
+widens this to the full surface (streaming, `count_tokens`, the OpenAI
+routes).
+"""
 
-from app.config.config import model_sources
-from app.schemas.anthropic import AnthropicRequest
-from app.schemas.openai import ChatCompletionRequest, CompletionRequest, EmbeddingRequest
-from app.translate.to_anthropic import openai_response_to_anthropic
-from app.translate.to_openai import anthropic_request_to_openai
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
-router = APIRouter(
-    prefix="/v1",
-    tags=["OpenAI"]
-)
+from app.core.dispatcher import ShuntRequest, dispatch
+from app.core.resolver import UnknownProviderError
+from app.translate.to_anthropic import openai_error_to_anthropic
+
+router = APIRouter(prefix="/v1")
 
 
-@router.get("/models")
-async def get_models():
-    """Return the list of models supported."""
-    data = [{"id": item.get("model"), "object": "model", "created": 1700000000, "owned_py": item.get("provider")} for item in model_sources]
-    
-    return {
-        "object": "list",
-        "data": data
-    }
-
-@router.post("/chat/completions")
-async def create_chat_completion(body: ChatCompletionRequest):
-    """
-    Processa conversas/mensagens no formato Chat.
-    Suporta respostas em lote ou em streaming (SSE).
-    """
-    if body.stream:
-        # Exemplo de resposta em streaming simulada
-        async def event_generator():
-            yield 'data: {"choices": [{"delta": {"content": "Olá!"}}]}\n\n'
-            yield "data: [DONE]\n\n"
-            
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-    return {
-        "id": "chatcmpl-proxy-123",
-        "object": "chat.completion",
-        "created": 1700000000,
-        "model": body.model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": "Resposta processada pelo seu proxy para chat."
-                },
-                "finish_reason": "stop"
-            }
-        ]
-    }
-
-@router.post("/completions")
-async def create_completion(body: CompletionRequest):
-    """
-    Processa solicitações de texto simples/autocomplete (Modelos Legados).
-    """
-    return {
-        "id": "cmpl-proxy-123",
-        "object": "text_completion",
-        "created": 1700000000,
-        "model": body.model,
-        "choices": [
-            {
-                "text": " Texto completado pelo proxy.",
-                "index": 0,
-                "finish_reason": "stop"
-            }
-        ]
-    }
-
-@router.post("/embeddings")
-async def create_embeddings(body: EmbeddingRequest):
-    """
-    Gera vetores numéricos de embedding para textos.
-    """
-    return {
-        "object": "list",
-        "data": [
-            {
-                "object": "embedding",
-                "index": 0,
-                "embedding": [0.012, -0.023, 0.045, 0.089]  # Exemplo de vetor
-            }
-        ],
-        "model": body.model
-    }
-    
 @router.post("/messages")
-async def create_anthropic_message(
-    body: AnthropicRequest,
-    authorization: str | None = Header(None),
-    x_api_key: str | None = Header(None)
-):
-    # O Claude Code envia a chave via header 'x-api-key' ou 'Authorization'
-    api_key = x_api_key or (authorization.replace("Bearer ", "") if authorization else None)
-    
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Header de autenticação ausente.")
-
-    # Converte para formato OpenAI
-    openai_payload = anthropic_request_to_openai(body.model_dump(), body.model, body.max_tokens)
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        try:
-            response = await client.post(TARGET_PROVIDER_URL, json=openai_payload, headers=headers)
-            
-            if response.status_code != 200:
-                return JSONResponse(status_code=response.status_code, content=response.json())
-
-            # Traduz a resposta de volta antes de responder ao Claude Code
-            anthropic_response = openai_response_to_anthropic(response.json(), body.model)
-            return JSONResponse(content=anthropic_response)
-
-        except httpx.RequestError as err:
-            raise HTTPException(status_code=502, detail=f"Erro de conexão com o servidor destino: {err!s}")
+async def create_message(request: Request) -> JSONResponse:
+    body = await request.json()
+    shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
+    try:
+        result = await dispatch(shunt_request, request.app.state.settings, request.app.state.pool)
+    except UnknownProviderError as err:
+        return JSONResponse(status_code=400, content=openai_error_to_anthropic(400, str(err)))
+    # `x-shunt-model` names the model that actually ran; the response body's
+    # own `model` field still echoes what the client asked for (see
+    # `openai_response_to_anthropic`). When no candidate ran at all,
+    # `real_model` is None and the header is omitted rather than sent empty.
+    headers = {"x-shunt-model": result.real_model} if result.real_model else {}
+    return JSONResponse(status_code=result.status, content=result.body, headers=headers)
