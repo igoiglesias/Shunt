@@ -445,7 +445,7 @@ async def test_a_first_event_exactly_at_the_deadline_still_counts(monkeypatch):
 
 
 @respx.mock
-async def test_a_ping_is_emitted_only_after_the_interval_while_waiting(monkeypatch):
+async def test_a_keepalive_is_emitted_only_after_the_interval_while_waiting(monkeypatch):
     content = b'data: {"choices": [{"delta": {"content": "ok"}}]}\n\n'
     respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(
@@ -460,9 +460,13 @@ async def test_a_ping_is_emitted_only_after_the_interval_while_waiting(monkeypat
         FakeClock(1000.0, 1000.0 + PING_INTERVAL, 1000.0 + 2 * PING_INTERVAL, 1010.1),
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
-    assert events_of(body).count("ping") == 1
-    assert body.index("event: ping") < body.index("event: message_start")
-    assert '"type": "ping"' in body
+    # An Anthropic client never sees a `ping` EVENT ahead of `message_start`:
+    # the keepalive is a bare SSE comment (no `data:` field), exactly like
+    # the OpenAI client already got below. A comment is not an event at all,
+    # so `events_of` (which only counts `event:` lines) sees none of it.
+    assert events_of(body).count("ping") == 0
+    assert body.count(": ping\n\n") == 1
+    assert body.index(": ping\n\n") < body.index("event: message_start")
 
 
 @respx.mock

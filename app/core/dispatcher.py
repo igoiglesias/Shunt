@@ -371,11 +371,25 @@ def _stream_translator(req: ShuntRequest):
     return AnthropicStreamToOpenAI(requested, f"chatcmpl-{uuid.uuid4().hex}")
 
 
-def _ping(req: ShuntRequest) -> bytes:
-    """Anthropic has a `ping` event; OpenAI's chunk stream has no equivalent,
-    so its clients get the SSE comment, which every SSE reader ignores."""
-    if req.protocol == "anthropic":
-        return _sse("ping", {"type": "ping"})
+def _keepalive() -> bytes:
+    """Keep the connection alive while we wait for the first valid event --
+    the only place this is ever used, since pings stop the moment a stream
+    commits (see the read loop below).
+
+    This is ALWAYS a bare SSE comment, never a named event, for both
+    protocols. A real Anthropic stream's first event is `message_start`; an
+    `event: ping` arriving before it would be an event no strict Anthropic
+    client has been shown to tolerate, and nobody here has verified one
+    does. A comment line (`: ...`) is not an event at all -- it carries no
+    `data:` field, so `SSEDecoder._parse` (and every other SSE reader,
+    Anthropic's own included) drops it silently. That keeps the wire warm
+    -- bytes still arrive, resetting any read-inactivity timeout on the
+    client's socket -- without ever telling an Anthropic client's event
+    stream that something happened before `message_start` did. OpenAI
+    clients already got exactly this treatment; this makes both sides
+    consistent instead of privileging one client's timeout over the
+    other's protocol strictness.
+    """
     return b": ping\n\n"
 
 
@@ -594,7 +608,7 @@ async def _stream_chain(
                         break
                     if now - last_ping > PING_INTERVAL:
                         last_ping = now
-                        yield _ping(req)
+                        yield _keepalive()
                 for payload_bytes in _drain(req, translator, decoder.feed(raw), state):
                     yield payload_bytes
                 if state.committed or state.failed is not None:
