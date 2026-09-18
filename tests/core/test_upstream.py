@@ -1,3 +1,5 @@
+import httpx
+
 from app.config.settings import ProviderConfig, Settings
 from app.core.upstream import UpstreamPool
 
@@ -43,3 +45,18 @@ async def test_aclose_closes_the_clients_and_empties_the_pool():
     second = pool.get("openrouter")
     assert second is not first
     await pool.aclose()
+
+
+async def test_injected_transport_is_actually_used_by_the_client():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"via": "fake-transport"})
+
+    fake_transport = httpx.MockTransport(handler)
+    pool = UpstreamPool(SETTINGS, transport=fake_transport)
+    try:
+        client = pool.get("openrouter")
+        response = await client.get("/")
+        assert response.status_code == 200
+        assert response.json() == {"via": "fake-transport"}
+    finally:
+        await pool.aclose()
