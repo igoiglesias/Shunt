@@ -105,7 +105,7 @@ async def create_anthropic_message(
         raise HTTPException(status_code=401, detail="Header de autenticação ausente.")
 
     # Converte para formato OpenAI
-    openai_payload = anthropic_request_to_openai(body.model_dump(), body.model, 4096)
+    openai_payload = anthropic_request_to_openai(body.model_dump(), body.model, body.max_tokens)
 
     headers = {
         "Authorization": f"Bearer {api_key}",

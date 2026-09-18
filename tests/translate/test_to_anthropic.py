@@ -65,6 +65,22 @@ def test_error_envelope_maps_status_to_anthropic_type():
     assert openai_error_to_anthropic(418, "?")["error"]["type"] == "api_error"
 
 
+def test_chatcmpl_id_becomes_a_msg_id():
+    out = openai_response_to_anthropic({
+        "id": "chatcmpl-abc123", "model": "m",
+        "choices": [{"message": {"content": "oi"}, "finish_reason": "stop"}],
+    }, "m")
+    assert out["id"] == "msg-abc123"
+
+
+def test_missing_id_falls_back_to_msg_shunt():
+    out = openai_response_to_anthropic({
+        "model": "m",
+        "choices": [{"message": {"content": "oi"}, "finish_reason": "stop"}],
+    }, "m")
+    assert out["id"] == "msg_shunt"
+
+
 def test_empty_choices_list_falls_back_to_defaults():
     out = openai_response_to_anthropic({
         "id": "chatcmpl-3", "model": "m", "choices": [],
