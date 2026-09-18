@@ -1,5 +1,5 @@
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
-from app.core.capabilities import filter_chain, requirements_of
+from app.core.capabilities import Requirements, estimate_tokens, filter_chain, requirements_of
 from app.core.resolver import Candidate
 
 SETTINGS = Settings(
@@ -40,6 +40,9 @@ def cand(alias):
 def test_request_with_tools_requires_tool_support():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
     assert req.tools is True
+    assert req.vision is False
+    assert req.streaming is False
+    assert req.input_tokens == estimate_tokens({"messages": [], "tools": [{"type": "function"}]})
 
 
 def test_candidate_without_tool_support_is_dropped_with_reason():
@@ -66,10 +69,14 @@ def test_transparent_candidate_is_never_filtered():
 
 
 def test_request_with_image_requires_vision_support():
-    req = requirements_of({"messages": [
+    payload = {"messages": [
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
-    ]})
+    ]}
+    req = requirements_of(payload)
     assert req.vision is True
+    assert req.tools is False
+    assert req.streaming is False
+    assert req.input_tokens == estimate_tokens(payload)
 
 
 def test_candidate_without_vision_support_is_dropped_with_reason():
@@ -82,8 +89,12 @@ def test_candidate_without_vision_support_is_dropped_with_reason():
 
 
 def test_request_with_stream_requires_streaming_support():
-    req = requirements_of({"messages": [], "stream": True})
+    payload = {"messages": [], "stream": True}
+    req = requirements_of(payload)
     assert req.streaming is True
+    assert req.tools is False
+    assert req.vision is False
+    assert req.input_tokens == estimate_tokens(payload)
 
 
 def test_candidate_without_streaming_support_is_dropped_with_reason():
@@ -110,6 +121,30 @@ def test_estimate_tokens_counts_tools_not_just_messages():
     req = requirements_of(payload)
     kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_tools"]
+    assert dropped == [("curto", "context window too small")]
+
+
+def test_kept_is_empty_when_the_only_candidate_is_unfit():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
+    kept, dropped = filter_chain([cand("sem_tools")], req, SETTINGS)
+    assert kept == []
+    assert dropped == [("sem_tools", "no tool support")]
+
+
+def test_context_window_boundary_exact_fit_is_kept():
+    # Control the estimate precisely by constructing Requirements directly
+    # (bypassing requirements_of/estimate_tokens) instead of hand-tuning a
+    # payload to hit an exact character count.
+    req = Requirements(tools=False, vision=False, streaming=False, input_tokens=1000)
+    kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["curto"]
+    assert dropped == []
+
+
+def test_context_window_boundary_one_over_is_dropped():
+    req = Requirements(tools=False, vision=False, streaming=False, input_tokens=1001)
+    kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
+    assert kept == []
     assert dropped == [("curto", "context window too small")]
 
 
