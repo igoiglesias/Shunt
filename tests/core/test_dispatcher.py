@@ -321,7 +321,7 @@ class _Clock:
 
 @respx.mock
 async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 1.0, 10_000.0))
     route = respx.post("https://api.test/v1/chat/completions").mock(
@@ -338,7 +338,7 @@ async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
 
 @respx.mock
 async def test_429_retries_the_same_candidate_when_retry_after_fits_the_budget(monkeypatch):
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     route = respx.post("https://api.test/v1/chat/completions").mock(
@@ -370,7 +370,7 @@ async def test_an_unparseable_retry_after_is_treated_as_absent_and_the_candidate
 
 @respx.mock
 async def test_a_non_json_error_body_becomes_the_message_verbatim(monkeypatch):
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     respx.post("https://api.test/v1/chat/completions").mock(
@@ -386,7 +386,7 @@ async def test_a_non_json_error_body_becomes_the_message_verbatim(monkeypatch):
 
 @respx.mock
 async def test_a_candidate_that_only_ever_fails_transport_is_retried_to_the_limit(monkeypatch):
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     route = respx.post("https://api.test/v1/chat/completions").mock(
@@ -400,6 +400,31 @@ async def test_a_candidate_that_only_ever_fails_transport_is_retried_to_the_limi
     assert result.status == 502
     assert "recusou" in result.body["error"]["message"]
     assert result.real_model is None
+
+
+@respx.mock
+async def test_backoff_is_never_awaited_after_the_last_attempt(monkeypatch):
+    """`if attempt < MAX_ATTEMPTS: await asyncio.sleep(backoff(attempt))` --
+    the strict `<` means the final attempt of each candidate is never
+    followed by a sleep. A mutation to `<=` would add one extra backoff() call
+    per candidate; nothing about `route.call_count` or the result would
+    change (retries are driven by the outer `for attempt in range(...)` loop,
+    not by how many times we slept), so only counting `backoff()` calls
+    directly catches it."""
+    from app.core import dispatcher
+
+    calls: list[int] = []
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: calls.append(attempt) or 0.0)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("recusou"))
+    pool = UpstreamPool(SETTINGS)
+    try:
+        await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    # Two candidates ("free", "cheap"), each retried MAX_ATTEMPTS times but
+    # slept between attempts only MAX_ATTEMPTS - 1 times.
+    assert len(calls) == (dispatcher.MAX_ATTEMPTS - 1) * 2
 
 
 def test_shunt_request_defaults_to_the_messages_endpoint():
@@ -707,7 +732,7 @@ PATH_CASES = [
 
 
 def test_the_path_cases_cover_every_row_of_paths():
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     assert {(p, e) for p, e, _, _ in PATH_CASES} == set(dispatcher.PATHS)
 
@@ -775,11 +800,13 @@ async def test_transparent_mode_never_rewrites_the_clients_max_tokens():
     finally:
         await pool.aclose()
     import json as _json
-    assert _json.loads(route.calls[0].request.content)["max_tokens"] == 999999
+    # Byte-for-byte equality, not just the max_tokens field: this is what
+    # proves a same-protocol pass-through does not translate the body at all.
+    assert _json.loads(route.calls[0].request.content) == body
 
 
 def test_payload_without_an_alias_falls_back_to_the_default_cap():
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     payload = dispatcher._payload(
         ShuntRequest("anthropic", {**BODY, "max_tokens": 999999}, {}),
@@ -789,7 +816,7 @@ def test_payload_without_an_alias_falls_back_to_the_default_cap():
 
 
 def test_transparent_drop_also_covers_the_body_describing_headers():
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     candidate = Candidate(alias=None, provider="anthropic", model="m",
                           protocol="anthropic", transparent=True)
@@ -904,7 +931,7 @@ async def test_transparent_credentials_go_verbatim_to_the_declared_base_url(monk
 
 
 def test_transparent_cap_falls_back_to_the_default_when_the_client_sends_none():
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     assert dispatcher._transparent_cap(
         ShuntRequest("anthropic", {"messages": []}, {})) == dispatcher.DEFAULT_MAX_OUTPUT_TOKENS
@@ -958,7 +985,7 @@ def test_a_transparent_candidate_with_an_alias_still_keeps_the_clients_max_token
     alias" e sim "em modo transparente nao reescrevemos o numero do cliente".
     Um candidato transparente construido com alias prova qual das duas o codigo
     esta aplicando — o mesmo par que `test_capabilities` ja fixa no filtro."""
-    import app.core.dispatcher as dispatcher
+    from app.core import dispatcher
 
     candidate = Candidate(alias="free", provider="openrouter", model="vendor/free",
                           protocol="anthropic", transparent=True)
