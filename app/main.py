@@ -26,5 +26,15 @@ app.include_router(v1_router)
 
 
 @app.get("/")
-async def root():
-    return {"message": "Hello World"}
+async def health() -> dict[str, str]:
+    """Liveness check.
+
+    Kept deliberately, not as skeleton leftover: a local proxy that harnesses
+    point their `base_url` at needs a fast, dependency-free way for the
+    operator (or a supervisor process) to confirm the server is up before
+    routing real traffic to it. It intentionally does not touch
+    `app.state.settings` or `app.state.pool` -- it must answer even if
+    upstream configuration is broken, since that is exactly the situation an
+    operator is trying to diagnose.
+    """
+    return {"status": "ok"}
