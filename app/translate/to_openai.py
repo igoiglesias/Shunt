@@ -1,0 +1,178 @@
+"""Translate an Anthropic Messages request into the OpenAI pivot format.
+
+The two dialects disagree in ways that produce silence rather than errors:
+Anthropic puts a `tool_use` block inside the assistant message and the
+matching `tool_result` inside a *user* message; OpenAI puts `tool_calls` on
+the assistant message and each result in its own separate message with
+`role: "tool"`. Anthropic's tool input is a JSON object; OpenAI's
+`arguments` is a JSON string. Get any of that wrong and the provider either
+rejects the request or answers in prose while the harness waits for a tool
+call that never comes.
+"""
+
+import json
+from typing import Any
+
+from app.translate.ids import to_openai_id
+
+MAX_STOP_SEQUENCES = 4
+
+
+class TooManyStopSequencesError(ValueError):
+    """Raised when the request asks for more stop sequences than OpenAI accepts."""
+
+
+def _system_text(system: Any) -> str:
+    if isinstance(system, str):
+        return system
+    return "\n\n".join(
+        block.get("text", "")
+        for block in system
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _content_part(block: dict) -> dict | None:
+    if block.get("type") == "text":
+        return {"type": "text", "text": block.get("text", "")}
+    if block.get("type") == "image":
+        source = block.get("source", {})
+        if source.get("type") == "base64":
+            url = f"data:{source.get('media_type')};base64,{source.get('data')}"
+        else:
+            url = source.get("url", "")
+        return {"type": "image_url", "image_url": {"url": url}}
+    return None
+
+
+def _result_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _convert_message(message: dict) -> list[dict]:
+    role = message.get("role")
+    content = message.get("content")
+    if isinstance(content, str):
+        return [{"role": role, "content": content}]
+
+    tool_messages: list[dict] = []
+    parts: list[dict] = []
+    tool_calls: list[dict] = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "tool_use":
+            tool_calls.append(
+                {
+                    "id": to_openai_id(block.get("id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
+        elif kind == "tool_result":
+            text = _result_text(block.get("content", ""))
+            if block.get("is_error"):
+                text = f"Error: {text}"
+            tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": to_openai_id(block.get("tool_use_id", "")),
+                    "content": text,
+                }
+            )
+        else:
+            part = _content_part(block)
+            if part is not None:
+                parts.append(part)
+
+    # Order matters: `tool_result` blocks become `role: "tool"` messages in
+    # the order the tool_calls were made, and a text block sharing a message
+    # with a tool_result becomes a separate user message AFTER those tool
+    # messages -- a strict provider rejects any other order.
+    out: list[dict] = list(tool_messages)
+    if tool_calls:
+        # OpenAI carries text and tool_calls on the SAME assistant message
+        # object (content is a sibling field of tool_calls, not a separate
+        # message) -- so any text emitted alongside a tool_use is folded
+        # into this one message rather than sent as a second message.
+        call_content: Any = None
+        if parts:
+            text_only = all(p["type"] == "text" for p in parts)
+            call_content = "\n".join(p["text"] for p in parts) if text_only else parts
+            parts = []
+        out.append({"role": role, "content": call_content, "tool_calls": tool_calls})
+    if parts:
+        text_only = all(p["type"] == "text" for p in parts)
+        payload = "\n".join(p["text"] for p in parts) if text_only else parts
+        out.append({"role": role, "content": payload})
+    return out
+
+
+def _convert_tool(tool: dict) -> dict:
+    schema = tool.get("input_schema") or {}
+    if not schema:
+        schema = {"type": "object", "properties": {}}
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.get("name", ""),
+            "description": tool.get("description", ""),
+            "parameters": schema,
+        },
+    }
+
+
+def _convert_tool_choice(choice: dict) -> tuple[Any, bool | None]:
+    mapping = {"auto": "auto", "any": "required", "none": "none"}
+    kind = choice.get("type", "auto")
+    parallel = None
+    if choice.get("disable_parallel_tool_use") is True:
+        parallel = False
+    if kind == "tool":
+        return {"type": "function", "function": {"name": choice.get("name", "")}}, parallel
+    return mapping.get(kind, "auto"), parallel
+
+
+def anthropic_request_to_openai(body: dict, target_model: str, max_output_tokens: int) -> dict:
+    messages: list[dict] = []
+    if body.get("system"):
+        messages.append({"role": "system", "content": _system_text(body["system"])})
+    for message in body.get("messages", []):
+        messages.extend(_convert_message(message))
+
+    out: dict[str, Any] = {
+        "model": target_model,
+        "messages": messages,
+        "max_tokens": min(int(body.get("max_tokens", max_output_tokens)), max_output_tokens),
+    }
+    for key in ("temperature", "top_p"):
+        if body.get(key) is not None:
+            out[key] = body[key]
+    if body.get("stream"):
+        out["stream"] = True
+        out["stream_options"] = {"include_usage": True}
+    if body.get("tools"):
+        out["tools"] = [_convert_tool(t) for t in body["tools"]]
+    if body.get("tool_choice"):
+        choice, parallel = _convert_tool_choice(body["tool_choice"])
+        out["tool_choice"] = choice
+        if parallel is not None:
+            out["parallel_tool_calls"] = parallel
+    stops = body.get("stop_sequences")
+    if stops:
+        if len(stops) > MAX_STOP_SEQUENCES:
+            raise TooManyStopSequencesError(
+                f"OpenAI accepts at most {MAX_STOP_SEQUENCES} stop sequences, got {len(stops)}"
+            )
+        out["stop"] = stops
+    return out
