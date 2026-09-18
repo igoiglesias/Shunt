@@ -1,8 +1,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from app.translate.to_anthropic import openai_response_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai
 
