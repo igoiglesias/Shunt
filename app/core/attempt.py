@@ -33,6 +33,8 @@ def classify(status: int | None, exc: Exception | None, retry_after: float | Non
         if retry_after is not None and retry_after <= RETRY_AFTER_BUDGET:
             return Outcome.RETRY
         return Outcome.SKIP
+    if status == 408:
+        return Outcome.RETRY
     if status >= 500:
         return Outcome.RETRY
     return Outcome.SKIP

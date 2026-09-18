@@ -44,8 +44,12 @@ def test_rate_limit_skips_when_retry_after_is_not_a_number():
 
 
 def test_other_four_xx_statuses_skip():
-    for status in (401, 403, 404, 408, 409):
+    for status in (401, 403, 404, 409):
         assert classify(status, None, None) is Outcome.SKIP
+
+
+def test_request_timeout_is_retried_like_a_transient_failure():
+    assert classify(408, None, None) is Outcome.RETRY
 
 
 def test_redirect_status_is_ok():
@@ -58,3 +62,8 @@ def test_non_transport_exception_skips():
 
 def test_backoff_stays_bounded_well_past_max_attempts():
     assert backoff(10) <= 6.0
+
+
+def test_backoff_is_not_deterministic_across_calls():
+    samples = {backoff(2) for _ in range(20)}
+    assert len(samples) > 1
