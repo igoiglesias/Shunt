@@ -4,12 +4,8 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config.config import model_sources
-from app.schemas.schemas import (
-    AnthropicRequest,
-    ChatCompletionRequest,
-    CompletionRequest,
-    EmbeddingRequest,
-)
+from app.schemas.anthropic import AnthropicRequest
+from app.schemas.openai import ChatCompletionRequest, CompletionRequest, EmbeddingRequest
 from app.tools.conversors import transform_anthropic_to_openai, transform_openai_to_anthropic
 
 router = APIRouter(

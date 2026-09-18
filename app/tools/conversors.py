@@ -1,6 +1,6 @@
 from typing import Any
 
-from app.schemas.schemas import AnthropicRequest
+from app.schemas.anthropic import AnthropicRequest
 
 
 def transform_anthropic_to_openai(req: AnthropicRequest) -> dict[str, Any]:
