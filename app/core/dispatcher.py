@@ -48,7 +48,11 @@ from app.schemas.openai import OpenAIErrorResponse
 from app.translate.sse_parse import SSEDecoder, SSEEvent
 from app.translate.sse_to_anthropic import OpenAIStreamToAnthropic
 from app.translate.sse_to_openai import AnthropicStreamToOpenAI
-from app.translate.to_anthropic import openai_error_to_anthropic, openai_response_to_anthropic
+from app.translate.to_anthropic import (
+    openai_error_to_anthropic,
+    openai_response_to_anthropic,
+    reasoning_of,
+)
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai, anthropic_response_to_openai
 
@@ -373,8 +377,15 @@ def is_first_valid_event(data: dict) -> bool:
     an empty delta and an `{"error": ...}` payload do get here and must all
     answer False: each of them is something a provider sends while it has not
     started answering, and treating one as the start would give up the
-    fallback for nothing. Only a delta carrying text or a tool call closes the
-    decision.
+    fallback for nothing.
+
+    Text, a tool call and RACIOCINIO all close the decision. The third was
+    missing and it cost a whole feature: measured against llama.cpp, a
+    reasoning model sends dozens of `reasoning_content` chunks before its
+    first character of text, and every one of them was dropped here -- before
+    the translator ever saw it -- so the client was shown no thinking at all.
+    Reasoning is the model's output; a provider emitting it has started
+    answering.
     """
     if data.get("error"):
         return False
@@ -382,7 +393,7 @@ def is_first_valid_event(data: dict) -> bool:
     if not choices:
         return False
     delta = choices[0].get("delta") or {}
-    return bool(delta.get("content") or delta.get("tool_calls"))
+    return bool(delta.get("content") or delta.get("tool_calls") or reasoning_of(delta))
 
 
 def _sse(event: str, data: dict) -> bytes:

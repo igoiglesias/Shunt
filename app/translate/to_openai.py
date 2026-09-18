@@ -104,11 +104,19 @@ def _convert_message(message: dict) -> list[dict]:
     tool_messages: list[dict] = []
     parts: list[dict] = []
     tool_calls: list[dict] = []
+    thinking: list[str] = []
     for block in content or []:
         if not isinstance(block, dict):
             continue
         kind = block.get("type")
-        if kind == "tool_use":
+        if kind == "thinking":
+            # O pensamento que este proxy entregou no turno anterior volta ao
+            # provedor no campo de onde saiu. Descarta-lo faz o modelo perder
+            # o proprio raciocinio e refaze-lo, pagando o token de novo.
+            fragment = block.get("thinking")
+            if isinstance(fragment, str) and fragment:
+                thinking.append(fragment)
+        elif kind == "tool_use":
             tool_calls.append(
                 {
                     "id": to_openai_id(block.get("id", "")),
@@ -140,6 +148,12 @@ def _convert_message(message: dict) -> list[dict]:
     # with a tool_result becomes a separate user message AFTER those tool
     # messages -- a strict provider rejects any other order.
     out: list[dict] = list(tool_messages)
+    # Uma mensagem de assistente feita SO de blocos `thinking` nao pode sumir:
+    # um provedor que exige alternancia estrita veria dois turnos de usuario
+    # seguidos e recusaria a conversa inteira.
+    if thinking and not tool_calls and not parts:
+        out.append({"role": role, "content": "", "reasoning_content": "\n".join(thinking)})
+        return out
     if tool_calls:
         # OpenAI carries text and tool_calls on the SAME assistant message
         # object (content is a sibling field of tool_calls, not a separate
@@ -154,7 +168,10 @@ def _convert_message(message: dict) -> list[dict]:
     if parts:
         text_only = all(p["type"] == "text" for p in parts)
         payload = "\n".join(p["text"] for p in parts) if text_only else parts
-        out.append({"role": role, "content": payload})
+        plain: dict[str, Any] = {"role": role, "content": payload}
+        if thinking:
+            plain["reasoning_content"] = "\n".join(thinking)
+        out.append(plain)
     return out
 
 

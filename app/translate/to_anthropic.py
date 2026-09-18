@@ -89,10 +89,30 @@ def _arguments(raw: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def reasoning_of(message_or_delta: dict) -> str:
+    """O pensamento do modelo, sob qualquer das duas grafias em uso.
+
+    `reasoning_content` e o que o llama.cpp e a DeepSeek emitem;
+    `reasoning` e o que a OpenRouter emite pelo mesmo conteudo. Ler so uma
+    delas deixa metade dos provedores sem pensamento, e a diferenca nao e
+    visivel ate rodar contra os dois.
+    """
+    raw = message_or_delta.get("reasoning_content") or message_or_delta.get("reasoning")
+    return raw if isinstance(raw, str) else ""
+
+
 def openai_response_to_anthropic(resp: dict, requested_model: str) -> dict:
     choices = resp.get("choices") or [{}]
     message = choices[0].get("message") or {}
     content: list[dict[str, Any]] = []
+
+    # O pensamento vem ANTES da resposta, como na Anthropic: um cliente que
+    # renderiza na ordem dos blocos mostraria a conclusao antes do raciocinio
+    # se fosse ao contrario. Sem `signature` de proposito -- este proxy nao
+    # tem como assinar nada, e um valor inventado seria lido como real.
+    reasoning = reasoning_of(message)
+    if reasoning:
+        content.append({"type": "thinking", "thinking": reasoning})
 
     text = message.get("content")
     if text:

@@ -453,3 +453,80 @@ def test_only_the_first_choice_of_a_multi_choice_chunk_is_translated():
     )
     delta = next(d for n, d in events if n == "content_block_delta")
     assert delta["delta"]["text"] == "primeiro"
+
+
+# --------------------------------------------------------------------------
+# Raciocinio em streaming
+# --------------------------------------------------------------------------
+
+
+def test_a_reasoning_delta_opens_a_thinking_block():
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    events = t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
+    assert names(events) == ["message_start", "content_block_start", "content_block_delta"]
+    assert events[1][1]["content_block"] == {"type": "thinking", "thinking": ""}
+    assert events[2][1]["delta"] == {"type": "thinking_delta", "thinking": "pen"}
+
+
+def test_reasoning_then_text_closes_the_thinking_block_first():
+    """Os dois nao convivem no mesmo bloco: a Anthropic exige um
+    `content_block_stop` antes de abrir o proximo, e um cliente que receba
+    `text_delta` dentro de um bloco `thinking` renderiza a resposta como se
+    fosse pensamento."""
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
+    events = t.feed({"choices": [{"delta": {"content": "Paris"}}]})
+    assert names(events) == ["content_block_stop", "content_block_start", "content_block_delta"]
+    assert events[1][1]["index"] == 1
+    assert events[1][1]["content_block"]["type"] == "text"
+
+
+def test_consecutive_reasoning_deltas_stay_in_one_block():
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
+    events = t.feed({"choices": [{"delta": {"reasoning_content": "sando"}}]})
+    assert names(events) == ["content_block_delta"]
+    assert events[0][1]["index"] == 0
+    assert events[0][1]["delta"] == {"type": "thinking_delta", "thinking": "sando"}
+
+
+def test_the_openrouter_spelling_streams_the_same_way():
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    events = t.feed({"choices": [{"delta": {"reasoning": "pen"}}]})
+    assert events[-1][1]["delta"] == {"type": "thinking_delta", "thinking": "pen"}
+
+
+def test_an_open_thinking_block_is_closed_by_finish():
+    """`finish()` fecha o que estiver aberto, e o bloco de pensamento nao e
+    excecao: um stream que morre raciocinando ainda tem de sair bem formado."""
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
+    assert names(t.finish()) == ["content_block_stop", "message_delta", "message_stop"]
+
+
+def test_reasoning_after_text_closes_the_text_block_first():
+    """A ordem inversa da usual, e ela acontece: ha provedor que volta a
+    raciocinar depois de ja ter escrito. Abrir o bloco de pensamento sem
+    fechar o de texto deixa dois blocos abertos ao mesmo tempo, e o
+    `content_block_stop` seguinte fecha o indice errado."""
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    t.feed({"choices": [{"delta": {"content": "Paris"}}]})
+    events = t.feed({"choices": [{"delta": {"reasoning_content": "repensando"}}]})
+    assert names(events) == ["content_block_stop", "content_block_start", "content_block_delta"]
+    assert events[0][1]["index"] == 0
+    assert events[1][1]["index"] == 1
+    assert events[1][1]["content_block"]["type"] == "thinking"
+
+
+def test_reasoning_after_a_tool_call_closes_the_tool_block_first():
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    t.feed(
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "f"}}]}}
+            ]
+        }
+    )
+    events = t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
+    assert names(events) == ["content_block_stop", "content_block_start", "content_block_delta"]
+    assert events[1][1]["content_block"]["type"] == "thinking"

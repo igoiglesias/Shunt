@@ -34,7 +34,7 @@ Deliberate leniency, matching `app.translate.to_anthropic`:
 from typing import Any
 
 from app.translate.ids import to_anthropic_id
-from app.translate.to_anthropic import STOP_REASONS
+from app.translate.to_anthropic import STOP_REASONS, reasoning_of
 
 Event = tuple[str, dict[str, Any]]
 
@@ -110,6 +110,22 @@ class OpenAIStreamToAnthropic:
         )
         return events
 
+    def _open_thinking(self) -> list[Event]:
+        events = self._close_block()
+        self._block_index += 1
+        self._open_kind = "thinking"
+        events.append(
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": self._block_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                },
+            )
+        )
+        return events
+
     def _open_tool(self, index: int, call: dict) -> list[Event]:
         events = self._close_block()
         self._block_index += 1
@@ -147,6 +163,25 @@ class OpenAIStreamToAnthropic:
             return events
         choice = choices[0]
         delta = choice.get("delta") or {}
+
+        # O pensamento e tratado antes do texto porque e assim que chega: o
+        # modelo raciocina e so depois responde. Se o texto abrisse o bloco
+        # primeiro, um chunk que trouxesse os dois campos juntos poria o
+        # `thinking_delta` dentro de um bloco de texto.
+        reasoning = reasoning_of(delta)
+        if reasoning:
+            if self._open_kind != "thinking":
+                events.extend(self._open_thinking())
+            events.append(
+                (
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": self._block_index,
+                        "delta": {"type": "thinking_delta", "thinking": reasoning},
+                    },
+                )
+            )
 
         text = delta.get("content")
         if text:

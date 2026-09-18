@@ -403,18 +403,18 @@ def test_tool_call_id_and_matching_tool_result_id_use_to_openai_id():
     assert tool_call_id == tool_result_id
 
 
-def test_cache_control_and_thinking_are_stripped_from_every_location():
+def test_cache_control_is_stripped_from_every_location():
+    """`cache_control` e uma instrucao de faturamento da Anthropic e nao tem
+    receptor do lado OpenAI; mandar adiante e enviar campo que ninguem le.
+
+    O bloco `thinking` JA NAO e descartado junto: ele tem receptor, o
+    `reasoning_content`, e o teste abaixo prende esse caminho."""
     out = convert(
         {
             "model": "m",
             "max_tokens": 10,
             "system": [{"type": "text", "text": "oi", "cache_control": {"type": "ephemeral"}}],
-            "messages": [
-                {
-                    "role": "assistant",
-                    "content": [{"type": "thinking", "thinking": "segredo"}],
-                }
-            ],
+            "messages": [{"role": "user", "content": "oi"}],
             "tools": [
                 {
                     "name": "read",
@@ -425,9 +425,7 @@ def test_cache_control_and_thinking_are_stripped_from_every_location():
             ],
         }
     )
-    dumped = json.dumps(out)
-    assert "segredo" not in dumped
-    assert "cache_control" not in dumped
+    assert "cache_control" not in json.dumps(out)
 
 
 def test_tool_choice_forced_tool_becomes_function_choice():
@@ -495,3 +493,109 @@ def test_several_tool_results_and_text_in_one_message_keep_tools_before_text():
     assert roles == ["tool", "tool", "tool", "user"]
     assert [m["content"] for m in out["messages"][:3]] == ["primeiro", "segundo", "terceiro"]
     assert out["messages"][3]["content"] == "e agora?"
+
+
+# --------------------------------------------------------------------------
+# O caminho de volta: bloco `thinking` do cliente vira `reasoning_content`
+# --------------------------------------------------------------------------
+
+
+def test_a_thinking_block_goes_back_up_as_reasoning_content():
+    """Turno dois de uma conversa: o cliente devolve o pensamento que o
+    proxy lhe entregou no turno um. Descarta-lo faz o modelo perder o proprio
+    raciocinio e recomecar, gastando token de novo pela mesma conclusao."""
+    out = anthropic_request_to_openai(
+        {
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": "oi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "pensei nisto"},
+                        {"type": "text", "text": "Paris"},
+                    ],
+                },
+            ],
+        },
+        "vendor/x",
+        4096,
+    )
+    assistant = out["messages"][-1]
+    assert assistant["content"] == "Paris"
+    assert assistant["reasoning_content"] == "pensei nisto"
+
+
+def test_an_assistant_turn_of_pure_thinking_still_produces_a_message():
+    """Antes, uma mensagem de assistente so com blocos `thinking` sumia
+    inteira, e um provedor que exige alternancia estrita user/assistant via
+    dois turnos de usuario seguidos."""
+    out = anthropic_request_to_openai(
+        {
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": "oi"},
+                {"role": "assistant", "content": [{"type": "thinking", "thinking": "so pensei"}]},
+                {"role": "user", "content": "e entao?"},
+            ],
+        },
+        "vendor/x",
+        4096,
+    )
+    assert [m["role"] for m in out["messages"]] == ["user", "assistant", "user"]
+    assert out["messages"][1]["reasoning_content"] == "so pensei"
+
+
+def test_thinking_alongside_a_tool_use_keeps_the_tool_call():
+    """O caso mais comum de um turno agentico: o modelo pensa e CHAMA uma
+    ferramenta na mesma mensagem. Tratar o pensamento como se a mensagem
+    fosse so pensamento descarta a chamada, e o loop de ferramenta morre
+    sem nenhum erro visivel."""
+    out = anthropic_request_to_openai(
+        {
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [
+                {"role": "user", "content": "clima?"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "preciso consultar"},
+                        {"type": "tool_use", "id": "toolu_1", "name": "clima", "input": {"c": "L"}},
+                    ],
+                },
+            ],
+        },
+        "vendor/x",
+        4096,
+    )
+    assistant = out["messages"][-1]
+    assert assistant["tool_calls"][0]["function"]["name"] == "clima"
+
+
+def test_an_empty_or_non_string_thinking_block_adds_no_reasoning_field():
+    """Bloco de pensamento vazio existe -- e o que a Anthropic emite quando o
+    orcamento de raciocinio e zero. Um `reasoning_content` vazio ou com
+    objeto dentro e campo que o provedor le como conteudo real."""
+    for vazio in ("", None, {"t": "x"}, []):
+        out = anthropic_request_to_openai(
+            {
+                "model": "m",
+                "max_tokens": 16,
+                "messages": [
+                    {"role": "user", "content": "oi"},
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "thinking", "thinking": vazio},
+                            {"type": "text", "text": "Paris"},
+                        ],
+                    },
+                ],
+            },
+            "vendor/x",
+            4096,
+        )
+        assert "reasoning_content" not in out["messages"][-1], vazio

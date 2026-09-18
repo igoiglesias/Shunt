@@ -268,3 +268,83 @@ def test_tool_arguments_valid_json_but_not_an_object_becomes_empty_input():
         "m",
     )
     assert out["content"][0]["input"] == {}
+
+
+# --------------------------------------------------------------------------
+# Raciocinio: `reasoning_content` do provedor vira bloco `thinking`
+# --------------------------------------------------------------------------
+
+
+def test_reasoning_content_becomes_a_thinking_block_before_the_text():
+    """Medido contra o llama.cpp local: um modelo de raciocinio devolve o
+    pensamento em `message.reasoning_content`, e descarta-lo apagava trabalho
+    que o cliente pagou em token. A ordem importa: a Anthropic emite o
+    pensamento ANTES da resposta, e um cliente que renderiza na ordem dos
+    blocos mostraria a conclusao antes do raciocinio se fosse ao contrario."""
+    out = openai_response_to_anthropic(
+        {
+            "id": "chatcmpl-1",
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "Paris",
+                        "reasoning_content": "A capital da Franca e Paris.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+        },
+        "claude-haiku-4-5",
+    )
+    assert [b["type"] for b in out["content"]] == ["thinking", "text"]
+    assert out["content"][0]["thinking"] == "A capital da Franca e Paris."
+    assert out["content"][1]["text"] == "Paris"
+
+
+def test_the_openrouter_spelling_of_the_same_field_is_read_too():
+    """`reasoning_content` e a grafia do llama.cpp e da DeepSeek; a OpenRouter
+    manda o mesmo conteudo em `reasoning`. Ler so uma das duas deixa metade
+    dos provedores sem pensamento."""
+    out = openai_response_to_anthropic(
+        {"choices": [{"message": {"content": "ok", "reasoning": "pensei"}}]},
+        "m",
+    )
+    assert out["content"][0] == {"type": "thinking", "thinking": "pensei"}
+
+
+def test_an_answer_with_no_reasoning_gains_no_empty_thinking_block():
+    out = openai_response_to_anthropic(
+        {"choices": [{"message": {"content": "ok", "reasoning_content": ""}}]}, "m"
+    )
+    assert [b["type"] for b in out["content"]] == ["text"]
+
+
+def test_reasoning_that_spent_the_whole_budget_still_answers_with_it():
+    """O caso que motivou isto, medido: com `max_tokens` curto o modelo gasta
+    tudo raciocinando, `content` volta vazio e o cliente recebia uma resposta
+    sem nada dentro. O pensamento agora responde por si."""
+    out = openai_response_to_anthropic(
+        {
+            "choices": [
+                {
+                    "message": {"content": "", "reasoning_content": "pensando ainda"},
+                    "finish_reason": "length",
+                }
+            ]
+        },
+        "m",
+    )
+    assert out["content"] == [{"type": "thinking", "thinking": "pensando ainda"}]
+    assert out["stop_reason"] == "max_tokens"
+
+
+def test_a_reasoning_field_that_is_not_a_string_is_ignored():
+    """Nem todo provedor manda texto puro nesse campo: ha quem mande objeto
+    ou lista. Sem a guarda, o valor entrava cru dentro de `thinking`, onde o
+    cliente espera string, e o erro so apareceria na renderizacao."""
+    for estranho in ({"texto": "pensei"}, ["pensei"], 7, True):
+        out = openai_response_to_anthropic(
+            {"choices": [{"message": {"content": "ok", "reasoning": estranho}}]}, "m"
+        )
+        assert [b["type"] for b in out["content"]] == ["text"], estranho

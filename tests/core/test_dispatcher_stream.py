@@ -1371,3 +1371,52 @@ async def test_the_attempt_number_is_in_the_trace(monkeypatch):
     assert f"free: recusou (attempt {MAX_ATTEMPTS})" in body
     # Nenhuma espera depois da ultima tentativa: nada mais vem depois dela.
     assert seen == list(range(1, MAX_ATTEMPTS))
+
+
+# --------------------------------------------------------------------------
+# Raciocinio tambem compromete o stream
+# --------------------------------------------------------------------------
+
+
+def test_a_reasoning_only_delta_commits_the_stream():
+    """Medido contra o llama.cpp: um modelo de raciocinio manda dezenas de
+    chunks de `reasoning_content` ANTES do primeiro caractere de texto. Com o
+    criterio antigo -- so `content` ou `tool_calls` -- todos eram descartados
+    aqui, antes de chegarem ao tradutor, e o cliente nunca via o pensamento.
+    Raciocinio e saida do modelo: quem o emite ja comecou a responder."""
+    assert is_first_valid_event({"choices": [{"delta": {"reasoning_content": "pen"}}]}) is True
+    assert is_first_valid_event({"choices": [{"delta": {"reasoning": "pen"}}]}) is True
+
+
+def test_an_empty_reasoning_field_does_not_commit_the_stream():
+    """`reasoning_content: ""` e `reasoning: null` sao o que um provedor manda
+    enquanto ainda nao produziu nada. Trata-los como inicio entregaria o
+    fallback de graca."""
+    assert is_first_valid_event({"choices": [{"delta": {"reasoning_content": ""}}]}) is False
+    assert is_first_valid_event({"choices": [{"delta": {"reasoning": None}}]}) is False
+
+
+@respx.mock
+async def test_a_stream_that_reasons_before_answering_delivers_the_thinking():
+    """O caminho inteiro, do chunk do provedor ao evento no cliente. E assim
+    que o llama.cpp responde: dezenas de chunks de raciocinio e so depois o
+    primeiro caractere de texto."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            text=(
+                'data: {"choices": [{"delta": {"reasoning_content": "pen"}}]}\n\n'
+                'data: {"choices": [{"delta": {"reasoning_content": "sando"}}]}\n\n'
+                'data: {"choices": [{"delta": {"content": "Paris"}}]}\n\n'
+                "data: [DONE]\n\n"
+            ),
+        )
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert '"type": "thinking"' in body
+    assert '"thinking": "pen"' in body
+    assert '"thinking": "sando"' in body
+    assert '"text": "Paris"' in body
+    # O bloco de pensamento fecha antes de o de texto abrir.
+    assert body.index("content_block_stop") < body.index('"type": "text"')
