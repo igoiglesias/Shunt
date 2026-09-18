@@ -39,6 +39,7 @@ def test_tool_messages_become_tool_result_blocks_in_a_user_message():
     assert message["role"] == "user"
     assert message["content"][0]["type"] == "tool_result"
     assert message["content"][0]["content"] == "conteudo"
+    assert message["content"][0]["tool_use_id"].startswith("toolu_")
 
 
 def test_tools_move_to_the_anthropic_schema():
@@ -64,6 +65,7 @@ def test_anthropic_answer_becomes_an_openai_completion():
     assert out["model"] == "gpt-4o"
     assert message["content"] == "vou ler"
     assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"path": "a"}
+    assert message["tool_calls"][0]["id"].startswith("call_")
     assert out["choices"][0]["finish_reason"] == "tool_calls"
     assert out["usage"]["prompt_tokens"] == 5
 
@@ -125,3 +127,23 @@ def test_system_message_in_the_middle_still_moves_to_the_root_field():
         {"role": "user", "content": "tudo bem?"}]}, "claude-fable-5-1", 4096)
     assert out["system"] == "seja breve"
     assert [m["role"] for m in out["messages"]] == ["user", "user"]
+
+
+def test_tool_arguments_valid_json_but_not_an_object_becomes_empty_input():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "read", "arguments": "[1, 2, 3]"}}]}]},
+        "claude-fable-5-1", 4096)
+    block = out["messages"][0]["content"][0]
+    assert block["input"] == {}
+
+
+def test_response_with_only_a_tool_use_block_has_no_text_content():
+    out = anthropic_response_to_openai({
+        "id": "msg_1", "model": "claude-fable-5-1", "stop_reason": "tool_use",
+        "content": [{"type": "tool_use", "id": "toolu_1", "name": "read",
+                     "input": {"path": "a"}}],
+        "usage": {"input_tokens": 5, "output_tokens": 9}}, "gpt-4o")
+    message = out["choices"][0]["message"]
+    assert message["content"] is None
