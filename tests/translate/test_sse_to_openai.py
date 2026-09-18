@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 from app.translate.sse_to_openai import AnthropicStreamToOpenAI
 
 
@@ -112,6 +114,42 @@ def test_content_block_delta_with_unrecognized_delta_type_produces_nothing():
     tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
     assert tr.feed("content_block_delta",
                     {"index": 0, "delta": {"type": "thinking_delta", "thinking": "hmm"}}) == []
+
+
+def test_every_chunk_carries_the_same_nonzero_created_timestamp():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = []
+    chunks += tr.feed("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+    chunks += tr.feed("content_block_delta",
+                       {"index": 0, "delta": {"type": "text_delta", "text": "hi"}})
+    chunks += tr.feed("content_block_start", {"index": 1, "content_block": {
+        "type": "tool_use", "id": "toolu_1", "name": "read"}})
+    chunks += tr.feed("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {}})
+    created_values = {c["created"] for c in chunks}
+    assert len(created_values) == 1
+    assert created_values.pop() > 0
+
+
+def test_created_is_captured_once_at_construction_not_per_chunk():
+    # A real clock advancing between calls would mask a "captured once"
+    # regression at test speed (the timestamps still match by luck). Force
+    # the clock to move between feed() calls so a per-chunk capture is
+    # caught deterministically.
+    with patch("app.translate.sse_to_openai.time.time", side_effect=[100.0, 200.0, 300.0]):
+        tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+        first = tr.feed("content_block_start", {"index": 0, "content_block": {
+            "type": "tool_use", "id": "toolu_1", "name": "read"}})
+        second = tr.feed("content_block_delta", {"index": 0, "delta": {
+            "type": "input_json_delta", "partial_json": "{}"}})
+    assert first[0]["created"] == 100
+    assert second[0]["created"] == 100
+
+
+def test_input_json_delta_for_a_block_that_was_never_opened_is_dropped():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = tr.feed("content_block_delta", {"index": 7, "delta": {
+        "type": "input_json_delta", "partial_json": '{"path"'}})
+    assert chunks == []
 
 
 def test_finish_is_idempotent():

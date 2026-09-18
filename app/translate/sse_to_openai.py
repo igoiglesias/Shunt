@@ -20,6 +20,11 @@ Deliberate leniency, matching the rest of `app.translate`:
 
 - `input_json_delta.partial_json` fragments are passed through verbatim,
   never parsed or repaired here.
+- An `input_json_delta` addressed at a block index that was never opened
+  (a dropped `content_block_start`, or a reordered stream) is dropped
+  rather than attached to an unrelated tool call -- corrupting one call's
+  arguments with another's fragments is worse than losing a fragment. The
+  SSE decoder already makes this call for a partial event.
 - An unrecognized `stop_reason` falls back to `FINISH_REASONS`'s implicit
   default of `"stop"`, imported from `app.translate.to_openai` rather than
   duplicated.
@@ -34,6 +39,7 @@ Deliberate leniency, matching the rest of `app.translate`:
   the interface again.
 """
 
+import time
 from typing import Any
 
 from app.translate.ids import to_openai_id
@@ -51,6 +57,10 @@ class AnthropicStreamToOpenAI:
     def __init__(self, requested_model: str, completion_id: str) -> None:
         self._model = requested_model
         self._id = completion_id
+        # Captured once, at construction, and reused on every chunk: a real
+        # provider stamps one `created` per completion, not one per chunk,
+        # and a stable value keeps the stream testable.
+        self._created = int(time.time())
         self._tool_index_of_block: dict[int, int] = {}
         self._next_tool_index = 0
         self._finished = False
@@ -61,6 +71,7 @@ class AnthropicStreamToOpenAI:
         payload: dict[str, Any] = {
             "id": self._id,
             "object": "chat.completion.chunk",
+            "created": self._created,
             "model": self._model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
@@ -98,7 +109,17 @@ class AnthropicStreamToOpenAI:
         if delta.get("type") == "text_delta":
             return [self._chunk({"content": delta.get("text", "")})]
         if delta.get("type") == "input_json_delta":
-            index = self._tool_index_of_block.get(data.get("index", 0), 0)
+            block_index = data.get("index", 0)
+            if block_index not in self._tool_index_of_block:
+                # No content_block_start ever opened this block index (a
+                # dropped event, or a reordered stream). Attaching the
+                # fragment to whatever tool call happens to own index 0
+                # would corrupt an unrelated call's arguments -- worse than
+                # losing the fragment. Same call the SSE decoder already
+                # makes: drop a partial event rather than emit a truncated
+                # one.
+                return []
+            index = self._tool_index_of_block[block_index]
             return [
                 self._chunk(
                     {
