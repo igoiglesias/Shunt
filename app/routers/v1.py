@@ -6,7 +6,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config.config import model_sources
 from app.schemas.anthropic import AnthropicRequest
 from app.schemas.openai import ChatCompletionRequest, CompletionRequest, EmbeddingRequest
-from app.tools.conversors import transform_anthropic_to_openai, transform_openai_to_anthropic
+from app.translate.to_anthropic import openai_response_to_anthropic
+from app.translate.to_openai import anthropic_request_to_openai
 
 router = APIRouter(
     prefix="/v1",
@@ -104,7 +105,7 @@ async def create_anthropic_message(
         raise HTTPException(status_code=401, detail="Header de autenticação ausente.")
 
     # Converte para formato OpenAI
-    openai_payload = transform_anthropic_to_openai(body)
+    openai_payload = anthropic_request_to_openai(body.model_dump(), body.model, 4096)
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -119,7 +120,7 @@ async def create_anthropic_message(
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
             # Traduz a resposta de volta antes de responder ao Claude Code
-            anthropic_response = transform_openai_to_anthropic(response.json())
+            anthropic_response = openai_response_to_anthropic(response.json(), body.model)
             return JSONResponse(content=anthropic_response)
 
         except httpx.RequestError as err:
