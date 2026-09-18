@@ -59,7 +59,11 @@ def test_no_matching_route_falls_back_to_default_rule():
     assert [c.alias for c in result.chain] == ["cheap"]
 
 
-def test_default_model_insertion_guard_skips_reinsertion_when_already_first():
+def test_default_model_not_duplicated_when_route_already_starts_with_it():
+    # This only asserts the observable chain has no duplicate. It still passes
+    # if the insertion guard itself is disabled, because the `seen` set alone
+    # absorbs the duplicate — the guard in isolation is covered by mutation
+    # testing, not by this test.
     settings = build([("opus", ["cheap", "free"])], default_model="cheap")
     chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
     assert chain == ["cheap", "free"]

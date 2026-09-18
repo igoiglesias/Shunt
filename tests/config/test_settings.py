@@ -5,19 +5,19 @@ from app.config.settings import ModelConfig, ProviderConfig, Settings
 
 
 def make_settings(**over):
-    base = dict(
-        providers={"openrouter": ProviderConfig(
+    base = {
+        "providers": {"openrouter": ProviderConfig(
             base_url="https://openrouter.ai/api/v1",
             protocol="openai",
             api_key_env="OPENROUTER_API_KEY",
         )},
-        models={"free": ModelConfig(
+        "models": {"free": ModelConfig(
             provider="openrouter", model="vendor/free",
             context_window=64000, max_output_tokens=8192,
         )},
-        routes=[("haiku", ["free"])],
-        default_model=None,
-    )
+        "routes": [("haiku", ["free"])],
+        "default_model": None,
+    }
     base.update(over)
     return Settings(**base)
 
@@ -33,6 +33,11 @@ def test_model_pointing_to_unknown_provider_fails_at_boot():
 def test_route_pointing_to_unknown_model_fails_at_boot():
     with pytest.raises(ValidationError, match="unknown model"):
         make_settings(routes=[("haiku", ["inexistente"])])
+
+
+def test_default_model_pointing_to_unknown_model_fails_at_boot():
+    with pytest.raises(ValidationError, match="default_model"):
+        make_settings(default_model="inexistente")
 
 
 def test_api_key_is_read_from_environment(monkeypatch):
