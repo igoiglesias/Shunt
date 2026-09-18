@@ -1,4 +1,5 @@
 import json
+import time
 
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_response_to_openai
@@ -117,6 +118,20 @@ def test_anthropic_answer_becomes_an_openai_completion():
     assert message["tool_calls"][0]["id"].startswith("call_")
     assert out["choices"][0]["finish_reason"] == "tool_calls"
     assert out["usage"]["prompt_tokens"] == 5
+
+
+def test_anthropic_answer_created_uses_a_real_timestamp_by_default():
+    before = int(time.time())
+    out = anthropic_response_to_openai({"id": "msg_1", "content": []}, "gpt-4o")
+    after = int(time.time())
+    assert before <= out["created"] <= after
+
+
+def test_anthropic_answer_created_is_injectable_for_determinism():
+    out = anthropic_response_to_openai(
+        {"id": "msg_1", "content": []}, "gpt-4o", clock=lambda: 1700000000.0
+    )
+    assert out["created"] == 1700000000
 
 
 # --- Additional coverage beyond the brief ---

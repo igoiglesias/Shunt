@@ -42,6 +42,8 @@ list on that side.
 """
 
 import json
+import time
+from collections.abc import Callable
 from typing import Any
 
 from app.translate.ids import to_openai_id
@@ -234,7 +236,9 @@ def _to_chatcmpl_id(raw_id: str | None) -> str:
     return f"chatcmpl-{suffix}" if suffix else "chatcmpl_shunt"
 
 
-def anthropic_response_to_openai(resp: dict, requested_model: str) -> dict:
+def anthropic_response_to_openai(
+    resp: dict, requested_model: str, clock: Callable[[], float] = time.time
+) -> dict:
     text_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     for block in resp.get("content") or []:
@@ -260,7 +264,7 @@ def anthropic_response_to_openai(resp: dict, requested_model: str) -> dict:
     return {
         "id": _to_chatcmpl_id(resp.get("id")),
         "object": "chat.completion",
-        "created": 0,
+        "created": int(clock()),
         "model": requested_model,
         "choices": [
             {
