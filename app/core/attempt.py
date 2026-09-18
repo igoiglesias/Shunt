@@ -1,0 +1,43 @@
+"""Pure policy for one upstream attempt: retry, skip, or accept.
+
+This module performs no I/O and holds no state. It only classifies the
+outcome of a single upstream call; the dispatcher (next task) owns the
+retry loop and interprets these decisions.
+"""
+
+import random
+from enum import Enum
+
+import httpx
+
+MAX_ATTEMPTS = 3
+RETRY_AFTER_BUDGET = 5.0
+TOTAL_DEADLINE = 120.0
+FIRST_EVENT_DEADLINE = 20.0
+
+
+class Outcome(Enum):
+    OK = "ok"
+    RETRY = "retry"
+    SKIP = "skip"
+
+
+def classify(status: int | None, exc: Exception | None, retry_after: float | None) -> Outcome:
+    if exc is not None:
+        return Outcome.RETRY if isinstance(exc, httpx.TransportError) else Outcome.SKIP
+    if status is None:
+        return Outcome.SKIP
+    if status < 400:
+        return Outcome.OK
+    if status == 429:
+        if retry_after is not None and retry_after <= RETRY_AFTER_BUDGET:
+            return Outcome.RETRY
+        return Outcome.SKIP
+    if status >= 500:
+        return Outcome.RETRY
+    return Outcome.SKIP
+
+
+def backoff(attempt: int) -> float:
+    base = min(2.0 ** (attempt - 1), 4.0)
+    return base + random.uniform(0, base / 2)
