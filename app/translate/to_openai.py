@@ -8,6 +8,28 @@ the assistant message and each result in its own separate message with
 `arguments` is a JSON string. Get any of that wrong and the provider either
 rejects the request or answers in prose while the harness waits for a tool
 call that never comes.
+
+Deliberate drops -- fields or shapes this translator does not carry across,
+and why:
+
+- `top_k` is dropped, not forwarded. It has no place in the OpenAI request
+  schema, and a strict target (`api.openai.com` included) rejects unknown
+  parameters outright -- forwarding it would turn a harmless sampling hint
+  into a failed request.
+- `metadata` is dropped. Nothing in the OpenAI request shape corresponds to
+  it, so there is nowhere to carry it and no receiver would read it.
+
+Known limitations -- behaviour that is intentionally left as-is, with its
+consequence stated so it is not mistaken for an oversight:
+
+- An image inside a `tool_result` is lost: `_result_text` keeps only text
+  blocks from a tool result's content list. A screenshot-returning tool
+  therefore reports an empty result to the model.
+- An assistant message made up only of `thinking` blocks (no text, no
+  tool_use) produces no output message at all -- `_convert_message` returns
+  an empty list for it. On a provider that enforces strict user/assistant
+  alternation, this can collapse two turns together and break that
+  alternation.
 """
 
 import json
