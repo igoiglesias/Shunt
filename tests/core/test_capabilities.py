@@ -100,3 +100,23 @@ def test_transparent_candidate_with_none_alias_never_filtered_even_when_unfit():
     kept, dropped = filter_chain([passthrough], req, SETTINGS)
     assert kept == [passthrough]
     assert dropped == []
+
+
+def test_estimate_tokens_counts_tools_not_just_messages():
+    payload = {
+        "messages": [{"role": "user", "content": "short"}],
+        "tools": [{"type": "function", "function": {"name": "f", "description": "x" * 5000}}],
+    }
+    req = requirements_of(payload)
+    kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
+    assert [c.alias for c in kept] == ["com_tools"]
+    assert dropped == [("curto", "context window too small")]
+
+
+def test_transparent_flag_bypasses_filter_even_with_an_unfit_real_alias():
+    req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
+    unfit_but_transparent = Candidate(alias="sem_tools", provider="openrouter", model="a",
+                                      protocol="openai", transparent=True)
+    kept, dropped = filter_chain([unfit_but_transparent], req, SETTINGS)
+    assert kept == [unfit_but_transparent]
+    assert dropped == []

@@ -15,8 +15,17 @@ class Requirements:
 
 def estimate_tokens(payload: dict) -> int:
     """Estimativa grosseira por caracteres. Serve para descartar candidato que
-    claramente não cabe, não para cobrança."""
-    return len(json.dumps(payload.get("messages", []), ensure_ascii=False)) // 4
+    claramente não cabe, não para cobrança.
+
+    Conta `messages` e `tools`: no pivô OpenAI o `system` já está dentro de
+    `messages`, mas o array `tools` (definições de função com schema JSON
+    completo) fica de fora se não for somado, e num harness de código ele
+    costuma ser boa parte do total real de tokens."""
+    text = json.dumps(
+        {"messages": payload.get("messages", []), "tools": payload.get("tools", [])},
+        ensure_ascii=False,
+    )
+    return len(text) // 4
 
 
 def _has_image(payload: dict) -> bool:
