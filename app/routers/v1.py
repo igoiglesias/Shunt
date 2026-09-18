@@ -25,6 +25,7 @@ from json import JSONDecodeError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from app.config.settings import Settings
 from app.core.dispatcher import (
@@ -36,6 +37,17 @@ from app.core.dispatcher import (
 )
 from app.core.resolver import UnknownProviderError, resolve
 from app.core.tokens import estimate_input_tokens
+from app.schemas.anthropic import (
+    AnthropicModelList,
+    AnthropicRequest,
+    CountTokensRequest,
+)
+from app.schemas.openai import (
+    ChatCompletionRequest,
+    CompletionRequest,
+    EmbeddingRequest,
+    OpenAIModelList,
+)
 
 router = APIRouter(prefix="/v1")
 
@@ -93,9 +105,36 @@ async def _json_object(request: Request) -> dict:
     return body
 
 
+def _validated(body: dict, schema: type[BaseModel]) -> dict:
+    """O corpo conferido contra o schema do dialeto, devolvido como dict.
+
+    `exclude_unset=True` e o que mantem o repasse fiel: sem ele todo default
+    declarado no schema entraria no corpo que sobe, e o provedor veria
+    parametro que o cliente nunca pediu -- `max_tokens` inventado, `stream`
+    falso onde nao havia `stream` nenhum.
+    """
+    try:
+        return schema(**body).model_dump(exclude_unset=True)
+    except ValidationError as err:
+        first = err.errors()[0]
+        field = ".".join(str(part) for part in first["loc"]) or "corpo"
+        raise BadBody(f"{field}: {first['msg']}") from err
+
+
+# Cada rota tem o schema do seu dialeto e do seu endpoint. A validacao aqui
+# nao estreita o que sobe: `extra="allow"` guarda o campo desconhecido e
+# `model_dump(exclude_unset=True)` devolve exatamente o que o cliente mandou.
+REQUEST_SCHEMAS: dict[tuple[str, str], type[BaseModel]] = {
+    ("anthropic", "messages"): AnthropicRequest,
+    ("openai", "chat"): ChatCompletionRequest,
+    ("openai", "completions"): CompletionRequest,
+    ("openai", "embeddings"): EmbeddingRequest,
+}
+
+
 async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool):
     try:
-        body = await _json_object(request)
+        body = _validated(await _json_object(request), REQUEST_SCHEMAS[(protocol, endpoint)])
     except BadBody as err:
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
@@ -148,7 +187,7 @@ async def count_tokens(request: Request):
     a estimativa local e uma resposta util, e um erro nao seria.
     """
     try:
-        body = await _json_object(request)
+        body = _validated(await _json_object(request), CountTokensRequest)
     except BadBody as err:
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
@@ -195,19 +234,12 @@ async def list_models(request: Request):
     entries = _model_entries(request.app.state.settings)
     # Uma instalacao sem nenhum modelo configurado: `entries[0]` estouraria, e
     # `first_id: null` e o que os dois parsers leem como "nao ha nada aqui".
+    # Os dois dialetos resolvem isso dentro do proprio schema; o superconjunto
+    # e uniao de formatos e nao tem schema, entao calcula aqui.
     first = entries[0]["id"] if entries else None
     protocol = detect_protocol(request.headers)
     if protocol == "anthropic":
-        return {
-            "data": [
-                {k: e[k] for k in ("type", "id", "display_name", "created_at")} for e in entries
-            ],
-            "has_more": False,
-            "first_id": first,
-        }
+        return AnthropicModelList.of(entries).model_dump()
     if protocol == "openai":
-        return {
-            "object": "list",
-            "data": [{k: e[k] for k in ("id", "object", "created", "owned_by")} for e in entries],
-        }
+        return OpenAIModelList.of(entries).model_dump()
     return {"object": "list", "data": entries, "has_more": False, "first_id": first}

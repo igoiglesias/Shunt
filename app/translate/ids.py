@@ -54,7 +54,7 @@ def to_openai_id(anthropic_id: str) -> str:
                 payload, checksum = combined[:-CHECKSUM_LEN], combined[-CHECKSUM_LEN:]
                 if hashlib.sha256(payload).digest()[:CHECKSUM_LEN] == checksum:
                     return payload.decode()
-        except ValueError, UnicodeDecodeError:
+        except (ValueError, UnicodeDecodeError):
             pass
     digest = hashlib.sha256(anthropic_id.encode()).hexdigest()[:24]
     return f"{OPENAI_PREFIX}{digest}"

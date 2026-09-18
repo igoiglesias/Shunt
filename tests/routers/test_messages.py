@@ -280,8 +280,14 @@ def test_count_tokens_falls_back_locally_when_the_anthropic_upstream_refuses():
 
 def test_count_tokens_on_an_unknown_model_is_an_anthropic_shaped_400():
     with client() as c:
-        response = c.post("/v1/messages/count_tokens", json={"model": "modelo-sem-dono"})
+        response = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "modelo-sem-dono", "messages": [{"role": "user", "content": "oi"}]},
+        )
     assert response.status_code == 400
     body = response.json()
     assert body["type"] == "error"
     assert body["error"]["type"] == "invalid_request_error"
+    # O 400 e o da resolucao, e nao o da validacao de corpo: o corpo aqui e
+    # valido, o que nao existe e o modelo.
+    assert "provider" in body["error"]["message"]

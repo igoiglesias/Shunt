@@ -1,4 +1,13 @@
-from app.translate.ids import to_anthropic_id, to_openai_id
+import base64
+import hashlib
+
+from app.translate.ids import (
+    ANTHROPIC_PREFIX,
+    CHECKSUM_LEN,
+    ENCODED_MARK,
+    to_anthropic_id,
+    to_openai_id,
+)
 
 
 def test_id_survives_two_full_turns():
@@ -89,3 +98,21 @@ def test_native_looking_id_that_decodes_cleanly_is_not_misread_as_encoded():
     result = to_openai_id(native_lookalike)
     assert result.startswith("call_")
     assert result == to_openai_id(native_lookalike)
+
+
+def test_a_payload_that_passes_the_checksum_but_is_not_utf8_falls_through():
+    # O outro lado do mesmo acidente: um id nativo cujo corpo decodifica
+    # como base64url valido E cujo checksum embutido bate, mas cujos bytes
+    # nao sao UTF-8. Aqui o `.decode()` levanta UnicodeDecodeError, e nao
+    # ValueError -- capturar so ValueError faz esse id derrubar a traducao
+    # com excecao em vez de cair no ramo deterministico. Construido com o
+    # mesmo checksum que `to_anthropic_id` usa, sobre bytes invalidos.
+    payload = b"\xff\xfe"
+    checksum = hashlib.sha256(payload).digest()[:CHECKSUM_LEN]
+    encoded = base64.urlsafe_b64encode(payload + checksum).decode().rstrip("=")
+    forged = f"{ANTHROPIC_PREFIX}{ENCODED_MARK}{encoded}"
+
+    result = to_openai_id(forged)
+
+    assert result.startswith("call_")
+    assert result == to_openai_id(forged)

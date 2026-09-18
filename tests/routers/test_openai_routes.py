@@ -120,7 +120,10 @@ def test_an_openai_client_gets_an_openai_shaped_error_not_an_anthropic_one():
 
 def test_an_unknown_model_on_an_openai_route_is_an_openai_shaped_400():
     with client() as c:
-        response = c.post("/v1/chat/completions", json={"model": "modelo-sem-dono"})
+        response = c.post(
+            "/v1/chat/completions",
+            json={"model": "modelo-sem-dono", "messages": [{"role": "user", "content": "oi"}]},
+        )
     assert response.status_code == 400
     body = response.json()
     assert "type" not in body

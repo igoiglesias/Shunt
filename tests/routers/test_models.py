@@ -48,6 +48,24 @@ def test_an_anthropic_agent_wins_over_a_bearer_token():
     )
 
 
+def test_an_api_key_wins_over_a_bearer_token_sent_alongside_it():
+    """Um gateway na frente do proxy pode repassar os dois cabecalhos. O
+    `x-api-key` e sinal exclusivo do dialeto Anthropic -- nenhum cliente
+    OpenAI legitimo o manda -- enquanto `Authorization: Bearer` sozinho e
+    ambiguo. Quem manda os dois esta se identificando como Anthropic."""
+    assert (
+        detect_protocol({"x-api-key": "sk-ant-x", "authorization": "Bearer sk-openai"})
+        == "anthropic"
+    )
+
+
+def test_a_bearer_token_alone_is_still_read_as_openai():
+    """A contraparte da assercao acima: sem o sinal inequivoco, o bearer
+    sozinho continua valendo como OpenAI. Sem este par, inverter a ordem da
+    deteccao passaria despercebido em uma das duas direcoes."""
+    assert detect_protocol({"authorization": "Bearer sk-openai"}) == "openai"
+
+
 def test_models_answers_anthropic_shape_for_an_anthropic_caller():
     with client() as c:
         body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()

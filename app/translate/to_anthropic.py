@@ -38,6 +38,7 @@ detail.
 import json
 from typing import Any
 
+from app.schemas.anthropic import AnthropicErrorResponse
 from app.translate.ids import to_anthropic_id
 
 STOP_REASONS = {
@@ -124,7 +125,4 @@ def openai_response_to_anthropic(resp: dict, requested_model: str) -> dict:
 
 
 def openai_error_to_anthropic(status: int, message: str) -> dict:
-    return {
-        "type": "error",
-        "error": {"type": ERROR_TYPES.get(status, "api_error"), "message": message},
-    }
+    return AnthropicErrorResponse.of(ERROR_TYPES.get(status, "api_error"), message).model_dump()

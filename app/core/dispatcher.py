@@ -44,6 +44,7 @@ from app.core.attempt import (
 from app.core.capabilities import filter_chain, requirements_of
 from app.core.resolver import Candidate, resolve
 from app.core.upstream import UpstreamPool
+from app.schemas.openai import OpenAIErrorResponse
 from app.translate.sse_parse import SSEDecoder, SSEEvent
 from app.translate.sse_to_anthropic import OpenAIStreamToAnthropic
 from app.translate.sse_to_openai import AnthropicStreamToOpenAI
@@ -97,14 +98,9 @@ def error_body(protocol: str, status: int, message: str) -> dict:
     """
     if protocol == "anthropic":
         return openai_error_to_anthropic(status, message)
-    return {
-        "error": {
-            "message": message,
-            "type": OPENAI_ERROR_TYPES.get(status, _openai_fallback_type(status)),
-            "param": None,
-            "code": None,
-        }
-    }
+    return OpenAIErrorResponse.of(
+        OPENAI_ERROR_TYPES.get(status, _openai_fallback_type(status)), message
+    ).model_dump()
 
 
 def _openai_fallback_type(status: int) -> str:
