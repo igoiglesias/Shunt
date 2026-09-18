@@ -59,10 +59,16 @@ def test_no_matching_route_falls_back_to_default_rule():
     assert [c.alias for c in result.chain] == ["cheap"]
 
 
-def test_chain_deduplicates_candidate_that_equals_the_default_model():
+def test_default_model_insertion_guard_skips_reinsertion_when_already_first():
     settings = build([("opus", ["cheap", "free"])], default_model="cheap")
     chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
     assert chain == ["cheap", "free"]
+
+
+def test_seen_set_dedups_repeated_alias_within_a_route():
+    settings = build([("opus", ["free", "cheap", "free"])])
+    chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
+    assert chain == ["free", "cheap"]
 
 
 def test_no_rule_and_no_default_falls_back_to_transparent():
