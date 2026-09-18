@@ -1,5 +1,6 @@
 import httpx
 
+from app.core import attempt
 from app.core.attempt import MAX_ATTEMPTS, RETRY_AFTER_BUDGET, Outcome, backoff, classify
 
 
@@ -60,6 +61,17 @@ def test_non_transport_exception_skips():
     assert classify(None, ValueError("boom"), None) is Outcome.SKIP
 
 
+def test_no_status_and_no_exception_skips():
+    # `classify` is called from `dispatch` as
+    # `classify(response.status_code if response else None, exc, ...)`, where
+    # exactly one of `response`/`exc` is ever set. But `classify` is a public,
+    # exception-less pure function -- its own contract for the "nothing to
+    # go on" input must hold regardless of what its only caller happens to
+    # pass. Flipping `status is None: return SKIP` to `return RETRY` should
+    # fail here even though it can never fire through `dispatch` today.
+    assert classify(None, None, None) is Outcome.SKIP
+
+
 def test_backoff_stays_bounded_well_past_max_attempts():
     assert backoff(10) <= 6.0
 
@@ -67,3 +79,18 @@ def test_backoff_stays_bounded_well_past_max_attempts():
 def test_backoff_is_not_deterministic_across_calls():
     samples = {backoff(2) for _ in range(20)}
     assert len(samples) > 1
+
+
+def test_backoff_floor_is_exactly_the_exponential_base(monkeypatch):
+    # The growth/bound tests above only compare backoff() across attempts and
+    # against an upper bound; both use real jitter, so they cannot catch a
+    # mutation that drops the `base +` term (e.g. `return
+    # random.uniform(0, base / 2)`), which shrinks the floor from `base` to 0
+    # while still growing and staying bounded. Pinning `random.uniform` to
+    # always return 0 makes the exponential base itself the assertion.
+    monkeypatch.setattr(attempt.random, "uniform", lambda _lo, _hi: 0.0)
+    assert backoff(1) == 1.0
+    assert backoff(2) == 2.0
+    assert backoff(3) == 4.0
+    # The cap: attempt 10 would be 2**9 uncapped, but `min(..., 4.0)` holds it.
+    assert backoff(10) == 4.0
