@@ -43,7 +43,7 @@ models = {
     },
     "free": {
         "provider": "openrouter",
-        "model": "deepseek/deepseek-chat-v3-0324:free",
+        "model": "openrouter/free",
         "supports": {"tools": True, "streaming": True, "vision": False},
         "context_window": 64000,
         "max_output_tokens": 8192,
@@ -53,6 +53,10 @@ models = {
 # Os tres nomes que o Claude Code pede. O padrao casa por substring, entao
 # `haiku` pega `claude-haiku-4-5` e qualquer outra versao do mesmo porte.
 routes = [
+    # Escotilha para forcar o remoto: o alias do modelo tambem e um padrao de
+    # rota, entao `model: "free"` sobe direto para o OpenRouter, sem passar
+    # pelo local. Serve para conferir a cadeia de fallback sem derrubar nada.
+    ("free", ["free"]),
     ("haiku", ["qwen-local", "free"]),
     ("sonnet", ["qwen-local", "free"]),
     ("opus", ["qwen-local", "free"]),
