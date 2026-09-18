@@ -12,3 +12,24 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "uvicorn[standard]>=0.53.0",
 ]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.16.1",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+    "ruff>=0.16.8",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.14"
+ignore_missing_imports = true
