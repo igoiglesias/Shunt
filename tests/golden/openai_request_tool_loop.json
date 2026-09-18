@@ -1,0 +1,57 @@
+{
+  "model": "vendor/free",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a careful coding assistant."
+    },
+    {
+      "role": "user",
+      "content": "What is the current time in Tokyo?"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me check that for you.",
+      "tool_calls": [
+        {
+          "id": "call_8878795742a5ff5a3ca7e3c5",
+          "type": "function",
+          "function": {
+            "name": "get_time",
+            "arguments": "{\"timezone\": \"Asia/Tokyo\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_8878795742a5ff5a3ca7e3c5",
+      "content": "2026-09-18T21:04:00+09:00"
+    },
+    {
+      "role": "user",
+      "content": "Thanks, please format that nicely."
+    }
+  ],
+  "max_tokens": 1024,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_time",
+        "description": "Get the current time in a given IANA timezone.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "timezone": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "timezone"
+          ]
+        }
+      }
+    }
+  ]
+}

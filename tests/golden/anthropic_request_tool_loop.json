@@ -1,0 +1,51 @@
+{
+  "model": "claude-opus-4-5",
+  "max_tokens": 1024,
+  "system": "You are a careful coding assistant.",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "text", "text": "What is the current time in Tokyo?"}
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "Let me check that for you."},
+        {
+          "type": "tool_use",
+          "id": "toolu_01A2B3C4D5E6F7G8H9J0K1L2",
+          "name": "get_time",
+          "input": {"timezone": "Asia/Tokyo"}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A2B3C4D5E6F7G8H9J0K1L2",
+          "content": [
+            {"type": "text", "text": "2026-09-18T21:04:00+09:00"}
+          ]
+        },
+        {"type": "text", "text": "Thanks, please format that nicely."}
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "name": "get_time",
+      "description": "Get the current time in a given IANA timezone.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "timezone": {"type": "string"}
+        },
+        "required": ["timezone"]
+      }
+    }
+  ]
+}

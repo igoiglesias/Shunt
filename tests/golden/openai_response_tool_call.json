@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-9f8g7h6j5k4l3m2n1",
+  "object": "chat.completion",
+  "created": 1758000000,
+  "model": "vendor/free",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "The time in Tokyo is 9:04 PM.",
+        "tool_calls": [
+          {
+            "id": "call_8878795742a5ff5a3ca7e3c5",
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "arguments": "{\"timezone\": \"Asia/Tokyo\"}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 512,
+    "completion_tokens": 37,
+    "total_tokens": 549
+  }
+}

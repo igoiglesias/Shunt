@@ -1,0 +1,26 @@
+{
+  "id": "msg-9f8g7h6j5k4l3m2n1",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "The time in Tokyo is 9:04 PM."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_sY2FsbF84ODc4Nzk1NzQyYTVmZjVhM2NhN2UzYzX8aZLs",
+      "name": "get_time",
+      "input": {
+        "timezone": "Asia/Tokyo"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 512,
+    "output_tokens": 37
+  }
+}
