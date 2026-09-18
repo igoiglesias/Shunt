@@ -192,3 +192,93 @@ def test_finish_is_idempotent():
     tr.feed("content_block_start", {"index": 0, "content_block": {"type": "text"}})
     assert tr.finish() == []
     assert tr.finish() == []
+
+
+# --- Task 20 gate: mutation-sweep survivors -----------------------------
+
+
+def test_input_json_delta_at_block_zero_never_opened_is_dropped():
+    """Same as test_input_json_delta_for_a_block_that_was_never_opened_is_dropped
+    but at block index 0 specifically -- block index 0 is the dict key a
+    pre-seeded (or otherwise wrongly-initialised) _tool_index_of_block would
+    most plausibly already contain, which an index-7 test can't catch."""
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = tr.feed(
+        "content_block_delta",
+        {"index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path"'}},
+    )
+    assert chunks == []
+
+
+def test_the_first_choice_carries_index_zero():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = tr.feed(
+        "content_block_start",
+        {"index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read"}},
+    )
+    assert chunks[0]["choices"][0]["index"] == 0
+
+
+def test_content_block_start_with_no_index_key_defaults_to_block_zero():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    tr.feed(
+        "content_block_start",
+        {"content_block": {"type": "tool_use", "id": "toolu_1", "name": "read"}},
+    )
+    chunks = tr.feed(
+        "content_block_delta",
+        {"index": 0, "delta": {"type": "input_json_delta", "partial_json": "{}"}},
+    )
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_tool_use_block_missing_id_and_name_gets_empty_defaults():
+    from app.translate.ids import to_openai_id
+
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = tr.feed("content_block_start", {"index": 0, "content_block": {"type": "tool_use"}})
+    call = chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+    assert call["function"]["name"] == ""
+    assert call["id"] == to_openai_id("")
+    assert call["type"] == "function"
+    assert call["function"]["arguments"] == ""
+
+
+def test_content_block_delta_with_no_delta_key_produces_nothing():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    assert tr.feed("content_block_delta", {"index": 0}) == []
+
+
+def test_text_delta_with_no_text_key_defaults_to_empty_string():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    tr.feed("content_block_start", {"index": 0, "content_block": {"type": "text"}})
+    chunks = tr.feed("content_block_delta", {"index": 0, "delta": {"type": "text_delta"}})
+    assert chunks[0]["choices"][0]["delta"]["content"] == ""
+
+
+def test_content_block_delta_with_no_index_key_targets_block_zero():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    tr.feed(
+        "content_block_start",
+        {"index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read"}},
+    )
+    chunks = tr.feed(
+        "content_block_delta", {"delta": {"type": "input_json_delta", "partial_json": "{}"}}
+    )
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_message_delta_with_no_delta_key_defaults_stop_reason_to_end_turn():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    chunks = tr.feed("message_delta", {"usage": {"output_tokens": 3}})
+    assert chunks[0]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_input_json_delta_with_no_partial_json_key_defaults_to_empty_string():
+    tr = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    tr.feed(
+        "content_block_start",
+        {"index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "read"}},
+    )
+    chunks = tr.feed("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta"}})
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == ""
