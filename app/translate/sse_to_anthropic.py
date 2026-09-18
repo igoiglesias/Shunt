@@ -40,7 +40,13 @@ Event = tuple[str, dict[str, Any]]
 
 
 class OpenAIStreamToAnthropic:
-    """Stateful translator: one instance per in-flight stream."""
+    """Stateful translator: one instance per in-flight stream.
+
+    `finish()` is safe to call more than once: only the first call emits
+    events (the dispatcher may call it both at the natural end of the loop
+    and again from a `finally` guarding the crash path; the second call is
+    a no-op rather than a second message_delta/message_stop).
+    """
 
     def __init__(self, requested_model: str, message_id: str) -> None:
         self._model = requested_model
@@ -51,6 +57,7 @@ class OpenAIStreamToAnthropic:
         self._open_tool_index: int | None = None
         self._stop_reason = "end_turn"
         self._usage = {"input_tokens": 0, "output_tokens": 0}
+        self._finished = False
 
     def _start(self) -> list[Event]:
         if self._started:
@@ -182,6 +189,9 @@ class OpenAIStreamToAnthropic:
         return events
 
     def finish(self) -> list[Event]:
+        if self._finished:
+            return []
+        self._finished = True
         events: list[Event] = self._start()
         events.extend(self._close_block())
         events.append(

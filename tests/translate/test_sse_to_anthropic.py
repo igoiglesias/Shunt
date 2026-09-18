@@ -140,6 +140,15 @@ def test_usage_arriving_in_its_own_final_chunk_with_no_choices():
     assert delta["usage"]["output_tokens"] == 7
 
 
+def test_finish_is_idempotent_second_call_emits_nothing():
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    tr.feed({"choices": [{"delta": {"content": "oi"}}]})
+    first = tr.finish()
+    assert names(first) == ["content_block_stop", "message_delta", "message_stop"]
+    second = tr.finish()
+    assert second == []
+
+
 def test_finish_after_partial_stream_that_opened_a_block_but_never_closed_it():
     tr = OpenAIStreamToAnthropic("m", "msg_1")
     tr.feed({"choices": [{"delta": {"tool_calls": [
