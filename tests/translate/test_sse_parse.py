@@ -132,3 +132,23 @@ def test_bare_field_name_with_no_colon_is_not_mistaken_for_a_field():
     fieldless block into a phantom event."""
     events = SSEDecoder().feed(b'data\n\n')
     assert events == []
+
+
+def test_bare_cr_line_endings():
+    """Some old-style / non-conforming providers use a lone '\\r' as the
+    line terminator, with no '\\n' at all. This is a separate normalization
+    step from CRLF ('\\r\\n') -- the CRLF test alone does not exercise it,
+    since the CRLF replacement fully consumes every '\\r' in that fixture
+    before the bare-'\\r' replacement ever runs."""
+    events = SSEDecoder().feed(b'data: {"a": 1}\r\r')
+    assert events[0].data == '{"a": 1}'
+
+
+def test_event_with_no_data_field_at_all_is_emitted_with_empty_data():
+    """A named event with no `data:` line (e.g. a provider 'ping' keep-alive
+    sent as a named event rather than a comment) is a legitimate SSE event,
+    not a fieldless block to discard: `name` is present even though `data`
+    never was. The streaming dispatcher must see it, with data=='', rather
+    than have it silently swallowed."""
+    events = SSEDecoder().feed(b'event: ping\n\n')
+    assert [(e.event, e.data) for e in events] == [("ping", "")]
