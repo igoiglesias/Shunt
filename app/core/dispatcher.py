@@ -82,6 +82,11 @@ class ShuntResult:
 
 def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
     if candidate.transparent:
+        # The client's own credentials go verbatim to whatever `base_url` this
+        # provider entry names. That is the user's declared intent: they wrote
+        # the entry. Do not read a protocol mismatch as evidence that the
+        # destination is Anthropic -- `ProviderConfig.protocol` is free, so a
+        # provider named `anthropic` may well be an OpenAI-compatible gateway.
         return {k: v for k, v in req.headers.items() if k.lower() not in TRANSPARENT_DROP}
     key = settings.api_key(candidate.provider)
     headers = {"content-type": "application/json"}
@@ -99,17 +104,34 @@ def _cap(candidate: Candidate, settings: Settings) -> int:
     return DEFAULT_MAX_OUTPUT_TOKENS
 
 
+def _transparent_cap(req: ShuntRequest) -> int:
+    """The ceiling for a transparent translation is the CLIENT's own number.
+
+    Byte-transparency is already gone the moment `PATHS` re-addresses the
+    request to the provider's own path: once the URL is the provider's, the
+    body has to be the provider's shape too. What stays transparent is that we
+    contribute no alias configuration and no credential of ours. So the cap
+    handed to the translator must be the client's `max_tokens` -- the
+    translators clamp with `min(body_value, cap)`, and passing `_cap()` here
+    would return `DEFAULT_MAX_OUTPUT_TOKENS` for `alias=None` and silently cut
+    a client's 999999 down to 4096.
+    """
+    raw = req.body.get("max_tokens")
+    return int(raw) if isinstance(raw, int | float) else DEFAULT_MAX_OUTPUT_TOKENS
+
+
 def _payload(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
-    if candidate.transparent:
-        # No candidate configuration exists here and no ceiling of ours applies:
-        # the client's own number is the only one we are entitled to send.
-        return {**req.body, "model": candidate.model}
     if candidate.protocol == req.protocol:
         out = {**req.body, "model": candidate.model}
-        if candidate.alias and out.get("max_tokens") is not None:
-            out["max_tokens"] = min(int(out["max_tokens"]), _cap(candidate, settings))
+        raw = out.get("max_tokens")
+        # Not in transparent mode: no candidate configuration exists there and
+        # the client's number is not ours to rewrite. A non-numeric value is
+        # left untouched on purpose, so the provider answers with its own 400
+        # instead of us skipping the candidate over a coercion error.
+        if not candidate.transparent and candidate.alias and isinstance(raw, int | float):
+            out["max_tokens"] = min(int(raw), _cap(candidate, settings))
         return out
-    cap = _cap(candidate, settings)
+    cap = _transparent_cap(req) if candidate.transparent else _cap(candidate, settings)
     if req.protocol == "anthropic":
         return anthropic_request_to_openai(req.body, candidate.model, cap)
     return openai_request_to_anthropic(req.body, candidate.model, cap)
@@ -153,14 +175,21 @@ def _error_message(response: httpx.Response) -> str:
 
 async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) -> ShuntResult:
     resolution = resolve(req.body.get("model", ""), settings)
+    probe_note: list[str] = []
     try:
         probe = _payload(req, resolution.chain[0], settings)
-    except Exception:  # noqa: BLE001 - a translator that cannot render the probe
-        # must not decide the whole request. The untranslated body is a worse
-        # estimate, not a fatal one, and a later candidate may take it as-is.
+    except Exception as err:  # noqa: BLE001 - a translator that cannot render the
+        # probe must not decide the whole request. The untranslated body is a
+        # worse estimate, not a fatal one, and a later candidate may take it
+        # as-is. It is still recorded: if `chain[0]` is then dropped by the
+        # capability filter, this is the only evidence the probe ever failed.
+        first = resolution.chain[0]
         probe = req.body
+        probe_note = [
+            f"probe ({first.alias or first.model}): request translation failed: {err}"
+        ]
     chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
-    trace = [f"{alias}: {reason}" for alias, reason in dropped]
+    trace = probe_note + [f"{alias}: {reason}" for alias, reason in dropped]
 
     if not chain:
         return ShuntResult(400, openai_error_to_anthropic(
@@ -197,15 +226,18 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
                 response.status_code if response else None, exc, _retry_after(response))
             if outcome is Outcome.OK and response is not None:
                 try:
-                    raw = response.json()
-                except ValueError:
-                    # A 2xx whose body is not JSON -- an HTML page from an
-                    # interposed gateway, a truncated response. The error path
-                    # was already lenient about this; the success path was not.
-                    last_status, last_message = 502, "upstream 2xx body is not JSON"
+                    data = _translate_response(response.json(), req, candidate)
+                except Exception:  # noqa: BLE001 - a 2xx we cannot read or cannot
+                    # shape is this candidate's failure, not the request's. Not
+                    # JSON at all (an HTML page from an interposed gateway, a
+                    # truncated response) and JSON of the wrong shape (a list, a
+                    # scalar, `null`) fail in different places and mean the same
+                    # thing to the caller. The error path was already lenient
+                    # about exactly this; the success path was not.
+                    last_status = 502
+                    last_message = "upstream 2xx body is not a usable JSON object"
                     trace.append(f"{label}: unreadable body (attempt {attempt})")
                     break
-                data = _translate_response(raw, req, candidate)
                 return ShuntResult(response.status_code, data, candidate.model, trace)
             if response is not None:
                 last_status, last_message = response.status_code, _error_message(response)

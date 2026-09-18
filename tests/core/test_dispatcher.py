@@ -205,7 +205,7 @@ def test_outbound_headers_routed_without_a_configured_key_sends_no_credential():
     assert headers == {"content-type": "application/json"}
 
 
-def test_outbound_headers_transparent_drops_exactly_three_headers():
+def test_outbound_headers_transparent_drops_exactly_the_listed_headers():
     candidate = Candidate(alias=None, provider="anthropic", model="m",
                           protocol="anthropic", transparent=True)
     headers = outbound_headers(ShuntRequest("anthropic", BODY, {"Host": "x", "Content-Length": "1",
@@ -561,7 +561,7 @@ async def test_every_2xx_body_that_is_not_json_exhausts_the_chain_with_502():
         await pool.aclose()
     assert route.call_count == 2
     assert result.status == 502
-    assert "not JSON" in result.body["error"]["message"]
+    assert "not a usable JSON object" in result.body["error"]["message"]
 
 
 @respx.mock
@@ -673,7 +673,10 @@ async def test_the_probe_degrades_to_the_untranslated_body_instead_of_raising():
     assert openai_route.call_count == 0
     assert anthropic_route.call_count == 1
     assert result.real_model == "claude-a"
-    assert result.trace == ["cego: no vision support"]
+    # O probe falhou e deixou rastro: sem essa linha, um `chain[0]` descartado
+    # depois pelo filtro apagaria toda a evidencia de que ele falhou.
+    assert result.trace[0].startswith("probe (cego): request translation failed:")
+    assert result.trace[1:] == ["cego: no vision support"]
 
 
 PATH_SETTINGS = Settings(
@@ -819,21 +822,147 @@ def test_chain_exhausted_documents_that_dispatch_never_raises_it():
     assert "never raised" in ChainExhausted.__doc__.lower()
 
 
+GATEWAY = Settings(
+    providers={"anthropic": ProviderConfig(base_url="https://gateway.exemplo/v1",
+                                           protocol="openai", api_key_env="SHUNT_TEST_KEY")},
+    models={}, routes=[], default_model=None,
+)
+
+
 @respx.mock
-async def test_transparent_mode_never_translates_the_request_even_across_protocols():
-    """O repasse e repasse: mesmo quando o protocolo do cliente difere do
-    provedor, o corpo do cliente sai como veio, com o modelo reescrito. Sem o
-    retorno antecipado do modo transparente ele seria traduzido."""
-    route = respx.post("https://api.anthropic.test/v1/messages").mock(
-        return_value=httpx.Response(200, json={
-            "id": "msg_1", "model": "claude-sonnet-9", "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": "ok"}], "usage": {}}))
-    body = {"model": "claude-sonnet-9", "max_tokens": 999999,
-            "messages": [{"role": "user", "content": "oi"}]}
-    pool = UpstreamPool(TRANSPARENT)
+async def test_transparent_across_protocols_translates_both_halves(monkeypatch):
+    """Um `provider` chamado `anthropic` pode perfeitamente declarar
+    `protocol: "openai"` — e apontar nomes `claude-*` para um gateway
+    compativel com a OpenAI e algo normal de querer. `PATHS` ja re-enderecou a
+    requisicao para `/chat/completions`; mandar o corpo Anthropic cru para la e
+    um 400 garantido. As duas metades traduzem."""
+    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
+    route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5")))
+    body = {"model": "claude-opus-4-5", "max_tokens": 999999,
+            "system": "seja breve",
+            "messages": [{"role": "user", "content": "oi"},
+                         {"role": "assistant",
+                          "content": [{"type": "tool_use", "id": "toolu_1", "name": "ls",
+                                       "input": {"path": "/"}}]}]}
+    pool = UpstreamPool(GATEWAY)
     try:
-        await dispatch(ShuntRequest("openai", body, {}), TRANSPARENT, pool)
+        result = await dispatch(
+            ShuntRequest("anthropic", body, dict(CLIENT_HEADERS)), GATEWAY, pool)
     finally:
         await pool.aclose()
     import json as _json
-    assert _json.loads(route.calls[0].request.content) == body
+    sent = _json.loads(route.calls[0].request.content)
+    # Ida traduzida para a forma OpenAI: `system` vira mensagem, e o bloco
+    # `tool_use` vira `tool_calls` com `arguments` em string JSON.
+    assert "system" not in sent
+    assert sent["messages"][0] == {"role": "system", "content": "seja breve"}
+    assert sent["messages"][-1]["tool_calls"][0]["function"] == {
+        "name": "ls", "arguments": '{"path": "/"}'}
+    assert sent["model"] == "claude-opus-4-5"
+    # Volta traduzida de volta para a forma Anthropic.
+    assert result.status == 200
+    assert result.body["type"] == "message"
+    assert result.body["content"] == [{"type": "text", "text": "pronto"}]
+
+
+@respx.mock
+async def test_transparent_translation_uses_the_clients_cap_not_our_default(monkeypatch):
+    """O que continua transparente e nao contribuirmos configuracao nem
+    credencial nossa. Passar `_cap()` aqui devolveria DEFAULT_MAX_OUTPUT_TOKENS
+    para `alias=None` e cortaria os 999999 do cliente para 4096 em silencio."""
+    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
+    route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5")))
+    body = {"model": "claude-opus-4-5", "max_tokens": 999999,
+            "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(GATEWAY)
+    try:
+        await dispatch(ShuntRequest("anthropic", body, {}), GATEWAY, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content)["max_tokens"] == 999999
+
+
+@respx.mock
+async def test_transparent_credentials_go_verbatim_to_the_declared_base_url(monkeypatch):
+    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
+    route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5")))
+    body = {"model": "claude-opus-4-5", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(GATEWAY)
+    try:
+        await dispatch(ShuntRequest("anthropic", body, dict(CLIENT_HEADERS)), GATEWAY, pool)
+    finally:
+        await pool.aclose()
+    sent = route.calls[0].request.headers
+    assert sent["x-api-key"] == "sk-do-cliente"
+    assert sent["authorization"] == "Bearer oauth-da-assinatura"
+    assert "sk-da-config" not in str(dict(sent))
+
+
+def test_transparent_cap_falls_back_to_the_default_when_the_client_sends_none():
+    import app.core.dispatcher as dispatcher
+
+    assert dispatcher._transparent_cap(
+        ShuntRequest("anthropic", {"messages": []}, {})) == dispatcher.DEFAULT_MAX_OUTPUT_TOKENS
+    assert dispatcher._transparent_cap(
+        ShuntRequest("anthropic", {"max_tokens": "muitos"}, {})
+    ) == dispatcher.DEFAULT_MAX_OUTPUT_TOKENS
+    assert dispatcher._transparent_cap(
+        ShuntRequest("anthropic", {"max_tokens": 777}, {})) == 777
+
+
+@respx.mock
+@pytest.mark.parametrize("payload", [["lista"], None, 7, "texto"])
+async def test_a_2xx_whose_json_is_not_an_object_falls_through_to_the_next_candidate(payload):
+    """Passa pelo `response.json()` e so entao quebra dentro do tradutor, que
+    faz `resp.get(...)` num nao-dicionario. Mesma classe do corpo ilegivel."""
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=[httpx.Response(200, json=payload),
+                     httpx.Response(200, json=ok_payload("vendor/cheap"))])
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 2
+    assert result.real_model == "vendor/cheap"
+    assert "free: unreadable body (attempt 1)" in result.trace
+
+
+@respx.mock
+async def test_a_non_numeric_max_tokens_is_left_for_the_provider_to_reject():
+    """A pinca do passthrough coage com `int()`. Um valor nao numerico e
+    deixado como veio de proposito: o provedor responde o proprio 400, em vez
+    de a gente pular o candidato por um erro de coercao."""
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "max_tokens invalido"}}))
+    pool = UpstreamPool(ANTHROPIC_PAIR)
+    try:
+        result = await dispatch(
+            ShuntRequest("anthropic", {**BODY, "max_tokens": "muitos"}, {}), ANTHROPIC_PAIR, pool)
+    finally:
+        await pool.aclose()
+    import json as _json
+    assert _json.loads(route.calls[0].request.content)["max_tokens"] == "muitos"
+    assert result.status == 400
+    assert "max_tokens invalido" in result.body["error"]["message"]
+    assert route.call_count == 2
+
+
+def test_a_transparent_candidate_with_an_alias_still_keeps_the_clients_max_tokens():
+    """`resolver._transparent` so produz `alias=None`, mas a regra nao e "sem
+    alias" e sim "em modo transparente nao reescrevemos o numero do cliente".
+    Um candidato transparente construido com alias prova qual das duas o codigo
+    esta aplicando — o mesmo par que `test_capabilities` ja fixa no filtro."""
+    import app.core.dispatcher as dispatcher
+
+    candidate = Candidate(alias="free", provider="openrouter", model="vendor/free",
+                          protocol="anthropic", transparent=True)
+    payload = dispatcher._payload(
+        ShuntRequest("anthropic", {**BODY, "max_tokens": 999999}, {}), candidate, SETTINGS)
+    assert payload["max_tokens"] == 999999
+    assert payload["model"] == "vendor/free"
