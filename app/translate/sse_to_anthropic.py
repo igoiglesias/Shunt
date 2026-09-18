@@ -59,6 +59,15 @@ class OpenAIStreamToAnthropic:
         self._usage = {"input_tokens": 0, "output_tokens": 0}
         self._finished = False
 
+    def usage(self) -> dict[str, int]:
+        """Os tokens que este stream consumiu, para a linha de log.
+
+        Quem observa a requisicao nao ve os chunks: o `usage` chega num deles,
+        muitas vezes no ultimo, de `choices` vazio, e este objeto e o unico
+        que passou por todos.
+        """
+        return dict(self._usage)
+
     def _start(self) -> list[Event]:
         if self._started:
             return []

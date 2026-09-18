@@ -530,3 +530,14 @@ def test_reasoning_after_a_tool_call_closes_the_tool_block_first():
     events = t.feed({"choices": [{"delta": {"reasoning_content": "pen"}}]})
     assert names(events) == ["content_block_stop", "content_block_start", "content_block_delta"]
     assert events[1][1]["content_block"]["type"] == "thinking"
+
+
+def test_the_translator_reports_the_usage_it_saw():
+    """O log de uma requisicao em streaming precisa dos tokens, e o unico que
+    os viu e este objeto: `usage` chega em um chunk qualquer, muitas vezes no
+    ultimo, de `choices` vazio."""
+    t = OpenAIStreamToAnthropic("m", "msg_1")
+    assert t.usage() == {"input_tokens": 0, "output_tokens": 0}
+    t.feed({"choices": [{"delta": {"content": "oi"}}]})
+    t.feed({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5}})
+    assert t.usage() == {"input_tokens": 12, "output_tokens": 5}

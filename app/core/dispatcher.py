@@ -42,7 +42,8 @@ from app.core.attempt import (
     classify,
 )
 from app.core.capabilities import filter_chain, requirements_of
-from app.core.resolver import Candidate, resolve
+from app.core.observability import RequestLog, log_request
+from app.core.resolver import Candidate, Resolution, resolve
 from app.core.upstream import UpstreamPool
 from app.schemas.openai import OpenAIErrorResponse
 from app.translate.sse_parse import SSEDecoder, SSEEvent
@@ -227,7 +228,39 @@ def _error_message(response: httpx.Response) -> str:
 
 
 async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) -> ShuntResult:
+    """Uma casca fina em volta de `_dispatch`, para que TODO caminho de saida
+    registre a linha de log.
+
+    Registrar dentro de `_dispatch` significaria uma chamada por `return`, e
+    sao quatro: a cadeia vazia, a resposta traduzida, o corpo 2xx ilegivel e a
+    cadeia exaurida. O caminho esquecido seria justamente o que ninguem
+    exercita a mao.
+    """
+    started = time.monotonic()
     resolution = resolve(req.body.get("model", ""), settings)
+    result = await _dispatch(req, settings, pool, resolution)
+    usage = result.body.get("usage") or {}
+    log_request(
+        RequestLog(
+            request_id=uuid.uuid4().hex,
+            requested_model=req.body.get("model", ""),
+            rule=resolution.rule,
+            matched=resolution.matched,
+            candidate=result.real_model,
+            attempts=result.trace,
+            input_tokens=usage.get("input_tokens") or usage.get("prompt_tokens") or 0,
+            output_tokens=usage.get("output_tokens") or usage.get("completion_tokens") or 0,
+            ttft_ms=None,  # so existe onde ha um primeiro evento a cronometrar
+            duration_ms=int((time.monotonic() - started) * 1000),
+            translated=result.real_model is not None,
+        )
+    )
+    return result
+
+
+async def _dispatch(
+    req: ShuntRequest, settings: Settings, pool: UpstreamPool, resolution: Resolution
+) -> ShuntResult:
     first = resolution.chain[0]
     probe_note: list[str] = []
     try:
@@ -470,6 +503,23 @@ class _Reading:
 
 
 @dataclass
+class _Tally:
+    """O que o streaming descobre enquanto corre, para a linha de log.
+
+    Um gerador nao tem valor de retorno que o chamador possa ler, e o log
+    precisa de coisas que so a cadeia sabe -- qual regra casou, qual candidato
+    ficou, o que cada tentativa custou. Este objeto e o canal de volta.
+    """
+
+    rule: str = "unresolved"
+    matched: str | None = None
+    candidate: str | None = None
+    trace: list[str] = field(default_factory=list)
+    first_byte_at: float | None = None
+    usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+
+
+@dataclass
 class _Passthrough:
     """Set when a candidate answered by forwarding raw bytes.
 
@@ -554,9 +604,14 @@ def _drain(
 
 
 async def _stream_chain(
-    req: ShuntRequest, settings: Settings, pool: UpstreamPool, passthrough: _Passthrough
+    req: ShuntRequest,
+    settings: Settings,
+    pool: UpstreamPool,
+    passthrough: _Passthrough,
+    tally: _Tally,
 ) -> AsyncGenerator[bytes]:
     resolution = resolve(req.body.get("model", ""), settings)
+    tally.rule, tally.matched = resolution.rule, resolution.matched
     first = resolution.chain[0]
     probe_note: list[str] = []
     try:
@@ -566,7 +621,9 @@ async def _stream_chain(
         probe = req.body
         probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
     chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
-    trace = probe_note + [f"{alias}: {reason}" for alias, reason in dropped]
+    trace = tally.trace
+    trace.extend(probe_note)
+    trace.extend(f"{alias}: {reason}" for alias, reason in dropped)
 
     if not chain:
         yield _stream_error(req, "no candidate can serve this request: " + "; ".join(trace))
@@ -633,6 +690,7 @@ async def _stream_chain(
 
         if candidate.protocol == req.protocol:
             passthrough.happened = True
+            tally.candidate = candidate.model
             try:
                 async for raw in response.aiter_bytes():
                     yield raw
@@ -689,6 +747,8 @@ async def _stream_chain(
             await response.aclose()
 
         if state.committed:
+            tally.candidate = candidate.model
+            tally.usage = translator.usage()
             return
         if state.failed is None and not state.started:
             state.failed = "stream ended before the first valid event"
@@ -697,8 +757,10 @@ async def _stream_chain(
             last_message = state.failed
             continue
 
+        tally.candidate = candidate.model
         for chunk_bytes in _finish(req, translator):
             yield chunk_bytes
+        tally.usage = translator.usage()
         return
 
     yield _stream_error(req, f"{last_message} - tried: " + "; ".join(trace))
@@ -718,12 +780,38 @@ async def dispatch_stream(
     raises out and nothing more is produced.
     """
     passthrough = _Passthrough()
+    started = time.monotonic()
+    tally = _Tally()
     # `aclosing` is the whole client-disconnect story: when the client goes
     # away this generator is closed, and without it the inner generator would
     # only run its `finally` whenever the garbage collector got to it -- while
     # the provider kept generating tokens nobody reads, on the user's bill.
-    async with aclosing(_stream_chain(req, settings, pool, passthrough)) as chain:
-        async for chunk in chain:
-            yield chunk
-    if req.protocol != "anthropic" and not passthrough.happened:
-        yield DONE
+    #
+    # The log line lives in a `finally` for the same reason: a client that
+    # walks away mid-stream is exactly the request worth having in the log,
+    # and it never reaches the end of this function.
+    try:
+        async with aclosing(_stream_chain(req, settings, pool, passthrough, tally)) as chain:
+            async for chunk in chain:
+                if tally.first_byte_at is None:
+                    tally.first_byte_at = time.monotonic()
+                yield chunk
+        if req.protocol != "anthropic" and not passthrough.happened:
+            yield DONE
+    finally:
+        ttft = tally.first_byte_at
+        log_request(
+            RequestLog(
+                request_id=uuid.uuid4().hex,
+                requested_model=req.body.get("model", ""),
+                rule=tally.rule,
+                matched=tally.matched,
+                candidate=tally.candidate,
+                attempts=tally.trace,
+                input_tokens=tally.usage["input_tokens"],
+                output_tokens=tally.usage["output_tokens"],
+                ttft_ms=int((ttft - started) * 1000) if ttft is not None else None,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                translated=tally.candidate is not None,
+            )
+        )

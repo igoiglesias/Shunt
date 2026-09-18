@@ -282,3 +282,13 @@ def test_input_json_delta_with_no_partial_json_key_defaults_to_empty_string():
     )
     chunks = tr.feed("content_block_delta", {"index": 0, "delta": {"type": "input_json_delta"}})
     assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"] == ""
+
+
+def test_the_translator_reports_the_usage_it_saw():
+    """A contraparte do outro sentido, com a mesma razao: sem isto a linha de
+    log de uma requisicao em streaming reporta zero token para sempre."""
+    t = AnthropicStreamToOpenAI("m", "chatcmpl-1")
+    assert t.usage() == {"input_tokens": 0, "output_tokens": 0}
+    t.feed("message_start", {"message": {"usage": {"input_tokens": 9, "output_tokens": 0}}})
+    t.feed("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}})
+    assert t.usage() == {"input_tokens": 9, "output_tokens": 7}

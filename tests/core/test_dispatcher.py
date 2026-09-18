@@ -444,7 +444,11 @@ class _Clock:
 async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
     from app.core import dispatcher
 
-    monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 1.0, 10_000.0))
+    # Quatro instantes, nao tres: `dispatch` le o relogio uma vez antes de
+    # comecar, para a duracao que vai na linha de log. Os tres seguintes sao
+    # os que a decisao de prazo usa -- limite montado, primeira tentativa
+    # dentro dele, segunda ja fora.
+    monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 0.0, 1.0, 10_000.0))
     route = respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
     )

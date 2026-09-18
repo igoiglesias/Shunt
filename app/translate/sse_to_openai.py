@@ -64,6 +64,7 @@ class AnthropicStreamToOpenAI:
         self._tool_index_of_block: dict[int, int] = {}
         self._next_tool_index = 0
         self._finished = False
+        self._usage = {"input_tokens": 0, "output_tokens": 0}
 
     def _chunk(self, delta: dict, finish: str | None = None, usage: dict | None = None) -> dict:
         payload: dict[str, Any] = {
@@ -132,6 +133,11 @@ class AnthropicStreamToOpenAI:
             ]
         return []
 
+    def usage(self) -> dict[str, int]:
+        """Os tokens que este stream consumiu, para a linha de log. Mesma razao
+        da contraparte em `sse_to_anthropic.py`."""
+        return dict(self._usage)
+
     def _message_delta(self, data: dict) -> list[dict]:
         reason = (data.get("delta") or {}).get("stop_reason", "end_turn")
         usage = data.get("usage") or {}
@@ -143,7 +149,23 @@ class AnthropicStreamToOpenAI:
             )
         ]
 
+    def _absorb_usage(self, data: dict) -> None:
+        """A contagem chega espalhada: `input_tokens` dentro de
+        `message.usage` no `message_start`, `output_tokens` no `usage` de topo
+        do `message_delta`. Ler os dois lugares em toda entrada e mais barato
+        do que tratar cada evento so por causa disso -- e o `message_start`
+        nao tem tratamento nenhum aqui, porque nao produz chunk.
+        """
+        for source in (data.get("usage"), (data.get("message") or {}).get("usage")):
+            if not isinstance(source, dict):
+                continue
+            for field_name in ("input_tokens", "output_tokens"):
+                value = source.get(field_name)
+                if isinstance(value, int):
+                    self._usage[field_name] = value
+
     def feed(self, event: str, data: dict) -> list[dict]:
+        self._absorb_usage(data)
         if event == "content_block_start":
             return self._content_block_start(data)
         if event == "content_block_delta":

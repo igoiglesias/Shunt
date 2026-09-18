@@ -3,12 +3,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config.settings import load_settings
+from app.core.observability import configure_logging
 from app.core.upstream import UpstreamPool
 from app.routers.v1 import router as v1_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     # `hasattr` respects state already injected: the route tests and the E2E
     # tests set `state.settings` and `state.pool` before entering the
     # TestClient context.
