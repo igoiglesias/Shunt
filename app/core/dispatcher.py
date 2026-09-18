@@ -23,16 +23,30 @@ the same headers this module does.
 """
 
 import asyncio
+import json
 import time
+import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import aclosing
 from dataclasses import dataclass, field
 
 import httpx
 
 from app.config.settings import Settings
-from app.core.attempt import MAX_ATTEMPTS, TOTAL_DEADLINE, Outcome, backoff, classify
+from app.core.attempt import (
+    FIRST_EVENT_DEADLINE,
+    MAX_ATTEMPTS,
+    TOTAL_DEADLINE,
+    Outcome,
+    backoff,
+    classify,
+)
 from app.core.capabilities import filter_chain, requirements_of
 from app.core.resolver import Candidate, resolve
 from app.core.upstream import UpstreamPool
+from app.translate.sse_parse import SSEDecoder, SSEEvent
+from app.translate.sse_to_anthropic import OpenAIStreamToAnthropic
+from app.translate.sse_to_openai import AnthropicStreamToOpenAI
 from app.translate.to_anthropic import openai_error_to_anthropic, openai_response_to_anthropic
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai, anthropic_response_to_openai
@@ -251,3 +265,300 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
 
     message = f"{last_message} - tried: " + "; ".join(trace)
     return ShuntResult(last_status, openai_error_to_anthropic(last_status, message), None, trace)
+
+
+# ---------------------------------------------------------------------------
+# Streaming
+#
+# The buffered path above may change its mind at any moment: nothing has
+# reached the client until `dispatch` returns. Streaming has no such freedom.
+# Once the first byte is on the wire the response is committed -- there is no
+# way to retract a `message_start` and try another provider. So the whole
+# design is about postponing that commitment for as long as the evidence is
+# still ambiguous, and the evidence IS ambiguous: an OpenAI-compatible
+# provider answers HTTP 200 and then puts `{"error": ...}` inside the stream,
+# and it sends keep-alive comments while the request sits in a queue. Status
+# and headers are therefore not enough. The commitment point is the first
+# event that parses AND carries real content -- `is_first_valid_event`.
+#
+# Before that point a failure is a free fallback to the next candidate, and
+# the client never learns a provider was tried. After it, a failure can only
+# be reported as an error event on the wire.
+#
+# Three differences from `dispatch`, all deliberate:
+#
+# - No retry of the same candidate. A stream that failed mid-flight cannot be
+#   replayed, and one that failed before the first event failed on evidence
+#   (an in-band error, or silence past the deadline) that a second identical
+#   request would very likely reproduce. Streaming falls back, it does not
+#   retry.
+# - No `TOTAL_DEADLINE`. A long stream is the normal case; the bound that
+#   matters here is `FIRST_EVENT_DEADLINE`, on the wait before the first
+#   event, plus the transport read timeout for a provider that sends nothing
+#   at all (a provider silent from the start never enters the read loop, so
+#   the deadline check inside it would never run -- `TIMEOUT.read` in
+#   `app/core/upstream.py` is what covers that case).
+# - When both sides speak the same protocol the bytes are forwarded verbatim,
+#   with no decoding at all, and the candidate is committed on its 200. There
+#   is nothing to inspect without parsing, and parsing a dialect we are not
+#   translating would only let us corrupt it.
+# ---------------------------------------------------------------------------
+
+PING_INTERVAL = 5.0
+DONE = b"data: [DONE]\n\n"
+
+
+def _now() -> float:
+    """Indirection over the clock so a test can pin the deadline and the ping
+    interval to exact instants. A test on the real clock would have to sleep
+    for twenty seconds and would still pass by coincidence."""
+    return time.monotonic()
+
+
+def is_first_valid_event(data: dict) -> bool:
+    """Is this the chunk that commits us to this candidate?
+
+    A keep-alive comment never gets here (it carries no data field). A `ping`,
+    an empty delta and an `{"error": ...}` payload do get here and must all
+    answer False: each of them is something a provider sends while it has not
+    started answering, and treating one as the start would give up the
+    fallback for nothing. Only a delta carrying text or a tool call closes the
+    decision.
+    """
+    if data.get("error"):
+        return False
+    choices = data.get("choices") or []
+    if not choices:
+        return False
+    delta = choices[0].get("delta") or {}
+    return bool(delta.get("content") or delta.get("tool_calls"))
+
+
+def _sse(event: str, data: dict) -> bytes:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+
+def _data(chunk: dict) -> bytes:
+    return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode()
+
+
+def _stream_translator(req: ShuntRequest):
+    """Pick the translator from the client's protocol. Equal protocols never
+    reach here -- that case forwards raw bytes.
+
+    The id is random per stream, not derived from the model: two concurrent
+    streams to the same model must not share a message id.
+    """
+    requested = req.body.get("model", "")
+    if req.protocol == "anthropic":
+        return OpenAIStreamToAnthropic(requested, f"msg_{uuid.uuid4().hex}")
+    return AnthropicStreamToOpenAI(requested, f"chatcmpl-{uuid.uuid4().hex}")
+
+
+def _ping(req: ShuntRequest) -> bytes:
+    """Anthropic has a `ping` event; OpenAI's chunk stream has no equivalent,
+    so its clients get the SSE comment, which every SSE reader ignores."""
+    if req.protocol == "anthropic":
+        return _sse("ping", {"type": "ping"})
+    return b": ping\n\n"
+
+
+def _stream_error(req: ShuntRequest, message: str) -> bytes:
+    body = openai_error_to_anthropic(502, message)
+    if req.protocol == "anthropic":
+        return _sse("error", body)
+    return _data({"error": body["error"]})
+
+
+def _finish(req: ShuntRequest, translator) -> Iterator[bytes]:
+    if req.protocol == "anthropic":
+        for name, out in translator.finish():
+            yield _sse(name, out)
+    else:
+        for chunk in translator.finish():
+            yield _data(chunk)
+
+
+@dataclass
+class _Handled:
+    """What one upstream SSE event produced, and what it decided."""
+
+    payloads: list[bytes]
+    started: bool
+    failed: str | None = None  # abandon this candidate; the next one gets a turn
+    fatal: bool = False  # already committed: the error went out, stop here
+
+
+def _handle_event(req: ShuntRequest, translator, event: SSEEvent, started: bool) -> _Handled:
+    try:
+        data = json.loads(event.data)
+    except json.JSONDecodeError:
+        # This is also where OpenAI's `data: [DONE]` sentinel lands, and where
+        # it belongs: it is not JSON, it decides nothing, and the close of the
+        # stream is already driven by the end of the body. An explicit `[DONE]`
+        # branch here would be a second spelling of this same `return` -- a
+        # line no test could ever tell apart from this one.
+        return _Handled([], started)
+    if not isinstance(data, dict):
+        # Valid JSON of the wrong shape (a list, a bare string). `.get` on it
+        # would raise and kill a stream that is otherwise fine.
+        return _Handled([], started)
+    if data.get("error"):
+        message = json.dumps(data["error"], ensure_ascii=False)
+        if not started:
+            return _Handled([], started, failed=message)
+        return _Handled([_stream_error(req, message)], started, fatal=True)
+
+    payloads: list[bytes] = []
+    if req.protocol == "anthropic":
+        # The provider speaks OpenAI: the chunk itself is what we judge, and
+        # it must NOT reach the translator before the decision -- feeding it
+        # would mark `message_start` as emitted while we drop the output.
+        if not started:
+            if not is_first_valid_event(data):
+                return _Handled([], started)
+            started = True
+        payloads = [_sse(name, out) for name, out in translator.feed(data)]
+    else:
+        # The provider speaks Anthropic: the criterion is the same, but it
+        # applies to the already-translated chunk, since an Anthropic event
+        # has no `choices`/`delta` of its own to judge.
+        for chunk in translator.feed(event.event or "", data):
+            if not started:
+                if not is_first_valid_event(chunk):
+                    continue
+                started = True
+            payloads.append(_data(chunk))
+    return _Handled(payloads, started)
+
+
+async def _stream_chain(
+    req: ShuntRequest, settings: Settings, pool: UpstreamPool
+) -> AsyncIterator[bytes]:
+    resolution = resolve(req.body.get("model", ""), settings)
+    first = resolution.chain[0]
+    probe_note: list[str] = []
+    try:
+        probe = _payload(req, first, settings)
+    except Exception as err:  # noqa: BLE001 - same reasoning as `dispatch`: a
+        # probe we cannot render is a worse estimate, not a dead request.
+        probe = req.body
+        probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
+    chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
+    trace = probe_note + [f"{alias}: {reason}" for alias, reason in dropped]
+
+    if not chain:
+        yield _stream_error(req, "no candidate can serve this request: " + "; ".join(trace))
+        return
+
+    last_message = "no candidate answered"
+
+    for candidate in chain:
+        label = candidate.alias or candidate.model
+        if (candidate.protocol, req.endpoint) not in PATHS:
+            trace.append(f"{label}: endpoint not supported")
+            continue
+        try:
+            payload = _payload(req, candidate, settings)
+        except Exception as err:  # noqa: BLE001 - one candidate skipped, not a
+            # dead chain: the next may speak the client's protocol untranslated.
+            trace.append(f"{label}: request translation failed: {err}")
+            continue
+        client = pool.get(candidate.provider)
+        request = client.build_request(
+            "POST", PATHS[(candidate.protocol, req.endpoint)], json=payload,
+            headers=outbound_headers(req, candidate, settings))
+        try:
+            response = await client.send(request, stream=True)
+        except httpx.HTTPError as err:
+            trace.append(f"{label}: {err}")
+            last_message = str(err)
+            continue
+
+        if response.status_code >= 400:
+            # `aread()` materialises the streamed body, which is what makes
+            # `_error_message` (shared with `dispatch`) usable on it -- and it
+            # closes the response on its way out, so no `aclose()` follows.
+            await response.aread()
+            message = _error_message(response)
+            trace.append(f"{label}: {response.status_code}")
+            last_message = message
+            continue
+
+        if candidate.protocol == req.protocol:
+            try:
+                async for raw in response.aiter_bytes():
+                    yield raw
+            finally:
+                await response.aclose()
+            return
+
+        decoder = SSEDecoder()
+        translator = _stream_translator(req)
+        started = False
+        failed: str | None = None
+        committed = False
+        started_at = _now()
+        last_ping = started_at
+        try:
+            async for raw in response.aiter_bytes():
+                now = _now()
+                if not started:
+                    if now - started_at > FIRST_EVENT_DEADLINE:
+                        failed = f"no valid event within {FIRST_EVENT_DEADLINE}s"
+                        break
+                    if now - last_ping > PING_INTERVAL:
+                        last_ping = now
+                        yield _ping(req)
+                for event in decoder.feed(raw):
+                    handled = _handle_event(req, translator, event, started)
+                    started = handled.started
+                    for payload_bytes in handled.payloads:
+                        yield payload_bytes
+                    if handled.fatal:
+                        committed = True
+                        break
+                    if handled.failed is not None:
+                        failed = handled.failed
+                        break
+                if committed or failed is not None:
+                    break
+        finally:
+            await response.aclose()
+
+        if committed:
+            return
+        if failed is None and not started:
+            failed = "stream ended before the first valid event"
+        if failed is not None:
+            trace.append(f"{label}: {failed}")
+            last_message = failed
+            continue
+
+        for chunk_bytes in _finish(req, translator):
+            yield chunk_bytes
+        return
+
+    yield _stream_error(req, f"{last_message} - tried: " + "; ".join(trace))
+
+
+async def dispatch_stream(
+    req: ShuntRequest, settings: Settings, pool: UpstreamPool
+) -> AsyncIterator[bytes]:
+    """Stream one request, falling back while the decision is still open.
+
+    The `[DONE]` sentinel is OpenAI's, and it terminates every OpenAI-facing
+    stream -- success or error alike, since a client that is waiting for it
+    hangs without it. An Anthropic client must never see it: `message_stop`
+    is its terminator. A client that disconnects gets neither, because the
+    `async for` below raises out and nothing more is produced.
+    """
+    # `aclosing` is the whole client-disconnect story: when the client goes
+    # away this generator is closed, and without it the inner generator would
+    # only run its `finally` whenever the garbage collector got to it -- while
+    # the provider kept generating tokens nobody reads, on the user's bill.
+    async with aclosing(_stream_chain(req, settings, pool)) as chain:
+        async for chunk in chain:
+            yield chunk
+    if req.protocol != "anthropic":
+        yield DONE
