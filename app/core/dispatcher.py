@@ -540,25 +540,35 @@ async def _stream_chain(
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
                 response = await client.send(request, stream=True)
-                break
             except httpx.HTTPError as err:
                 trace.append(f"{label}: {err} (attempt {attempt})")
                 last_message = str(err)
+                response = None
                 if classify(None, err, None) is not Outcome.RETRY:
                     break
                 if attempt < MAX_ATTEMPTS:
                     await asyncio.sleep(backoff(attempt))
+                continue
+            if response.status_code < 400:
+                break
+            # A 429/503/etc. arriving in the response headers, before any byte
+            # of the body reached the client, is exactly the buffered case:
+            # `classify` already knows which statuses are worth a retry.
+            # `aread()` materialises the streamed body, which is what makes
+            # `_error_message` (shared with `dispatch`) usable on it -- and it
+            # closes the response on its way out, so no `aclose()` follows.
+            outcome = classify(response.status_code, None, _retry_after(response))
+            await response.aread()
+            message = _error_message(response)
+            trace.append(f"{label}: {response.status_code} (attempt {attempt})")
+            last_message = message
+            if outcome is not Outcome.RETRY or attempt >= MAX_ATTEMPTS:
+                break
+            await asyncio.sleep(backoff(attempt))
         if response is None:
             continue
 
         if response.status_code >= 400:
-            # `aread()` materialises the streamed body, which is what makes
-            # `_error_message` (shared with `dispatch`) usable on it -- and it
-            # closes the response on its way out, so no `aclose()` follows.
-            await response.aread()
-            message = _error_message(response)
-            trace.append(f"{label}: {response.status_code}")
-            last_message = message
             continue
 
         if candidate.protocol == req.protocol:

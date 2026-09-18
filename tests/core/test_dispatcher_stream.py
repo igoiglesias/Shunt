@@ -534,6 +534,57 @@ async def test_a_4xx_falls_back_to_the_next_candidate_without_leaking_its_body()
 
 
 @respx.mock
+async def test_a_retryable_status_is_retried_on_the_same_candidate_before_any_byte(monkeypatch):
+    """SOLO_SETTINGS has exactly one candidate: there is no next one to fall
+    back to. If the request below succeeds at all, it can only be because the
+    503 arriving in the response headers -- before any byte of the body
+    reached us -- was retried on the SAME candidate, not because a fallback
+    masked it. That is what structurally separates this from the 4xx test
+    above, which relies on a second candidate existing."""
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=[
+            httpx.Response(503, json={"error": {"message": "sobrecarregado"}}),
+            httpx.Response(
+                200, headers=SSE_HEADERS, text=sse('{"choices": [{"delta": {"content": "ok"}}]}')
+            ),
+        ]
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert "message_start" in body
+    assert route.call_count == 2
+
+
+@respx.mock
+async def test_a_non_retryable_status_is_not_retried_on_the_same_candidate(monkeypatch):
+    """Same single-candidate setup, but a 400 is not in `classify`'s retry
+    set. With no second candidate to fall back to, the request must fail
+    outright and the mock must be hit exactly once -- proving the loop did
+    NOT retry a status it has no business retrying."""
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "requisicao invalida"}}),
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert events_of(body) == ["error"]
+    assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_retryable_status_persisting_past_max_attempts_still_fails(monkeypatch):
+    """The retry is bounded by MAX_ATTEMPTS, same as the buffered path: a
+    503 on every attempt exhausts the single candidate and reports an error,
+    it does not retry forever."""
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(503, json={"error": {"message": "sobrecarregado"}}),
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert events_of(body) == ["error"]
+    assert route.call_count == MAX_ATTEMPTS
+
+
+@respx.mock
 async def test_a_transport_error_falls_back_to_the_next_candidate(monkeypatch):
     monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     respx.post("https://api.test/v1/chat/completions").mock(
