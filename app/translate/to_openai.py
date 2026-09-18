@@ -30,6 +30,15 @@ consequence stated so it is not mistaken for an oversight:
   an empty list for it. On a provider that enforces strict user/assistant
   alternation, this can collapse two turns together and break that
   alternation.
+
+`anthropic_response_to_openai` is the return leg for the mirror direction
+(OpenAI in, Anthropic-native provider out, from Task 9b): an Anthropic
+Messages response comes back from the provider and an OpenAI-speaking
+harness expects a `chat.completion` object. As on the outbound side, a
+`tool_use` block's `input` object becomes a JSON *string* in
+`function.arguments`, and text blocks are joined into the single
+`message.content` string OpenAI expects -- there is no per-block content
+list on that side.
 """
 
 import json
@@ -38,6 +47,13 @@ from typing import Any
 from app.translate.ids import to_openai_id
 
 MAX_STOP_SEQUENCES = 4
+
+FINISH_REASONS = {
+    "end_turn": "stop",
+    "max_tokens": "length",
+    "tool_use": "tool_calls",
+    "stop_sequence": "stop",
+}
 
 
 class TooManyStopSequencesError(ValueError):
@@ -198,3 +214,46 @@ def anthropic_request_to_openai(body: dict, target_model: str, max_output_tokens
             )
         out["stop"] = stops
     return out
+
+
+def anthropic_response_to_openai(resp: dict, requested_model: str) -> dict:
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for block in resp.get("content") or []:
+        if block.get("type") == "text":
+            text_parts.append(block.get("text", ""))
+        elif block.get("type") == "tool_use":
+            tool_calls.append(
+                {
+                    "id": to_openai_id(block.get("id", "")),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name", ""),
+                        "arguments": json.dumps(block.get("input") or {}, ensure_ascii=False),
+                    },
+                }
+            )
+
+    message: dict[str, Any] = {"role": "assistant", "content": "\n".join(text_parts) or None}
+    if tool_calls:
+        message["tool_calls"] = tool_calls
+
+    usage = resp.get("usage") or {}
+    raw_id = resp.get("id") or "msg_shunt"
+    return {
+        "id": raw_id.replace("msg", "chatcmpl", 1),
+        "object": "chat.completion",
+        "created": 0,
+        "model": requested_model,
+        "choices": [
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": FINISH_REASONS.get(resp.get("stop_reason", "end_turn"), "stop"),
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens", 0),
+            "completion_tokens": usage.get("output_tokens", 0),
+        },
+    }
