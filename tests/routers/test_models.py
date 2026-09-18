@@ -1,0 +1,111 @@
+from fastapi.testclient import TestClient
+
+from app.config.settings import Settings
+from app.core.upstream import UpstreamPool
+from app.main import app
+from app.routers.v1 import detect_protocol
+from tests.core.test_dispatcher import SETTINGS
+
+EMPTY = Settings(providers={}, models={}, routes=[], default_model=None)
+
+
+def client(settings=SETTINGS):
+    app.state.settings = settings
+    app.state.pool = UpstreamPool(settings)
+    return TestClient(app)
+
+
+def test_detect_protocol_by_header():
+    assert detect_protocol({"anthropic-version": "2023-06-01"}) == "anthropic"
+    assert detect_protocol({"x-api-key": "sk"}) == "anthropic"
+    assert detect_protocol({"user-agent": "claude-cli/2.0"}) == "anthropic"
+    assert detect_protocol({"authorization": "Bearer sk"}) == "openai"
+    assert detect_protocol({}) == "unknown"
+
+
+def test_detect_protocol_ignores_header_and_agent_casing():
+    """A header name arrives in whatever case the client typed it; only
+    Starlette's own mapping is already lower-cased."""
+    assert detect_protocol({"Anthropic-Version": "2023-06-01"}) == "anthropic"
+    assert detect_protocol({"X-Api-Key": "sk"}) == "anthropic"
+    assert detect_protocol({"Authorization": "Bearer sk"}) == "openai"
+    assert detect_protocol({"User-Agent": "Claude-CLI/2.0"}) == "anthropic"
+
+
+def test_an_anthropic_sdk_user_agent_is_also_anthropic():
+    """Both names in `ANTHROPIC_AGENTS` are load-bearing: the official SDKs
+    send `anthropic-sdk-python/...`, not `claude-cli`."""
+    assert detect_protocol({"user-agent": "anthropic-sdk-python/0.40"}) == "anthropic"
+
+
+def test_an_anthropic_agent_wins_over_a_bearer_token():
+    """Claude Code authenticates a subscription with an OAuth bearer token and
+    no `x-api-key`. Reading that bearer as an OpenAI caller would answer the
+    wrong dialect to the one client this proxy exists for."""
+    assert (
+        detect_protocol({"authorization": "Bearer oauth", "user-agent": "claude-cli/2.0"})
+        == "anthropic"
+    )
+
+
+def test_models_answers_anthropic_shape_for_an_anthropic_caller():
+    with client() as c:
+        body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()
+    assert body["data"][0]["type"] == "model"
+    assert "display_name" in body["data"][0]
+    assert body["has_more"] is False
+
+
+def test_the_anthropic_shape_carries_exactly_the_anthropic_keys():
+    with client() as c:
+        body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()
+    assert set(body) == {"data", "has_more", "first_id"}
+    assert set(body["data"][0]) == {"type", "id", "display_name", "created_at"}
+    assert body["data"][0]["id"] == "free"
+    assert body["data"][0]["display_name"] == "free (vendor/free)"
+    assert body["data"][0]["created_at"] == "2026-01-01T00:00:00Z"
+    assert body["first_id"] == "free"
+
+
+def test_models_answers_openai_shape_for_an_openai_caller():
+    with client() as c:
+        body = c.get("/v1/models", headers={"authorization": "Bearer sk"}).json()
+    assert body["object"] == "list"
+    assert body["data"][0]["object"] == "model"
+    assert body["data"][0]["owned_by"]
+    assert "type" not in body["data"][0]
+
+
+def test_the_openai_shape_carries_exactly_the_openai_keys():
+    with client() as c:
+        body = c.get("/v1/models", headers={"authorization": "Bearer sk"}).json()
+    assert set(body) == {"object", "data"}
+    assert set(body["data"][0]) == {"id", "object", "created", "owned_by"}
+    assert body["data"][0]["id"] == "free"
+    assert body["data"][0]["owned_by"] == "openrouter"
+    assert body["data"][0]["created"] == 1700000000
+
+
+def test_models_falls_back_to_a_superset_both_parsers_accept():
+    with client() as c:
+        body = c.get("/v1/models").json()
+    entry = body["data"][0]
+    assert body["object"] == "list" and body["has_more"] is False
+    assert entry["object"] == "model" and entry["type"] == "model"
+    assert entry["owned_by"] and entry["display_name"]
+
+
+def test_the_superset_lists_every_configured_model_in_order():
+    with client() as c:
+        body = c.get("/v1/models").json()
+    assert [e["id"] for e in body["data"]] == ["free", "cheap"]
+    assert body["first_id"] == "free"
+
+
+def test_an_installation_with_no_models_has_no_first_id():
+    """`entries[0]` would raise on an empty table; the guard answers None, and
+    `first_id: null` is what both parsers read as "nothing here"."""
+    with client(EMPTY) as c:
+        body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()
+    assert body["data"] == []
+    assert body["first_id"] is None

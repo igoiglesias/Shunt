@@ -71,6 +71,45 @@ TRANSPARENT_DROP = frozenset(
 
 DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
+# Nomes de erro da OpenAI. A tabela equivalente da Anthropic vive em
+# `app/translate/to_anthropic.py`; as duas nao coincidem (a OpenAI nao tem
+# `overloaded_error`, e classifica 4xx desconhecido como culpa do pedido e 5xx
+# desconhecido como culpa do servidor).
+OPENAI_ERROR_TYPES = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    422: "invalid_request_error",
+    429: "rate_limit_error",
+}
+
+
+def error_body(protocol: str, status: int, message: str) -> dict:
+    """O envelope de erro segue o protocolo de QUEM PERGUNTOU, nunca o do
+    provedor que falhou.
+
+    Enquanto `/v1/messages` era a unica rota, todo erro saia em forma
+    Anthropic e isso estava certo por acidente. Com as rotas OpenAI abertas,
+    um cliente que fala OpenAI recebendo `{"type": "error", ...}` encontra um
+    corpo sem `error.param` e sem `error.code`, e a biblioteca oficial dele
+    nao consegue classificar o que aconteceu.
+    """
+    if protocol == "anthropic":
+        return openai_error_to_anthropic(status, message)
+    return {
+        "error": {
+            "message": message,
+            "type": OPENAI_ERROR_TYPES.get(status, _openai_fallback_type(status)),
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+def _openai_fallback_type(status: int) -> str:
+    return "server_error" if status >= 500 else "invalid_request_error"
+
 
 class ChainExhausted(Exception):
     """Never raised by `dispatch`, which reports an exhausted chain as a
@@ -206,8 +245,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     if not chain:
         return ShuntResult(
             400,
-            openai_error_to_anthropic(
-                400, "no candidate can serve this request: " + "; ".join(trace)
+            error_body(
+                req.protocol, 400, "no candidate can serve this request: " + "; ".join(trace)
             ),
             None,
             trace,
@@ -271,7 +310,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
                 await asyncio.sleep(backoff(attempt))
 
     message = f"{last_message} - tried: " + "; ".join(trace)
-    return ShuntResult(last_status, openai_error_to_anthropic(last_status, message), None, trace)
+    return ShuntResult(last_status, error_body(req.protocol, last_status, message), None, trace)
 
 
 # ---------------------------------------------------------------------------
@@ -394,10 +433,10 @@ def _keepalive() -> bytes:
 
 
 def _stream_error(req: ShuntRequest, message: str) -> bytes:
-    body = openai_error_to_anthropic(502, message)
+    body = error_body(req.protocol, 502, message)
     if req.protocol == "anthropic":
         return _sse("error", body)
-    return _data({"error": body["error"]})
+    return _data(body)
 
 
 def _finish(req: ShuntRequest, translator) -> Iterator[bytes]:

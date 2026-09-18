@@ -429,7 +429,10 @@ async def test_openai_client_falls_back_when_the_anthropic_stream_errors_first()
     # So a chave `error` na raiz -- o envelope `{"type": "error", ...}` da
     # Anthropic nao pode vazar para um cliente OpenAI.
     assert set(payload) == {"error"}
-    assert payload["error"]["type"] == "api_error"
+    # O tipo tambem e do dialeto OpenAI: `server_error`, e nao o `api_error`
+    # que a tabela Anthropic daria para o mesmo 502.
+    assert payload["error"]["type"] == "server_error"
+    assert set(payload["error"]) == {"message", "type", "param", "code"}
     assert "sobrecarga" in payload["error"]["message"]
     assert lines[-1] == "data: [DONE]"
 

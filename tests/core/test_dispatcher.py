@@ -1304,3 +1304,106 @@ def test_a_transparent_candidate_with_an_alias_still_keeps_the_clients_max_token
     )
     assert payload["max_tokens"] == 999999
     assert payload["model"] == "vendor/free"
+
+
+# --------------------------------------------------------------------------
+# Envelope de erro: a forma segue o protocolo de QUEM PERGUNTOU
+# --------------------------------------------------------------------------
+
+
+def test_the_error_envelope_for_an_anthropic_caller_is_anthropic_shaped():
+    from app.core.dispatcher import error_body
+
+    assert error_body("anthropic", 429, "devagar") == {
+        "type": "error",
+        "error": {"type": "rate_limit_error", "message": "devagar"},
+    }
+
+
+def test_the_error_envelope_for_an_openai_caller_is_openai_shaped():
+    """No `type` na raiz e `param`/`code` presentes: e o que a biblioteca
+    oficial da OpenAI le para montar sua excecao."""
+    from app.core.dispatcher import error_body
+
+    assert error_body("openai", 429, "devagar") == {
+        "error": {
+            "message": "devagar",
+            "type": "rate_limit_error",
+            "param": None,
+            "code": None,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (400, "invalid_request_error"),
+        (401, "authentication_error"),
+        (403, "permission_error"),
+        (404, "not_found_error"),
+        (429, "rate_limit_error"),
+        (418, "invalid_request_error"),  # 4xx desconhecido: culpa do pedido
+        (500, "server_error"),
+        (502, "server_error"),  # 5xx desconhecido: culpa do servidor
+    ],
+)
+def test_the_openai_error_type_follows_the_status(status, expected):
+    from app.core.dispatcher import error_body
+
+    assert error_body("openai", status, "x")["error"]["type"] == expected
+
+
+@respx.mock
+async def test_an_exhausted_chain_answers_an_openai_client_in_its_own_dialect():
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(429, json={"error": {"message": "cota"}})
+    )
+    body = {"model": "opus", "max_tokens": 32, "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("openai", body, {}, endpoint="chat"), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 429
+    assert "type" not in result.body
+    assert result.body["error"]["type"] == "rate_limit_error"
+    assert "cota" in result.body["error"]["message"]
+
+
+async def test_an_empty_chain_answers_an_openai_client_in_its_own_dialect():
+    """O segundo lugar onde `dispatch` monta erro: nenhum candidato passou pelo
+    filtro de capacidades, antes de qualquer requisicao."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={
+            "free": ModelConfig(
+                provider="openrouter",
+                model="vendor/free",
+                supports=ModelCaps(tools=False),
+                context_window=64000,
+                max_output_tokens=8192,
+            )
+        },
+        routes=[("opus", ["free"])],
+        default_model=None,
+    )
+    body = {
+        "model": "opus",
+        "max_tokens": 32,
+        "messages": [{"role": "user", "content": "oi"}],
+        "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
+    }
+    pool = UpstreamPool(settings)
+    try:
+        result = await dispatch(ShuntRequest("openai", body, {}, endpoint="chat"), settings, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 400
+    assert "type" not in result.body
+    assert result.body["error"]["type"] == "invalid_request_error"
+    assert "no candidate can serve this request" in result.body["error"]["message"]
