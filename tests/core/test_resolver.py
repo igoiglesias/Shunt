@@ -52,6 +52,19 @@ def test_default_model_comes_right_after_the_rule_candidate():
     assert chain == ["qwen", "cheap", "free"]
 
 
+def test_no_matching_route_falls_back_to_default_rule():
+    settings = build([("haiku", ["free"])], default_model="cheap")
+    result = resolve("claude-opus-4-5", settings)
+    assert result.rule == "default"
+    assert [c.alias for c in result.chain] == ["cheap"]
+
+
+def test_chain_deduplicates_candidate_that_equals_the_default_model():
+    settings = build([("opus", ["cheap", "free"])], default_model="cheap")
+    chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
+    assert chain == ["cheap", "free"]
+
+
 def test_no_rule_and_no_default_falls_back_to_transparent():
     settings = build([("haiku", ["free"])])
     result = resolve("claude-fable-5-1", settings)
