@@ -31,7 +31,7 @@ class Settings(BaseModel):
     default_model: str | None = None
 
     @model_validator(mode="after")
-    def _check_references(self) -> "Settings":
+    def _check_references(self) -> Settings:
         for alias, model in self.models.items():
             if model.provider not in self.providers:
                 raise ValueError(f"model {alias!r} points to unknown provider {model.provider!r}")
@@ -56,8 +56,8 @@ def load_settings() -> Settings:
 
     load_dotenv()
     return Settings(
-        providers={k: ProviderConfig(**v) for k, v in config.providers.items()},
-        models={k: ModelConfig(**v) for k, v in config.models.items()},
+        providers={k: ProviderConfig.model_validate(v) for k, v in config.providers.items()},
+        models={k: ModelConfig.model_validate(v) for k, v in config.models.items()},
         routes=config.routes,
         default_model=config.default_model,
     )
