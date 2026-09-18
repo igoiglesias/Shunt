@@ -243,6 +243,31 @@ def test_exactly_four_stop_sequences_is_allowed():
     assert out["stop"] == ["a", "b", "c", "d"]
 
 
+def test_temperature_and_top_p_pass_through_when_present():
+    out = convert(
+        {"model": "m", "max_tokens": 10, "messages": [], "temperature": 0.7, "top_p": 0.8}
+    )
+    assert out["temperature"] == 0.7
+    assert out["top_p"] == 0.8
+
+
+def test_temperature_and_top_p_absent_when_not_given():
+    out = convert({"model": "m", "max_tokens": 10, "messages": []})
+    assert "temperature" not in out
+    assert "top_p" not in out
+
+
+def test_non_dict_content_block_is_skipped():
+    out = convert(
+        {
+            "model": "m",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": ["not a dict", {"type": "text", "text": "oi"}]}],
+        }
+    )
+    assert out["messages"][0]["content"] == "oi"
+
+
 def test_target_model_replaces_the_requested_one():
     assert (
         convert({"model": "claude-opus-4-5", "max_tokens": 10, "messages": []}, target="qwen3-8b")[

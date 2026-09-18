@@ -46,6 +46,17 @@ def test_text_and_tool_produce_two_blocks_in_order():
     assert [b["type"] for b in out["content"]] == ["text", "tool_use"]
 
 
+def test_missing_arguments_string_becomes_empty_input():
+    out = openai_response_to_anthropic({
+        "id": "c", "model": "m",
+        "choices": [{"message": {"content": None, "tool_calls": [
+            {"id": "call_1", "type": "function",
+             "function": {"name": "read"}}]},
+            "finish_reason": "tool_calls"}],
+    }, "m")
+    assert out["content"][0]["input"] == {}
+
+
 def test_invalid_tool_arguments_do_not_raise():
     out = openai_response_to_anthropic({
         "id": "c", "model": "m",
@@ -112,6 +123,25 @@ def test_missing_usage_defaults_to_zero_tokens():
         "choices": [{"message": {"content": "oi"}, "finish_reason": "stop"}],
     }, "m")
     assert out["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+
+def test_every_known_finish_reason_maps_to_its_own_stop_reason():
+    # Only "stop" and "tool_calls" were pinned elsewhere in this file --
+    # "length", "function_call" and "content_filter" all default to the
+    # same "end_turn" fallback an unrecognized value produces, so swapping
+    # any one of their STOP_REASONS entries for "end_turn" left the suite
+    # green before this test existed.
+    cases = {
+        "length": "max_tokens",
+        "function_call": "tool_use",
+        "content_filter": "end_turn",
+    }
+    for finish_reason, expected in cases.items():
+        out = openai_response_to_anthropic({
+            "id": "chatcmpl-1", "model": "m",
+            "choices": [{"message": {"content": "oi"}, "finish_reason": finish_reason}],
+        }, "m")
+        assert out["stop_reason"] == expected, finish_reason
 
 
 def test_unknown_finish_reason_falls_back_to_end_turn():

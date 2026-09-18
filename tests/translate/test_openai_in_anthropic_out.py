@@ -139,6 +139,166 @@ def test_tool_arguments_valid_json_but_not_an_object_becomes_empty_input():
     assert block["input"] == {}
 
 
+def test_every_known_stop_reason_maps_to_its_own_finish_reason():
+    # Only "tool_use" -> "tool_calls" was pinned elsewhere in this file --
+    # "end_turn", "max_tokens" and "stop_sequence" all default to the same
+    # "stop" fallback an unrecognized value produces, so swapping any one
+    # of their FINISH_REASONS entries for "stop" left the suite green
+    # before this test existed.
+    cases = {"end_turn": "stop", "max_tokens": "length", "stop_sequence": "stop"}
+    for stop_reason, expected in cases.items():
+        out = anthropic_response_to_openai({
+            "id": "msg_1", "model": "m", "stop_reason": stop_reason,
+            "content": [{"type": "text", "text": "oi"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
+        assert out["choices"][0]["finish_reason"] == expected, stop_reason
+
+
+def test_anthropic_response_id_is_rewritten_to_a_chatcmpl_shaped_id():
+    # Pins the CURRENT transform (raw_id.replace("msg", "chatcmpl", 1)) --
+    # nothing exercised this field before. Note: this is the mirror of the
+    # bug fixed in to_anthropic.py's id transform (a bare substring
+    # replace leaves the original separator in place), so "msg_1" becomes
+    # "chatcmpl_1" here rather than the hyphenated "chatcmpl-1" shape real
+    # OpenAI ids use. Task 11 only fixes the named direction
+    # (openai_response_to_anthropic); this test documents the reverse
+    # direction's current behaviour so a change to it is a deliberate,
+    # visible decision rather than a silent one -- see the task report for
+    # the follow-up recommendation.
+    out = anthropic_response_to_openai({
+        "id": "msg_1", "model": "m", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "oi"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
+    assert out["id"] == "chatcmpl_1"
+
+
+def test_anthropic_response_missing_id_falls_back_to_msg_shunt_shape():
+    out = anthropic_response_to_openai({
+        "model": "m", "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "oi"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
+    assert out["id"] == "chatcmpl_shunt"
+
+
+def test_tool_choice_string_auto_is_passed_through():
+    out = openai_request_to_anthropic({"model": "m", "messages": [],
+        "tool_choice": "auto"}, "claude-fable-5-1", 4096)
+    assert out["tool_choice"] == {"type": "auto"}
+
+
+def test_tool_choice_string_none_becomes_none_type():
+    out = openai_request_to_anthropic({"model": "m", "messages": [],
+        "tool_choice": "none"}, "claude-fable-5-1", 4096)
+    assert out["tool_choice"] == {"type": "none"}
+
+
+def test_tool_choice_unrecognized_string_falls_back_to_auto():
+    out = openai_request_to_anthropic({"model": "m", "messages": [],
+        "tool_choice": "something_new"}, "claude-fable-5-1", 4096)
+    assert out["tool_choice"] == {"type": "auto"}
+
+
+def test_tool_choice_function_dict_becomes_a_forced_tool_choice():
+    out = openai_request_to_anthropic({"model": "m", "messages": [],
+        "tool_choice": {"type": "function", "function": {"name": "read"}}},
+        "claude-fable-5-1", 4096)
+    assert out["tool_choice"] == {"type": "tool", "name": "read"}
+
+
+def test_parallel_tool_calls_false_sets_disable_parallel_tool_use():
+    out = openai_request_to_anthropic({"model": "m", "messages": [],
+        "parallel_tool_calls": False}, "claude-fable-5-1", 4096)
+    assert out["tool_choice"] == {"type": "auto", "disable_parallel_tool_use": True}
+
+
+def test_data_url_image_becomes_a_base64_image_block():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "image_url",
+             "image_url": {"url": "data:image/png;base64,QUJD"}}]}]},
+        "claude-fable-5-1", 4096)
+    block = out["messages"][0]["content"][0]
+    assert block == {"type": "image",
+                      "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+
+
+def test_plain_url_image_becomes_a_url_image_block():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "image_url",
+             "image_url": {"url": "https://example.com/a.png"}}]}]},
+        "claude-fable-5-1", 4096)
+    block = out["messages"][0]["content"][0]
+    assert block == {"type": "image",
+                      "source": {"type": "url", "url": "https://example.com/a.png"}}
+
+
+def test_two_system_messages_are_joined_with_a_blank_line():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "system", "content": "um"},
+        {"role": "developer", "content": "dois"},
+        {"role": "user", "content": "oi"}]}, "claude-fable-5-1", 4096)
+    assert out["system"] == "um\n\ndois"
+
+
+def test_stop_as_a_list_becomes_stop_sequences_directly():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": "oi"}], "stop": ["FIM", "PARA"]},
+        "claude-fable-5-1", 4096)
+    assert out["stop_sequences"] == ["FIM", "PARA"]
+
+
+def test_tool_message_with_no_content_key_becomes_empty_string_result():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "tool", "tool_call_id": "call_1"}]}, "claude-fable-5-1", 4096)
+    assert out["messages"][0]["content"][0]["content"] == ""
+
+
+def test_tool_use_block_with_no_input_key_becomes_empty_arguments_object():
+    out = anthropic_response_to_openai({
+        "id": "msg_1", "model": "m", "stop_reason": "tool_use",
+        "content": [{"type": "tool_use", "id": "toolu_1", "name": "read"}],
+        "usage": {"input_tokens": 1, "output_tokens": 1}}, "gpt-4o")
+    assert out["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
+def test_temperature_and_top_p_pass_through_when_present():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": "oi"}], "temperature": 0.5, "top_p": 0.9},
+        "claude-fable-5-1", 4096)
+    assert out["temperature"] == 0.5
+    assert out["top_p"] == 0.9
+
+
+def test_stream_flag_is_forwarded_when_true():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": "oi"}], "stream": True}, "claude-fable-5-1", 4096)
+    assert out["stream"] is True
+
+
+def test_tool_call_with_no_arguments_key_becomes_empty_input():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "call_1", "type": "function", "function": {"name": "read"}}]}]},
+        "claude-fable-5-1", 4096)
+    block = out["messages"][0]["content"][0]
+    assert block["input"] == {}
+
+
+def test_non_dict_content_list_entries_are_skipped():
+    out = openai_request_to_anthropic({"model": "m", "messages": [
+        {"role": "user", "content": ["not a dict", {"type": "text", "text": "oi"}]}]},
+        "claude-fable-5-1", 4096)
+    assert out["messages"][0]["content"] == [{"type": "text", "text": "oi"}]
+
+
+def test_tool_missing_parameters_key_gets_the_empty_object_schema():
+    out = openai_request_to_anthropic({"model": "m", "messages": [], "tools": [
+        {"type": "function", "function": {"name": "now", "description": "hora"}}]},
+        "claude-fable-5-1", 4096)
+    assert out["tools"][0]["input_schema"] == {"type": "object", "properties": {}}
+
+
 def test_response_with_only_a_tool_use_block_has_no_text_content():
     out = anthropic_response_to_openai({
         "id": "msg_1", "model": "claude-fable-5-1", "stop_reason": "tool_use",
