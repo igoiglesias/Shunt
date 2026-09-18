@@ -60,7 +60,7 @@ def _transparent(requested: str, settings: Settings) -> Candidate:
 
 def _chain(aliases: list[str], settings: Settings) -> list[Candidate]:
     ordered = list(aliases)
-    if settings.default_model and settings.default_model not in ordered[:1]:
+    if settings.default_model:
         ordered = ordered[:1] + [settings.default_model] + [
             a for a in ordered[1:] if a != settings.default_model
         ]

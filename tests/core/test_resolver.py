@@ -13,6 +13,8 @@ def build(routes, default_model=None):
                                         protocol="anthropic", api_key_env=None),
             "local": ProviderConfig(base_url="http://localhost:8080/v1",
                                     protocol="openai", api_key_env=None),
+            "openai": ProviderConfig(base_url="https://api.openai.com/v1",
+                                     protocol="openai", api_key_env=None),
         },
         models={
             "free": ModelConfig(provider="openrouter", model="vendor/free",
@@ -94,6 +96,13 @@ def test_transparent_candidate_keeps_the_requested_name_as_the_model():
     candidate = resolve("claude-fable-5-1", settings).chain[0]
     assert candidate.model == "claude-fable-5-1"
     assert candidate.protocol == "anthropic"
+
+
+def test_transparent_infers_openai_provider_from_gpt_and_o_series_prefixes():
+    settings = build([])
+    assert resolve("gpt-4o", settings).chain[0].provider == "openai"
+    assert resolve("o1-preview", settings).chain[0].provider == "openai"
+    assert resolve("o3-mini", settings).chain[0].provider == "openai"
 
 
 def test_transparent_rejects_name_with_no_declared_provider():
