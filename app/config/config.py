@@ -26,14 +26,3 @@ routes = [
 ]
 
 default_model = None
-
-# TODO(task-4): app/routers/v1.py still reads `model_sources`; that router is
-# rewritten in a later task to consume `load_settings()` instead. Kept here
-# only to avoid breaking the existing import until then.
-model_sources = [
-    {
-        "provider": "Openrouter",
-        "model": models["free"]["model"],
-        "api_key": "",
-    }
-]

@@ -175,15 +175,15 @@ def _error_message(response: httpx.Response) -> str:
 
 async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) -> ShuntResult:
     resolution = resolve(req.body.get("model", ""), settings)
+    first = resolution.chain[0]
     probe_note: list[str] = []
     try:
-        probe = _payload(req, resolution.chain[0], settings)
+        probe = _payload(req, first, settings)
     except Exception as err:  # noqa: BLE001 - a translator that cannot render the
         # probe must not decide the whole request. The untranslated body is a
         # worse estimate, not a fatal one, and a later candidate may take it
         # as-is. It is still recorded: if `chain[0]` is then dropped by the
         # capability filter, this is the only evidence the probe ever failed.
-        first = resolution.chain[0]
         probe = req.body
         probe_note = [
             f"probe ({first.alias or first.model}): request translation failed: {err}"
