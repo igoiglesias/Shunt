@@ -13,6 +13,7 @@ import respx
 
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
 from app.core import dispatcher
+from app.core.attempt import MAX_ATTEMPTS
 from app.core.dispatcher import (
     PING_INTERVAL,
     ShuntRequest,
@@ -50,6 +51,15 @@ OPENAI_CLIENT_SETTINGS = Settings(
 OPENAI_BODY = {"model": "gpt-4o", "max_tokens": 64, "stream": True,
                "messages": [{"role": "user", "content": "oi"}]}
 
+RAW_OPENAI_SETTINGS = Settings(
+    providers={"openrouter": ProviderConfig(base_url="https://api.test/v1",
+                                            protocol="openai", api_key_env=None)},
+    models={"free": ModelConfig(provider="openrouter", model="vendor/free",
+                                context_window=64000, max_output_tokens=8192)},
+    routes=[("gpt-4o", ["free"])],
+    default_model=None,
+)
+
 # Um unico candidato: sem o segundo, uma decisao errada do laco aparece como
 # erro no cliente em vez de ser mascarada por um fallback que da certo.
 SOLO_SETTINGS = Settings(
@@ -77,6 +87,25 @@ class Chunks(httpx.AsyncByteStream):
     async def __aiter__(self):
         for chunk in self._chunks:
             yield chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class Failing(httpx.AsyncByteStream):
+    """Provedor que entrega alguns chunks e entao morre no meio do stream --
+    `ReadTimeout` apos 60s de silencio, `RemoteProtocolError` quando a conexao
+    cai. A resposta ja existe, entao o `except` do `send` nao cobre isso."""
+
+    def __init__(self, *chunks: bytes, error: Exception) -> None:
+        self._chunks = chunks
+        self._error = error
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+        raise self._error
 
     async def aclose(self) -> None:
         self.closed = True
@@ -420,9 +449,10 @@ async def test_a_4xx_falls_back_to_the_next_candidate_without_leaking_its_body()
 
 
 @respx.mock
-async def test_a_transport_error_falls_back_to_the_next_candidate():
+async def test_a_transport_error_falls_back_to_the_next_candidate(monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
-        httpx.ConnectError("recusou"),
+        *[httpx.ConnectError("recusou")] * MAX_ATTEMPTS,
         httpx.Response(200, headers=SSE_HEADERS,
                        text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
     ])
@@ -431,10 +461,12 @@ async def test_a_transport_error_falls_back_to_the_next_candidate():
 
 
 @respx.mock
-async def test_every_candidate_failing_yields_one_error_event_with_the_trace():
+async def test_every_candidate_failing_yields_one_error_event_with_the_trace(
+        monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     respx.post("https://api.test/v1/chat/completions").mock(
         side_effect=[httpx.Response(400, json={"error": {"message": "x"}}),
-                     httpx.ConnectError("recusou")])
+                     *[httpx.ConnectError("recusou")] * MAX_ATTEMPTS])
     body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
     assert events_of(body) == ["error"]
     # 400 e a fronteira: status abaixo dela seguem para o corpo.
@@ -665,9 +697,10 @@ async def test_a_stream_that_ends_empty_says_so_in_the_trace():
 
 
 @respx.mock
-async def test_the_last_upstream_status_message_is_the_one_reported():
+async def test_the_last_upstream_status_message_is_the_one_reported(monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
     respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
-        httpx.ConnectError("recusou"),
+        *[httpx.ConnectError("recusou")] * MAX_ATTEMPTS,
         httpx.Response(400, json={"error": {"message": "sem saldo"}}),
     ])
     body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
@@ -799,3 +832,242 @@ async def test_an_empty_delta_before_an_error_still_leaves_the_fallback_open():
     assert "sem credito" not in body
     assert '"text": "ok"' in body
     assert events_of(body)[-1] == "message_stop"
+
+
+# --------------------------------------------------------------------------
+# Falha no MEIO do stream: a resposta ja existe, o `except` do `send` nao pega
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_mid_stream_failure_after_the_start_is_reported_and_closed():
+    """Depois do primeiro evento nao ha fallback: o que o cliente precisa e o
+    erro E um fecho bem formado, senao o stream fica truncado e o parser dele
+    nunca solta o buffer."""
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Failing(
+            b'data: {"choices": [{"delta": {"content": "comecou"}}]}\n\n',
+            error=httpx.ReadTimeout("tempo esgotado"))))
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert route.call_count == 1
+    assert '"text": "comecou"' in body
+    assert "event: error" in body
+    assert "tempo esgotado" in body
+    # O fecho sai DEPOIS do erro: `finish()` e idempotente exatamente por isso.
+    assert events_of(body)[-1] == "message_stop"
+    assert body.index("event: error") < body.index("event: message_delta")
+
+
+@respx.mock
+async def test_a_mid_stream_failure_before_the_start_falls_back():
+    respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.Response(200, headers=SSE_HEADERS, stream=Failing(
+            b": esperando\n\n", error=httpx.RemoteProtocolError("conexao caiu"))),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert "conexao caiu" not in body
+    assert "event: error" not in body
+    assert '"text": "ok"' in body
+    assert events_of(body)[-1] == "message_stop"
+
+
+@respx.mock
+async def test_a_mid_stream_failure_before_the_start_is_named_in_the_trace():
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Failing(
+            b": esperando\n\n", error=httpx.RemoteProtocolError("conexao caiu"))))
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert "free: conexao caiu" in body
+    assert "conexao caiu - tried:" in body
+
+
+@respx.mock
+async def test_a_mid_stream_failure_closes_the_upstream_response():
+    stream = Failing(b'data: {"choices": [{"delta": {"content": "a"}}]}\n\n',
+                     error=httpx.ReadTimeout("tempo esgotado"))
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=stream))
+    await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)
+    assert stream.closed is True
+
+
+@respx.mock
+async def test_a_mid_stream_failure_for_an_openai_client_keeps_the_dialect():
+    upstream = ('event: content_block_delta\ndata: {"type": "content_block_delta", '
+                '"index": 0, "delta": {"type": "text_delta", "text": "ok"}}\n\n')
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Failing(
+            upstream.encode(), error=httpx.ReadTimeout("tempo esgotado"))))
+    body = (await run(ShuntRequest("openai", OPENAI_BODY, {}),
+                      OPENAI_CLIENT_SETTINGS)).decode()
+    lines = [ln for ln in body.splitlines() if ln]
+    assert all(ln.startswith("data: ") for ln in lines), lines
+    assert "tempo esgotado" in body
+    assert lines[-1] == "data: [DONE]"
+
+
+# --------------------------------------------------------------------------
+# `SSEDecoder.flush()`: o provedor que fecha sem a linha em branco final
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_last_event_without_its_blank_line_is_still_delivered():
+    """Sem `flush()` o evento nao e so perdido: `started` fica False, o
+    candidato e anotado como vazio e a chain e queimada num provedor que
+    estava funcionando."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200, headers=SSE_HEADERS,
+            text='data: {"choices": [{"delta": {"content": "unico"}}]}\n'))
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert '"text": "unico"' in body
+    assert "event: error" not in body
+    assert events_of(body)[-1] == "message_stop"
+
+
+@respx.mock
+async def test_the_flushed_event_is_judged_like_any_other():
+    """O evento recuperado pelo `flush()` passa pelo mesmo criterio: um delta
+    vazio no fim do stream continua nao sendo um primeiro evento valido."""
+    respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text='data: {"choices": [{"delta": {}}]}\n'),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert '"text": "ok"' in body
+    assert events_of(body).count("message_start") == 1
+
+
+@respx.mock
+async def test_nothing_is_flushed_once_the_loop_has_already_decided():
+    """Um erro dentro do stream encerra a leitura; o que ficou no buffer do
+    decoder nao pode ressuscitar depois da decisao."""
+    respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text='data: {"error": {"message": "sem credito"}}\n\n'
+                            'data: {"choices": [{"delta": {"content": "depois"}}]}\n'),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert "depois" not in body
+    assert '"text": "ok"' in body
+
+
+# --------------------------------------------------------------------------
+# O espelho cru: cliente OpenAI com provedor OpenAI
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_an_openai_provider_keeps_its_own_done_and_gets_no_second_one():
+    raw = (b': keep-alive\n\n'
+           b'data: {"choices": [{"delta": {"content": "ok"}}]}\n\n'
+           b"data: [DONE]\n\n")
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(raw)))
+    body = await run(ShuntRequest("openai", OPENAI_BODY, {}), RAW_OPENAI_SETTINGS)
+    # Byte a byte, e com UM sentinela: o provedor ja mandou o dele.
+    assert body == raw
+    assert body.count(b"data: [DONE]") == 1
+
+
+@respx.mock
+async def test_an_openai_client_still_gets_a_sentinel_when_no_candidate_answers():
+    """O sentinela so e suprimido quando os bytes crus do provedor ja o
+    trouxeram. Um erro nosso continua precisando dele."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem saldo"}}))
+    body = (await run(ShuntRequest("openai", OPENAI_BODY, {}),
+                      RAW_OPENAI_SETTINGS)).decode()
+    assert [ln for ln in body.splitlines() if ln][-1] == "data: [DONE]"
+    assert "sem saldo" in body
+
+
+# --------------------------------------------------------------------------
+# Retry limitado no `send`, so antes de qualquer byte emitido
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_connect_error_retries_the_same_candidate_before_falling_back(
+        monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(dispatcher, "backoff",
+                        lambda attempt: seen.append(attempt) or 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.ConnectError("recusou"),
+        httpx.ConnectError("recusou"),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    # Tres tentativas no MESMO candidato, como no caminho bufferizado.
+    assert route.call_count == 3
+    assert '"text": "ok"' in body
+    # A espera cresce com a tentativa; nao e sempre a primeira.
+    assert seen == [1, 2]
+
+
+@respx.mock
+async def test_the_retry_budget_is_exhausted_before_the_next_candidate(monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.ConnectError("recusou"), httpx.ConnectError("recusou"),
+        httpx.ConnectError("recusou"),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    assert route.call_count == 4
+    assert '"text": "ok"' in body
+
+
+@respx.mock
+async def test_the_backoff_is_awaited_between_attempts(monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: seen.append(attempt) or 0.0)
+    respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.ConnectError("recusou"),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)
+    # Espera entre a 1a e a 2a tentativa, e nenhuma depois da ultima.
+    assert seen == [1]
+
+
+@respx.mock
+async def test_a_non_transport_http_error_is_not_retried(monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(side_effect=[
+        httpx.DecodingError("corpo ilegivel"),
+        httpx.Response(200, headers=SSE_HEADERS,
+                       text=sse('{"choices": [{"delta": {"content": "ok"}}]}')),
+    ])
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    # `DecodingError` e HTTPError mas nao TransportError: `classify` responde
+    # SKIP. Uma tentativa e so -- a resposta boa que viria na segunda nunca e
+    # pedida, e o cliente recebe o erro.
+    assert route.call_count == 1
+    assert "corpo ilegivel" in body
+    assert events_of(body) == ["error"]
+
+
+@respx.mock
+async def test_the_attempt_number_is_in_the_trace(monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(dispatcher, "backoff",
+                        lambda attempt: seen.append(attempt) or 0.0)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=[httpx.ConnectError("recusou")] * MAX_ATTEMPTS)
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
+    assert "free: recusou (attempt 1)" in body
+    assert f"free: recusou (attempt {MAX_ATTEMPTS})" in body
+    # Nenhuma espera depois da ultima tentativa: nada mais vem depois dela.
+    assert seen == list(range(1, MAX_ATTEMPTS))

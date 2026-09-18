@@ -287,17 +287,26 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
 #
 # Three differences from `dispatch`, all deliberate:
 #
-# - No retry of the same candidate. A stream that failed mid-flight cannot be
-#   replayed, and one that failed before the first event failed on evidence
-#   (an in-band error, or silence past the deadline) that a second identical
-#   request would very likely reproduce. Streaming falls back, it does not
-#   retry.
+# - Retry is bounded to the connection attempt. `client.send` is retried like
+#   the buffered path does (`classify` + `backoff`, up to `MAX_ATTEMPTS`)
+#   because nothing has been emitted yet, so a transient connect error is
+#   indistinguishable from the buffered case. Once the response exists there
+#   is no retry: a stream cannot be replayed, and one that failed before the
+#   first event failed on evidence (an in-band error, a mid-stream drop, or
+#   silence past the deadline) a second identical request would very likely
+#   reproduce. From there on, streaming falls back; it does not retry.
 # - No `TOTAL_DEADLINE`. A long stream is the normal case; the bound that
 #   matters here is `FIRST_EVENT_DEADLINE`, on the wait before the first
-#   event, plus the transport read timeout for a provider that sends nothing
-#   at all (a provider silent from the start never enters the read loop, so
-#   the deadline check inside it would never run -- `TIMEOUT.read` in
-#   `app/core/upstream.py` is what covers that case).
+#   event. Nothing bounds the stream's total LENGTH: what `TIMEOUT.read` in
+#   `app/core/upstream.py` bounds is the silence between two reads, which is
+#   what covers a provider that answers 200 and then sends nothing at all (it
+#   never enters the read loop, so the in-loop deadline check never runs).
+# - A well-formed stream that carries no content is a candidate FAILURE, not
+#   an empty success. That is a deliberate trade-off: a provider answering
+#   200 with a polite empty stream is a provider that did not serve the
+#   request, and closing an empty message for it would burn the fallback for
+#   nothing. The cost is that a genuinely empty completion is retried on the
+#   next candidate instead of being delivered as empty.
 # - When both sides speak the same protocol the bytes are forwarded verbatim,
 #   with no decoding at all, and the candidate is committed on its 200. There
 #   is nothing to inspect without parsing, and parsing a dialect we are not
@@ -380,6 +389,34 @@ def _finish(req: ShuntRequest, translator) -> Iterator[bytes]:
 
 
 @dataclass
+class _Reading:
+    """Mutable state of one candidate's read loop.
+
+    `started` is the commitment: while it is False nothing has reached the
+    client and the next candidate is still available; once it is True the
+    only remaining outcome is an error event on the wire.
+    """
+
+    started: bool = False
+    failed: str | None = None  # abandon this candidate; the next one gets a turn
+    committed: bool = False  # this candidate answered; do not try another
+
+
+@dataclass
+class _Passthrough:
+    """Set when a candidate answered by forwarding raw bytes.
+
+    The provider's own stream already carried whatever terminator its dialect
+    uses -- an OpenAI provider ends with `data: [DONE]` of its own -- so
+    `dispatch_stream` must not append a second one on top of bytes it never
+    decoded. Every other exit (a translated stream, an error, an exhausted
+    chain) produced no terminator, and still needs ours.
+    """
+
+    happened: bool = False
+
+
+@dataclass
 class _Handled:
     """What one upstream SSE event produced, and what it decided."""
 
@@ -432,8 +469,25 @@ def _handle_event(req: ShuntRequest, translator, event: SSEEvent, started: bool)
     return _Handled(payloads, started)
 
 
+def _drain(
+    req: ShuntRequest, translator, events: list[SSEEvent], state: _Reading
+) -> Iterator[bytes]:
+    """One place where an event becomes bytes and a decision, so the events
+    recovered by `SSEDecoder.flush()` are judged exactly like the rest."""
+    for event in events:
+        handled = _handle_event(req, translator, event, state.started)
+        state.started = handled.started
+        yield from handled.payloads
+        if handled.fatal:
+            state.committed = True
+            return
+        if handled.failed is not None:
+            state.failed = handled.failed
+            return
+
+
 async def _stream_chain(
-    req: ShuntRequest, settings: Settings, pool: UpstreamPool
+    req: ShuntRequest, settings: Settings, pool: UpstreamPool, passthrough: _Passthrough
 ) -> AsyncIterator[bytes]:
     resolution = resolve(req.body.get("model", ""), settings)
     first = resolution.chain[0]
@@ -465,14 +519,26 @@ async def _stream_chain(
             trace.append(f"{label}: request translation failed: {err}")
             continue
         client = pool.get(candidate.provider)
+        # Retry belongs here and only here: no byte of this candidate has been
+        # emitted, so a transient connect error is exactly the buffered case
+        # `classify` already answers RETRY for. Past this point the response
+        # exists and a stream cannot be replayed.
         request = client.build_request(
             "POST", PATHS[(candidate.protocol, req.endpoint)], json=payload,
             headers=outbound_headers(req, candidate, settings))
-        try:
-            response = await client.send(request, stream=True)
-        except httpx.HTTPError as err:
-            trace.append(f"{label}: {err}")
-            last_message = str(err)
+        response = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                response = await client.send(request, stream=True)
+                break
+            except httpx.HTTPError as err:
+                trace.append(f"{label}: {err} (attempt {attempt})")
+                last_message = str(err)
+                if classify(None, err, None) is not Outcome.RETRY:
+                    break
+                if attempt < MAX_ATTEMPTS:
+                    await asyncio.sleep(backoff(attempt))
+        if response is None:
             continue
 
         if response.status_code >= 400:
@@ -486,6 +552,7 @@ async def _stream_chain(
             continue
 
         if candidate.protocol == req.protocol:
+            passthrough.happened = True
             try:
                 async for raw in response.aiter_bytes():
                     yield raw
@@ -495,44 +562,59 @@ async def _stream_chain(
 
         decoder = SSEDecoder()
         translator = _stream_translator(req)
-        started = False
-        failed: str | None = None
-        committed = False
+        state = _Reading()
         started_at = _now()
         last_ping = started_at
         try:
             async for raw in response.aiter_bytes():
                 now = _now()
-                if not started:
+                if not state.started:
                     if now - started_at > FIRST_EVENT_DEADLINE:
-                        failed = f"no valid event within {FIRST_EVENT_DEADLINE}s"
+                        state.failed = f"no valid event within {FIRST_EVENT_DEADLINE}s"
                         break
                     if now - last_ping > PING_INTERVAL:
                         last_ping = now
                         yield _ping(req)
-                for event in decoder.feed(raw):
-                    handled = _handle_event(req, translator, event, started)
-                    started = handled.started
-                    for payload_bytes in handled.payloads:
-                        yield payload_bytes
-                    if handled.fatal:
-                        committed = True
-                        break
-                    if handled.failed is not None:
-                        failed = handled.failed
-                        break
-                if committed or failed is not None:
+                for payload_bytes in _drain(req, translator, decoder.feed(raw), state):
+                    yield payload_bytes
+                if state.committed or state.failed is not None:
                     break
+            else:
+                # Only when the body ended on its own terms. A provider that
+                # closes without the final blank line leaves its last event in
+                # the decoder, and dropping it does more than lose an event:
+                # `started` would stay False and a working provider would be
+                # recorded as having answered nothing.
+                for payload_bytes in _drain(req, translator, decoder.flush(), state):
+                    yield payload_bytes
+        except httpx.HTTPError as err:
+            # The response already existed, so the `send` handler above never
+            # sees this: a read timeout in mid-generation, a provider dropping
+            # the connection. Whether it is a fallback or an error on the wire
+            # is decided by the same thing everything else here is decided by.
+            if state.started:
+                # The error event, and then NOTHING else here: leaving
+                # `committed` unset drops through to the normal close below,
+                # so a stream cut in mid-flight still gets its `_finish()` and
+                # the client's parser releases its buffer. That is the case
+                # Task 17 made `finish()` idempotent for. An in-band
+                # `{"error": ...}` deliberately gets no such close: that is the
+                # provider terminating its own stream in its own protocol
+                # (Anthropic's API does exactly that), and a `message_stop`
+                # after it would tell the client the message completed.
+                yield _stream_error(req, str(err))
+            else:
+                state.failed = str(err)
         finally:
             await response.aclose()
 
-        if committed:
+        if state.committed:
             return
-        if failed is None and not started:
-            failed = "stream ended before the first valid event"
-        if failed is not None:
-            trace.append(f"{label}: {failed}")
-            last_message = failed
+        if state.failed is None and not state.started:
+            state.failed = "stream ended before the first valid event"
+        if state.failed is not None:
+            trace.append(f"{label}: {state.failed}")
+            last_message = state.failed
             continue
 
         for chunk_bytes in _finish(req, translator):
@@ -548,17 +630,20 @@ async def dispatch_stream(
     """Stream one request, falling back while the decision is still open.
 
     The `[DONE]` sentinel is OpenAI's, and it terminates every OpenAI-facing
-    stream -- success or error alike, since a client that is waiting for it
-    hangs without it. An Anthropic client must never see it: `message_stop`
-    is its terminator. A client that disconnects gets neither, because the
-    `async for` below raises out and nothing more is produced.
+    stream we composed ourselves -- success or error alike, since a client
+    waiting for it hangs without it. Two exceptions: an Anthropic client must
+    never see it (`message_stop` is its terminator), and a raw passthrough
+    already carried the provider's own sentinel, so adding ours would make it
+    two. A client that disconnects gets neither, because the `async for` below
+    raises out and nothing more is produced.
     """
+    passthrough = _Passthrough()
     # `aclosing` is the whole client-disconnect story: when the client goes
     # away this generator is closed, and without it the inner generator would
     # only run its `finally` whenever the garbage collector got to it -- while
     # the provider kept generating tokens nobody reads, on the user's bill.
-    async with aclosing(_stream_chain(req, settings, pool)) as chain:
+    async with aclosing(_stream_chain(req, settings, pool, passthrough)) as chain:
         async for chunk in chain:
             yield chunk
-    if req.protocol != "anthropic":
+    if req.protocol != "anthropic" and not passthrough.happened:
         yield DONE
