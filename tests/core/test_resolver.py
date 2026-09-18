@@ -7,22 +7,35 @@ from app.core.resolver import UnknownProviderError, resolve
 def build(routes, default_model=None):
     return Settings(
         providers={
-            "openrouter": ProviderConfig(base_url="https://openrouter.ai/api/v1",
-                                         protocol="openai", api_key_env=None),
-            "anthropic": ProviderConfig(base_url="https://api.anthropic.com",
-                                        protocol="anthropic", api_key_env=None),
-            "local": ProviderConfig(base_url="http://localhost:8080/v1",
-                                    protocol="openai", api_key_env=None),
-            "openai": ProviderConfig(base_url="https://api.openai.com/v1",
-                                     protocol="openai", api_key_env=None),
+            "openrouter": ProviderConfig(
+                base_url="https://openrouter.ai/api/v1", protocol="openai", api_key_env=None
+            ),
+            "anthropic": ProviderConfig(
+                base_url="https://api.anthropic.com", protocol="anthropic", api_key_env=None
+            ),
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+            ),
+            "openai": ProviderConfig(
+                base_url="https://api.openai.com/v1", protocol="openai", api_key_env=None
+            ),
         },
         models={
-            "free": ModelConfig(provider="openrouter", model="vendor/free",
-                                context_window=64000, max_output_tokens=8192),
-            "qwen": ModelConfig(provider="local", model="qwen3-8b",
-                                context_window=32768, max_output_tokens=4096),
-            "cheap": ModelConfig(provider="openrouter", model="vendor/cheap",
-                                 context_window=64000, max_output_tokens=8192),
+            "free": ModelConfig(
+                provider="openrouter",
+                model="vendor/free",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
+            "qwen": ModelConfig(
+                provider="local", model="qwen3-8b", context_window=32768, max_output_tokens=4096
+            ),
+            "cheap": ModelConfig(
+                provider="openrouter",
+                model="vendor/cheap",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
         },
         routes=routes,
         default_model=default_model,
@@ -107,9 +120,14 @@ def test_transparent_infers_openai_provider_from_gpt_and_o_series_prefixes():
 
 def test_transparent_rejects_name_with_no_declared_provider():
     settings = Settings(
-        providers={"local": ProviderConfig(base_url="http://localhost:8080/v1",
-                                           protocol="openai", api_key_env=None)},
-        models={}, routes=[], default_model=None,
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
     )
     with pytest.raises(UnknownProviderError, match="claude-fable-5-1"):
         resolve("claude-fable-5-1", settings)

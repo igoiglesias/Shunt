@@ -26,7 +26,7 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from contextlib import aclosing
 from dataclasses import dataclass, field
 
@@ -199,15 +199,19 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
         # as-is. It is still recorded: if `chain[0]` is then dropped by the
         # capability filter, this is the only evidence the probe ever failed.
         probe = req.body
-        probe_note = [
-            f"probe ({first.alias or first.model}): request translation failed: {err}"
-        ]
+        probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
     chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
     trace = probe_note + [f"{alias}: {reason}" for alias, reason in dropped]
 
     if not chain:
-        return ShuntResult(400, openai_error_to_anthropic(
-            400, "no candidate can serve this request: " + "; ".join(trace)), None, trace)
+        return ShuntResult(
+            400,
+            openai_error_to_anthropic(
+                400, "no candidate can serve this request: " + "; ".join(trace)
+            ),
+            None,
+            trace,
+        )
 
     deadline = time.monotonic() + TOTAL_DEADLINE
     last_status, last_message = 502, "no candidate answered"
@@ -232,12 +236,15 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             response, exc = None, None
             try:
                 response = await client.post(
-                    PATHS[(candidate.protocol, req.endpoint)], json=payload,
-                    headers=outbound_headers(req, candidate, settings))
+                    PATHS[(candidate.protocol, req.endpoint)],
+                    json=payload,
+                    headers=outbound_headers(req, candidate, settings),
+                )
             except httpx.HTTPError as err:
                 exc = err
             outcome = classify(
-                response.status_code if response else None, exc, _retry_after(response))
+                response.status_code if response else None, exc, _retry_after(response)
+            )
             if outcome is Outcome.OK and response is not None:
                 try:
                     data = _translate_response(response.json(), req, candidate)
@@ -488,7 +495,7 @@ def _drain(
 
 async def _stream_chain(
     req: ShuntRequest, settings: Settings, pool: UpstreamPool, passthrough: _Passthrough
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes]:
     resolution = resolve(req.body.get("model", ""), settings)
     first = resolution.chain[0]
     probe_note: list[str] = []
@@ -524,8 +531,11 @@ async def _stream_chain(
         # `classify` already answers RETRY for. Past this point the response
         # exists and a stream cannot be replayed.
         request = client.build_request(
-            "POST", PATHS[(candidate.protocol, req.endpoint)], json=payload,
-            headers=outbound_headers(req, candidate, settings))
+            "POST",
+            PATHS[(candidate.protocol, req.endpoint)],
+            json=payload,
+            headers=outbound_headers(req, candidate, settings),
+        )
         response = None
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:

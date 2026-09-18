@@ -5,12 +5,16 @@ from app.core.upstream import UpstreamPool
 
 SETTINGS = Settings(
     providers={
-        "openrouter": ProviderConfig(base_url="https://openrouter.ai/api/v1",
-                                     protocol="openai", api_key_env=None),
-        "local": ProviderConfig(base_url="http://localhost:8080/v1",
-                                protocol="openai", api_key_env=None),
+        "openrouter": ProviderConfig(
+            base_url="https://openrouter.ai/api/v1", protocol="openai", api_key_env=None
+        ),
+        "local": ProviderConfig(
+            base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+        ),
     },
-    models={}, routes=[], default_model=None,
+    models={},
+    routes=[],
+    default_model=None,
 )
 
 
@@ -72,9 +76,14 @@ async def test_injected_transport_is_actually_used_by_the_client():
     # must fail fast and locally instead of depending on egress to the real
     # internet to prove the regression.
     unroutable = Settings(
-        providers={"openrouter": ProviderConfig(base_url="http://127.0.0.1:9",
-                                                protocol="openai", api_key_env=None)},
-        models={}, routes=[], default_model=None,
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="http://127.0.0.1:9", protocol="openai", api_key_env=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
     )
 
     def handler(request: httpx.Request) -> httpx.Response:

@@ -262,7 +262,9 @@ def test_non_dict_content_block_is_skipped():
         {
             "model": "m",
             "max_tokens": 10,
-            "messages": [{"role": "user", "content": ["not a dict", {"type": "text", "text": "oi"}]}],
+            "messages": [
+                {"role": "user", "content": ["not a dict", {"type": "text", "text": "oi"}]}
+            ],
         }
     )
     assert out["messages"][0]["content"] == "oi"

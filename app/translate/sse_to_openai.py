@@ -65,9 +65,7 @@ class AnthropicStreamToOpenAI:
         self._next_tool_index = 0
         self._finished = False
 
-    def _chunk(
-        self, delta: dict, finish: str | None = None, usage: dict | None = None
-    ) -> dict:
+    def _chunk(self, delta: dict, finish: str | None = None, usage: dict | None = None) -> dict:
         payload: dict[str, Any] = {
             "id": self._id,
             "object": "chat.completion.chunk",
@@ -126,9 +124,7 @@ class AnthropicStreamToOpenAI:
                         "tool_calls": [
                             {
                                 "index": index,
-                                "function": {
-                                    "arguments": delta.get("partial_json", "")
-                                },
+                                "function": {"arguments": delta.get("partial_json", "")},
                             }
                         ]
                     }

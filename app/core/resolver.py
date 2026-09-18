@@ -54,16 +54,23 @@ def _transparent(requested: str, settings: Settings) -> Candidate:
             f"no provider declared for model {requested!r}; "
             f"add it to `providers` or create a route for it"
         )
-    return Candidate(alias=None, provider=provider, model=requested,
-                     protocol=settings.providers[provider].protocol, transparent=True)
+    return Candidate(
+        alias=None,
+        provider=provider,
+        model=requested,
+        protocol=settings.providers[provider].protocol,
+        transparent=True,
+    )
 
 
 def _chain(aliases: list[str], settings: Settings) -> list[Candidate]:
     ordered = list(aliases)
     if settings.default_model:
-        ordered = ordered[:1] + [settings.default_model] + [
-            a for a in ordered[1:] if a != settings.default_model
-        ]
+        ordered = (
+            ordered[:1]
+            + [settings.default_model]
+            + [a for a in ordered[1:] if a != settings.default_model]
+        )
     seen: set[str] = set()
     result = []
     for alias in ordered:

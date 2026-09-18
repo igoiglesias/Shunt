@@ -3,38 +3,69 @@ from app.core.capabilities import Requirements, estimate_tokens, filter_chain, r
 from app.core.resolver import Candidate
 
 SETTINGS = Settings(
-    providers={"openrouter": ProviderConfig(base_url="https://x/v1",
-                                            protocol="openai", api_key_env=None)},
-    models={
-        "sem_tools": ModelConfig(provider="openrouter", model="a",
-                                 supports=ModelCaps(tools=False),
-                                 context_window=64000, max_output_tokens=8192),
-        "com_tools": ModelConfig(provider="openrouter", model="b",
-                                 supports=ModelCaps(tools=True),
-                                 context_window=64000, max_output_tokens=8192),
-        "curto": ModelConfig(provider="openrouter", model="c",
-                             supports=ModelCaps(tools=True),
-                             context_window=1000, max_output_tokens=256),
-        "sem_vision": ModelConfig(provider="openrouter", model="d",
-                                  supports=ModelCaps(tools=True, vision=False),
-                                  context_window=64000, max_output_tokens=8192),
-        "com_vision": ModelConfig(provider="openrouter", model="e",
-                                  supports=ModelCaps(tools=True, vision=True),
-                                  context_window=64000, max_output_tokens=8192),
-        "sem_streaming": ModelConfig(provider="openrouter", model="f",
-                                     supports=ModelCaps(tools=True, streaming=False),
-                                     context_window=64000, max_output_tokens=8192),
-        "com_streaming": ModelConfig(provider="openrouter", model="g",
-                                     supports=ModelCaps(tools=True, streaming=True),
-                                     context_window=64000, max_output_tokens=8192),
+    providers={
+        "openrouter": ProviderConfig(base_url="https://x/v1", protocol="openai", api_key_env=None)
     },
-    routes=[], default_model=None,
+    models={
+        "sem_tools": ModelConfig(
+            provider="openrouter",
+            model="a",
+            supports=ModelCaps(tools=False),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+        "com_tools": ModelConfig(
+            provider="openrouter",
+            model="b",
+            supports=ModelCaps(tools=True),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+        "curto": ModelConfig(
+            provider="openrouter",
+            model="c",
+            supports=ModelCaps(tools=True),
+            context_window=1000,
+            max_output_tokens=256,
+        ),
+        "sem_vision": ModelConfig(
+            provider="openrouter",
+            model="d",
+            supports=ModelCaps(tools=True, vision=False),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+        "com_vision": ModelConfig(
+            provider="openrouter",
+            model="e",
+            supports=ModelCaps(tools=True, vision=True),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+        "sem_streaming": ModelConfig(
+            provider="openrouter",
+            model="f",
+            supports=ModelCaps(tools=True, streaming=False),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+        "com_streaming": ModelConfig(
+            provider="openrouter",
+            model="g",
+            supports=ModelCaps(tools=True, streaming=True),
+            context_window=64000,
+            max_output_tokens=8192,
+        ),
+    },
+    routes=[],
+    default_model=None,
 )
 
 
 def cand(alias):
-    return Candidate(alias=alias, provider="openrouter",
-                     model=SETTINGS.models[alias].model, protocol="openai")
+    return Candidate(
+        alias=alias, provider="openrouter", model=SETTINGS.models[alias].model, protocol="openai"
+    )
 
 
 def test_request_with_tools_requires_tool_support():
@@ -61,17 +92,20 @@ def test_candidate_with_smaller_context_window_is_dropped():
 
 def test_transparent_candidate_is_never_filtered():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
-    passthrough = Candidate(alias=None, provider="openrouter", model="x",
-                            protocol="openai", transparent=True)
+    passthrough = Candidate(
+        alias=None, provider="openrouter", model="x", protocol="openai", transparent=True
+    )
     kept, dropped = filter_chain([passthrough], req, SETTINGS)
     assert kept == [passthrough]
     assert dropped == []
 
 
 def test_request_with_image_requires_vision_support():
-    payload = {"messages": [
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
-    ]}
+    payload = {
+        "messages": [
+            {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
+        ]
+    }
     req = requirements_of(payload)
     assert req.vision is True
     assert req.tools is False
@@ -80,9 +114,16 @@ def test_request_with_image_requires_vision_support():
 
 
 def test_candidate_without_vision_support_is_dropped_with_reason():
-    req = requirements_of({"messages": [
-        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "http://x"}}]}
-    ]})
+    req = requirements_of(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": "http://x"}}],
+                }
+            ]
+        }
+    )
     kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_vision"]
     assert dropped == [("sem_vision", "no vision support")]
@@ -106,8 +147,9 @@ def test_candidate_without_streaming_support_is_dropped_with_reason():
 
 def test_transparent_candidate_with_none_alias_never_filtered_even_when_unfit():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}], "stream": True})
-    passthrough = Candidate(alias=None, provider="openrouter", model="x",
-                            protocol="openai", transparent=False)
+    passthrough = Candidate(
+        alias=None, provider="openrouter", model="x", protocol="openai", transparent=False
+    )
     kept, dropped = filter_chain([passthrough], req, SETTINGS)
     assert kept == [passthrough]
     assert dropped == []
@@ -150,8 +192,9 @@ def test_context_window_boundary_one_over_is_dropped():
 
 def test_transparent_flag_bypasses_filter_even_with_an_unfit_real_alias():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
-    unfit_but_transparent = Candidate(alias="sem_tools", provider="openrouter", model="a",
-                                      protocol="openai", transparent=True)
+    unfit_but_transparent = Candidate(
+        alias="sem_tools", provider="openrouter", model="a", protocol="openai", transparent=True
+    )
     kept, dropped = filter_chain([unfit_but_transparent], req, SETTINGS)
     assert kept == [unfit_but_transparent]
     assert dropped == []
@@ -162,21 +205,47 @@ def test_anthropic_image_block_also_requires_vision_support():
     `source`, nao como o `image_url` da OpenAI. Reconhecer so a grafia OpenAI
     fazia a exigencia de visao sumir quando o corpo chegava sem traducao, e um
     modelo cego passava no filtro."""
-    payload = {"messages": [
-        {"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                         "data": "iVBORw0KGgo="}}]}
-    ]}
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "iVBORw0KGgo=",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
     req = requirements_of(payload)
     assert req.vision is True
 
 
 def test_candidate_without_vision_is_dropped_for_an_anthropic_image_block():
-    req = requirements_of({"messages": [
-        {"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/png",
-                                         "data": "iVBORw0KGgo="}}]}
-    ]})
+    req = requirements_of(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgo=",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    )
     kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_vision"]
     assert dropped == [("sem_vision", "no vision support")]
