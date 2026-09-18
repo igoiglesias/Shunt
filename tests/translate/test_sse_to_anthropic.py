@@ -11,7 +11,14 @@ def test_first_text_chunk_opens_message_and_block():
         {"id": "chatcmpl-1", "model": "vendor/free", "choices": [{"delta": {"content": "Oi"}}]}
     )
     assert names(events) == ["message_start", "content_block_start", "content_block_delta"]
-    assert events[0][1]["message"]["model"] == "claude-opus-4-5"
+    message = events[0][1]["message"]
+    assert message["model"] == "claude-opus-4-5"
+    assert message["role"] == "assistant"
+    assert message["content"] == []
+    assert message["stop_reason"] is None
+    assert message["stop_sequence"] is None
+    assert message["usage"] == {"input_tokens": 0, "output_tokens": 0}
+    assert events[1][1]["content_block"] == {"type": "text", "text": ""}
     assert events[2][1]["delta"] == {"type": "text_delta", "text": "Oi"}
 
 
@@ -135,7 +142,10 @@ def test_finish_emits_stop_reason_and_usage():
 
 def test_stream_with_no_content_still_closes_cleanly():
     tr = OpenAIStreamToAnthropic("m", "msg_1")
-    assert names(tr.finish()) == ["message_start", "message_delta", "message_stop"]
+    events = tr.finish()
+    assert names(events) == ["message_start", "message_delta", "message_stop"]
+    delta = next(d for n, d in events if n == "message_delta")
+    assert delta["delta"]["stop_reason"] == "end_turn"
 
 
 # --- Beyond the brief ---------------------------------------------------
@@ -283,3 +293,163 @@ def test_finish_after_partial_stream_that_opened_a_block_but_never_closed_it():
     assert names(events) == ["content_block_stop", "message_delta", "message_stop"]
     stop_event = events[0][1]
     assert stop_event["index"] == 0
+
+
+# --- Task 20 gate: mutation-sweep survivors -----------------------------
+
+
+def test_a_tool_block_switches_back_to_text_and_closes_it_first():
+    """The reverse of test_chunk_with_text_and_tool_call_together: a tool
+    call opens first, then a later chunk carries plain text. The tool block
+    must be closed (content_block_stop) before the text block opens --
+    _open_text must call _close_block, not skip it."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    tr.feed(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "a", "arguments": "{}"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    events = tr.feed({"choices": [{"delta": {"content": "depois"}}]})
+    assert names(events) == ["content_block_stop", "content_block_start", "content_block_delta"]
+
+
+def test_a_second_fragment_of_a_nonzero_indexed_tool_call_stays_on_its_block():
+    """_open_tool must remember the REAL call index it was given, not a
+    constant -- otherwise a fragmented tool call whose OpenAI `index` isn't
+    0 gets mistaken for a different tool on its second chunk and reopened."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    tr.feed(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 2,
+                                "id": "call_1",
+                                "function": {"name": "a", "arguments": '{"p'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    events = tr.feed(
+        {
+            "choices": [
+                {"delta": {"tool_calls": [{"index": 2, "function": {"arguments": 'ath": 1}'}}]}}
+            ]
+        }
+    )
+    assert names(events) == ["content_block_delta"]
+    assert events[0][1]["delta"]["partial_json"] == 'ath": 1}'
+
+
+def test_a_tool_call_chunk_with_no_function_key_opens_a_blank_tool_block():
+    """`call.get("function") or {}` must fall back to an empty mapping, not
+    blow up, when a provider sends a tool_calls entry with no `function`
+    key at all (a malformed or minimal first fragment)."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    events = tr.feed({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1"}]}}]})
+    start = next(d for n, d in events if n == "content_block_start")
+    assert start["content_block"]["name"] == ""
+    assert start["content_block"]["input"] == {}
+    # No `function.arguments` means no delta -- only the block opened.
+    assert names(events)[-1] == "content_block_start"
+
+
+def test_a_tool_call_chunk_missing_id_and_name_gets_empty_defaults():
+    from app.translate.ids import to_anthropic_id
+
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    events = tr.feed({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {}}]}}]})
+    start = next(d for n, d in events if n == "content_block_start")
+    assert start["content_block"]["name"] == ""
+    assert start["content_block"]["id"] == to_anthropic_id("")
+
+
+def test_a_choice_with_no_delta_key_at_all_produces_no_content_block():
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    events = tr.feed({"choices": [{"index": 0}]})
+    assert names(events) == ["message_start"]
+
+
+def test_usage_missing_completion_tokens_defaults_to_zero():
+    """`usage` present and truthy (has `prompt_tokens`), but missing
+    `completion_tokens` -- the only key of `_usage` that is ever surfaced
+    (in `finish()`'s message_delta), so its default must be exercised with
+    a non-empty `usage` dict, not an empty one (`{}` is falsy and would
+    skip the update entirely)."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    tr.feed({"choices": [{"delta": {"content": "oi"}}], "usage": {"prompt_tokens": 5}})
+    events = tr.finish()
+    delta = next(d for n, d in events if n == "message_delta")
+    assert delta["usage"]["output_tokens"] == 0
+
+
+def test_a_stream_with_no_choices_key_at_all_still_opens_the_message():
+    """`choices` missing outright (not just an empty list) must still hit
+    the `.get("choices") or []` fallback and return the events `_start()`
+    already produced, not an empty list that would silently drop
+    `message_start`."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    events = tr.feed({"usage": {"prompt_tokens": 1, "completion_tokens": 0}})
+    assert names(events) == ["message_start"]
+
+
+def test_a_tool_calls_index_missing_key_defaults_to_zero():
+    """A tool_calls entry with no `index` key at all must default to 0, the
+    same as an explicit `"index": 0` -- mixed across two chunks so a wrong
+    default (e.g. 1) shows up as a spurious block switch instead of a
+    continued fragment, which a test using the same (wrong) default on
+    both sides would never catch."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    tr.feed(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {"name": "a", "arguments": "{"},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    )
+    events = tr.feed({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "}"}}]}}]})
+    assert names(events) == ["content_block_delta"]
+
+
+def test_only_the_first_choice_of_a_multi_choice_chunk_is_translated():
+    """Real OpenAI streams always send exactly one choice, but nothing in
+    this translator enforces that -- it must read choices[0], the first
+    one, not choices[-1] or any other."""
+    tr = OpenAIStreamToAnthropic("m", "msg_1")
+    events = tr.feed(
+        {
+            "choices": [
+                {"index": 0, "delta": {"content": "primeiro"}},
+                {"index": 1, "delta": {"content": "segundo"}},
+            ]
+        }
+    )
+    delta = next(d for n, d in events if n == "content_block_delta")
+    assert delta["delta"]["text"] == "primeiro"

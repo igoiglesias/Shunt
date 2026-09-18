@@ -121,6 +121,19 @@ def test_flush_on_empty_buffer_returns_nothing():
     assert SSEDecoder().flush() == []
 
 
+def test_flush_clears_the_buffer_so_it_is_not_replayed():
+    """`flush()` must consume the trailing buffer, not just read it: a
+    decoder fed more bytes after a flush (e.g. reused, or a caller that
+    calls flush speculatively) must not re-emit the same event twice from
+    stale state left behind."""
+    decoder = SSEDecoder()
+    decoder.feed(b"data: last event\n")
+    first = decoder.flush()
+    assert [e.data for e in first] == ["last event"]
+    more = decoder.feed(b"data: next event\n\n")
+    assert [e.data for e in more] == ["next event"]
+
+
 def test_line_with_no_colon_at_all_is_ignored_without_breaking():
     events = SSEDecoder().feed(b"garbage_no_colon\ndata: hello\n\n")
     assert [(e.event, e.data) for e in events] == [(None, "hello")]
