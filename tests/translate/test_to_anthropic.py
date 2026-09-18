@@ -65,12 +65,29 @@ def test_error_envelope_maps_status_to_anthropic_type():
     assert openai_error_to_anthropic(418, "?")["error"]["type"] == "api_error"
 
 
-def test_chatcmpl_id_becomes_a_msg_id():
+def test_chatcmpl_id_becomes_a_msg_id_with_underscore():
+    # Real Anthropic ids use an underscore (msg_01ABC...), never a hyphen.
+    # A prior version of this transform did a bare
+    # "chatcmpl" -> "msg" string replace, which left the original hyphen
+    # in place and produced "msg-abc123" -- a shape no real Anthropic id
+    # has. Reverting the underscore fix would turn this green again.
     out = openai_response_to_anthropic({
         "id": "chatcmpl-abc123", "model": "m",
         "choices": [{"message": {"content": "oi"}, "finish_reason": "stop"}],
     }, "m")
-    assert out["id"] == "msg-abc123"
+    assert out["id"] == "msg_abc123"
+
+
+def test_id_not_starting_with_chatcmpl_still_gets_a_sane_msg_form():
+    # An id that never had the "chatcmpl" prefix must not be passed through
+    # unchanged (that would leak a raw OpenAI-shaped id into an
+    # Anthropic-shaped field) -- it still gets rewritten into "msg_" form.
+    out = openai_response_to_anthropic({
+        "id": "weird-vendor-id-123", "model": "m",
+        "choices": [{"message": {"content": "oi"}, "finish_reason": "stop"}],
+    }, "m")
+    assert out["id"] == "msg_weird-vendor-id-123"
+    assert not out["id"].startswith("weird")
 
 
 def test_missing_id_falls_back_to_msg_shunt():

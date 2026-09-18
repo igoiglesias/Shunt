@@ -60,6 +60,24 @@ ERROR_TYPES = {
 }
 
 
+def _to_msg_id(raw_id: str | None) -> str:
+    """Turn an OpenAI response id into a sane, underscore-joined Anthropic one.
+
+    Real Anthropic ids look like `msg_01ABC...` -- underscore, never a
+    hyphen. A bare `raw_id.replace("chatcmpl", "msg", 1)` on
+    `chatcmpl-abc123` used to leave the original hyphen in place and
+    produce `msg-abc123`, a shape no real Anthropic id has. An id that
+    never had the `chatcmpl` prefix is not passed through unchanged either
+    -- that would leak a raw OpenAI-shaped id into an Anthropic-shaped
+    field -- it is still rewritten into `msg_` form.
+    """
+    if not raw_id:
+        return "msg_shunt"
+    suffix = raw_id.removeprefix("chatcmpl")
+    suffix = suffix.lstrip("-_")
+    return f"msg_{suffix}" if suffix else "msg_shunt"
+
+
 def _arguments(raw: str | None) -> dict:
     if not raw:
         return {}
@@ -90,9 +108,8 @@ def openai_response_to_anthropic(resp: dict, requested_model: str) -> dict:
         )
 
     usage = resp.get("usage") or {}
-    raw_id = resp.get("id") or "msg_shunt"
     return {
-        "id": raw_id.replace("chatcmpl", "msg", 1),
+        "id": _to_msg_id(resp.get("id")),
         "type": "message",
         "role": "assistant",
         "model": requested_model,
