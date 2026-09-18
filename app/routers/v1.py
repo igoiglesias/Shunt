@@ -21,6 +21,7 @@ e `/v1/embeddings` respondem um unico documento JSON neste proxy.
 """
 
 from collections.abc import Mapping
+from json import JSONDecodeError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -37,6 +38,10 @@ from app.core.resolver import UnknownProviderError, resolve
 from app.core.tokens import estimate_input_tokens
 
 router = APIRouter(prefix="/v1")
+
+
+class BadBody(ValueError):
+    """Corpo de requisicao que nao parseia, ou que parseia para nao-objeto."""
 
 # Claude Code se anuncia como `claude-cli`; os SDKs oficiais, como
 # `anthropic-sdk-<linguagem>`.
@@ -67,8 +72,32 @@ def detect_protocol(headers: Mapping[str, str]) -> str:
     return "unknown"
 
 
+
+async def _json_object(request: Request) -> dict:
+    """O corpo parseado, ou `BadBody` com a mensagem que descreve a falha.
+
+    Sao duas faltas diferentes e o cliente precisa distinguir: um corpo que
+    nao parseia (virgula sobrando, chave nao fechada) e um corpo que parseia
+    para algo que nao e objeto (`[1,2]`, `"oi"`, `42`, `null`). Sem esta
+    guarda as duas subiam como excecao e viravam 500 -- medido em 25 de 25
+    combinacoes de rota e corpo. Nenhuma das duas e falha do servidor.
+    """
+    try:
+        body = await request.json()
+    except JSONDecodeError as err:
+        raise BadBody(f"o corpo da requisicao nao e JSON valido: {err}") from err
+    if not isinstance(body, dict):
+        raise BadBody(
+            f"o corpo da requisicao precisa ser um objeto JSON, e nao {type(body).__name__}"
+        )
+    return body
+
+
 async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool):
-    body = await request.json()
+    try:
+        body = await _json_object(request)
+    except BadBody as err:
+        return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
     shunt_request = ShuntRequest(protocol, body, dict(request.headers), endpoint=endpoint)
     try:
@@ -118,7 +147,10 @@ async def count_tokens(request: Request):
     200, como um gateway que se declara Anthropic mas nao implementa a rota --
     a estimativa local e uma resposta util, e um erro nao seria.
     """
-    body = await request.json()
+    try:
+        body = await _json_object(request)
+    except BadBody as err:
+        return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
     try:
         candidate = resolve(body.get("model", ""), settings).chain[0]
