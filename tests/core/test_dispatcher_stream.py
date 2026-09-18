@@ -22,7 +22,7 @@ from app.core.dispatcher import (
 )
 from app.core.upstream import UpstreamPool
 from app.translate.sse_parse import SSEEvent
-from tests.core.test_dispatcher import SETTINGS
+from tests.core.test_dispatcher import CLIENT_HEADERS, SETTINGS, TRANSPARENT
 
 BODY = {
     "model": "claude-opus-4-5",
@@ -343,6 +343,34 @@ async def test_same_protocol_on_both_sides_forwards_the_raw_bytes():
     # Byte a byte: nem o comentario, nem o evento desconhecido, nem o `data:`
     # que nao e JSON passaram por tradutor nenhum.
     assert body == raw
+
+
+@respx.mock
+async def test_transparent_mode_streams_raw_bytes_with_the_clients_own_headers():
+    """Combination Task 19's review flagged as untested: a transparent
+    candidate (headers forwarded verbatim, no alias/config of ours) going
+    through the STREAMING path, not the buffered one this is already
+    covered for (test_transparent_mode_passes_inbound_headers_verbatim_minus_three).
+    `TRANSPARENT` has no routes and no default_model, so `resolve()` falls
+    through to `_transparent()`, and the client's own protocol matches the
+    provider's, so this also exercises the raw-passthrough branch."""
+    raw = b'event: message_start\ndata: {"type": "message_start"}\n\ndata: [DONE]\n\n'
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(raw))
+    )
+    body = await run(
+        ShuntRequest("anthropic", BODY, dict(CLIENT_HEADERS)),
+        TRANSPARENT,
+    )
+    assert body == raw
+    sent = route.calls[0].request.headers
+    # O cabecalho do cliente vai embora tal como chegou -- nenhum dos tres
+    # nomes que o modo transparente descarta, e a credencial do cliente
+    # intacta, nunca a nossa.
+    assert sent["authorization"] == "Bearer oauth-da-assinatura"
+    assert sent["x-api-key"] == "sk-do-cliente"
+    assert sent["anthropic-beta"] == "oauth-2026-01-01"
+    assert "host" not in sent or sent["host"] != "localhost:8080"
 
 
 # --------------------------------------------------------------------------
