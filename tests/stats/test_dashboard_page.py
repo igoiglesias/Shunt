@@ -91,3 +91,17 @@ def test_the_audit_screen_reads_the_three_audit_routes():
     assert "/api/requests?" in page
     assert "/api/requests/export?" in page
     assert "/api/requests/${encodeURIComponent(requestId)}" in page
+
+
+def test_neither_page_is_cached_by_the_browser():
+    """Medido: com o proxy reiniciado e a pagina nova no disco, o navegador
+    seguia desenhando a antiga -- sem o menu e sem os botoes novos.
+
+    HTML sem `Cache-Control` e guardado pela heuristica do navegador, e estas
+    paginas mudam a cada deploy sem trocar de URL.
+    """
+    with client() as c:
+        for path in ("/", "/requests"):
+            response = c.get(path)
+            assert response.status_code == 200
+            assert "no-store" in response.headers.get("cache-control", ""), path

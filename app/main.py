@@ -91,18 +91,25 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# As duas paginas sao lidas do disco a cada carga, entao elas mudam sem
+# reiniciar nada -- mas um navegador guarda HTML sem `Cache-Control` pela
+# heuristica dele. Medido: depois de reiniciar o proxy, o servidor ja entregava
+# a pagina nova e o navegador seguia desenhando a antiga, sem botao, sem menu.
+NO_STORE = {"cache-control": "no-store, must-revalidate"}
+
+
 @app.get("/", response_class=HTMLResponse)
-async def dashboard() -> str:
+async def dashboard() -> HTMLResponse:
     """O painel de uso, servido do disco a cada carga.
 
     Ler o arquivo por requisicao em vez de na importacao custa microssegundos e
     faz `make dev` recarregar a pagina sem reiniciar o processo. A home era a
     checagem de vida; ela mudou para `/health`, e o README registra a troca.
     """
-    return DASHBOARD.read_text(encoding="utf-8")
+    return HTMLResponse(DASHBOARD.read_text(encoding="utf-8"), headers=NO_STORE)
 
 
 @app.get("/requests", response_class=HTMLResponse)
-async def audit_screen() -> str:
+async def audit_screen() -> HTMLResponse:
     """A tela de auditoria: buscar, abrir e exportar requisicoes gravadas."""
-    return AUDIT.read_text(encoding="utf-8")
+    return HTMLResponse(AUDIT.read_text(encoding="utf-8"), headers=NO_STORE)
