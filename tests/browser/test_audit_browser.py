@@ -616,3 +616,69 @@ def test_a_conversation_is_split_by_turn_and_not_by_paragraph(browser, server):
     page.close()
     assert problems == []
     assert papeis == ["system", "user", "assistant", "user", "resposta"], papeis
+
+
+def test_on_a_phone_the_table_becomes_cards(browser, server):
+    """Sete colunas cortadas nao sao uma tabela."""
+    page, problems = open_audit(browser, server, width=390, height=844)
+    medido = page.evaluate(
+        """() => {
+            const head = document.querySelector('thead');
+            const primeira = document.querySelector('#rows tr td');
+            return {
+                cabecalhoVisivel: getComputedStyle(head).display !== 'none',
+                rotulo: getComputedStyle(document.querySelector('#rows td[data-label="Pedido"]'), '::before').content,
+                rolagem: document.documentElement.scrollWidth,
+                janela: window.innerWidth,
+                celulaVisivel: primeira.getBoundingClientRect().width > 0,
+            };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    assert medido["cabecalhoVisivel"] is False
+    assert "Pedido" in medido["rotulo"], medido["rotulo"]
+    assert medido["rolagem"] <= medido["janela"] + 1
+    assert medido["celulaVisivel"]
+
+
+def test_the_card_leads_with_when_and_how_it_ended(browser, server):
+    page, problems = open_audit(browser, server, width=390, height=844)
+    caixas = page.evaluate(
+        """() => {
+            const linha = document.querySelector('#rows tr');
+            const quando = linha.querySelector('td.when').getBoundingClientRect();
+            const status = linha.querySelector('td.status').getBoundingClientRect();
+            return { quandoTop: Math.round(quando.top), statusTop: Math.round(status.top) };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    assert abs(caixas["quandoTop"] - caixas["statusTop"]) <= 4, caixas
+
+
+def test_every_control_can_be_reached_by_keyboard(browser, server):
+    """Foco visível e ordem de tabulação: a tela tem de servir sem mouse."""
+    page, problems = open_audit(browser, server)
+    alcancados = page.evaluate(
+        """async () => {
+            const nomes = [];
+            for (let i = 0; i < 12; i++) {
+                const ativo = document.activeElement;
+                nomes.push(ativo ? (ativo.id || ativo.tagName) : "");
+            }
+            return nomes;
+        }"""
+    )
+    foco = page.evaluate(
+        """() => {
+            const alvo = document.getElementById('reset');
+            alvo.focus();
+            const estilo = getComputedStyle(alvo, ':focus-visible');
+            return { ativo: document.activeElement.id, outline: estilo.outlineWidth };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    assert foco["ativo"] == "reset"
+    assert alcancados

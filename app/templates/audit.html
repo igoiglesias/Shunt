@@ -263,8 +263,46 @@
     form > * { min-width: 0; }
     #range { width: 100%; }
     main { grid-template-columns: 1fr; }
-    aside { border-left: 0; border-top: 1px solid var(--panel-edge); min-height: 0; }
+    aside {
+      border-left: 0;
+      border-top: 1px solid var(--panel-edge);
+      position: static;
+      max-height: none;
+    }
     #count { margin-left: 0; }
+  }
+
+  /* No telefone a tabela não cabe: sete colunas cortadas não são uma tabela.
+     Cada linha vira um cartão, com o nome da coluna ao lado do valor — o mesmo
+     HTML, lido de outro jeito. */
+  @media (max-width: 720px) {
+    .list { overflow-x: visible; }
+    .scroll table, table { min-width: 0; }
+    thead { display: none; }
+    tbody tr {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid #1d2835;
+    }
+    tbody td { border: 0; padding: 0; white-space: normal; }
+    tbody td::before {
+      content: attr(data-label);
+      color: var(--dim);
+      font-size: 11.5px;
+      margin-right: 8px;
+    }
+    tbody td.n, tbody td.when { text-align: left; }
+    /* A hora e o status ficam na mesma primeira linha do cartão: são o "quando"
+       e o "deu certo?", que é o par que se lê primeiro. */
+    tbody td.when { grid-area: 1 / 1; font-size: 13px; }
+    tbody td.when::before { content: none; }
+    tbody td.status { grid-area: 1 / 2; text-align: right; }
+    tbody td.status::before { content: none; }
+    .chips { overflow-x: auto; padding-bottom: 2px; }
+    .chips .chip { flex: 0 0 auto; }
+    .row.refine select, .row.refine .ghost { flex: 1 1 140px; }
   }
 </style>
 </head>
@@ -528,16 +566,18 @@ function rowOf(event) {
       : "",
   ].filter(Boolean).join("");
   return `<tr data-id="${esc(event.request_id)}" class="${bad ? "failed" : ""}">
-    <td class="when" title="${esc(day(event.started_at))}">${esc(clock(event.started_at, true))}</td>
-    <td>${esc((event.route || "").replace("/v1/", ""))}</td>
-    <td>${esc(event.requested_model || "—")}</td>
-    <td>${bad && event.error_type
-      ? `<span class="tag bad">${esc(event.error_type)}</span>`
+    <td class="when" data-label="Quando" title="${esc(day(event.started_at))}">${esc(
+      clock(event.started_at, true)
+    )}</td>
+    <td data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
+    <td data-label="Pedido">${esc(event.requested_model || "—")}</td>
+    <td data-label="Respondeu">${bad && event.error_type
+      ? `<span class="tag bad" data-label="Respondeu">${esc(event.error_type)}</span>`
       : esc(event.candidate_model || servedLabel(event))}</td>
-    <td class="signals">${marks || '<span class="none">—</span>'}</td>
-    <td class="n">${compact(tokens)}</td>
-    <td class="n">${ms(event.duration_ms)}</td>
-    <td class="n status ${bad ? "bad" : ""}">${event.status}</td>
+    <td class="signals" data-label="Sinais">${marks || '<span class="none">—</span>'}</td>
+    <td class="n" data-label="Tokens">${compact(tokens)}</td>
+    <td class="n" data-label="Duração">${ms(event.duration_ms)}</td>
+    <td class="n status ${bad ? "bad" : ""}" data-label="Status">${event.status}</td>
   </tr>`;
 }
 
