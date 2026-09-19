@@ -49,3 +49,32 @@ def test_the_requests_screen_has_no_layout_or_contrast_defects(
     page.close()
     assert problemas == []
     assert achados == [], f"\n{descrever(achados)}"
+
+
+@pytest.mark.parametrize(("largura", "altura"), LARGURAS)
+def test_the_analysis_panel_has_no_layout_or_contrast_defects(
+    browser,  # noqa: F811
+    server,  # noqa: F811
+    largura,
+    altura,
+):
+    """O painel da analise tambem passa pela regua, e nao pelo meu olho.
+
+    Ele nasce com texto longo do modelo e um bloco de JSON: as duas coisas que
+    mais escapam da caixa -- e as duas que um print faz parecer certas.
+    """
+    from tests.browser.test_audit_browser import stub_analysis
+
+    page, problemas = abrir(browser, server, "/requests", largura, altura)
+    stub_analysis(page)
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    page.wait_for_timeout(300)
+    achados = auditar(page)
+    page.click('.tabs button[data-tab="dossier"]')
+    page.wait_for_selector("pre.raw")
+    page.wait_for_timeout(300)
+    achados += auditar(page)
+    page.close()
+    assert problemas == []
+    assert achados == [], f"\n{descrever(achados)}"

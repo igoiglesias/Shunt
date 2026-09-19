@@ -178,6 +178,31 @@
     cursor: pointer;
   }
   .talk mark { background: rgba(196, 122, 28, 0.40); color: inherit; }
+
+  /* A leitura do modelo é prosa, e prosa em fonte monoespaçada com 90 colunas
+     cansa: texto em sans, medida presa, e as quebras de linha preservadas
+     porque a resposta vem numerada. */
+  .read {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.65;
+    max-width: 68ch;
+    margin: 10px 0 14px;
+  }
+  /* O dossiê é o oposto: número alinhado, em monoespaçada, com rolagem própria
+     -- ele existe para ser CONFERIDO, e não lido de ponta a ponta. */
+  pre.raw {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    overflow: auto;
+    max-height: 60vh;
+    margin: 8px 0 0;
+    padding: 10px;
+    border: 1px solid var(--edge);
+    border-radius: 6px;
+  }
   .body-bar {
     display: flex;
     gap: 8px;
@@ -226,7 +251,10 @@
   @media (max-width: 900px) {
     form > * { min-width: 0; }
     #range { width: 100%; }
-    main { grid-template-columns: 1fr; }
+    /* `main.with-detail` tem mais especificidade que `main`, entao repetir a
+       classe aqui e o que faz o empilhamento valer: sem isso o painel abria com
+       150px de largura no telefone, e a leitura saia em coluna de 100px. */
+    main, main.with-detail { grid-template-columns: 1fr; }
     aside {
       border-left: 0;
       border-top: 1px solid var(--edge);
@@ -317,6 +345,7 @@
   <span class="spacer"></span>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
   <button type="button" class="ghost" id="export">Exportar CSV</button>
+  <button type="button" class="ghost" id="analyse">Analisar este período</button>
   </div>
 </form>
 
@@ -792,6 +821,93 @@ function detailOf(event) {
     </div>
   `;
 }
+
+// A análise do período usa o painel lateral do detalhe: é a mesma pergunta
+// ("o que está acontecendo aqui"), só que sobre o recorte inteiro em vez de
+// sobre uma linha. Abrir uma segunda área ao lado espremeria a tabela.
+let analysis = null;
+
+function analysisOf(item) {
+  const spent = item.cached
+    ? "reaproveitada — não custou tokens agora"
+    : `${compact(item.input_tokens || 0)} entrada · ${compact(item.output_tokens || 0)} saída · ${ms(item.duration_ms)}`;
+  const dossier = JSON.stringify(item.dossier || {}, null, 2);
+  const requests = item.dossier?.volume?.requests ?? 0;
+  const sampled = item.dossier?.volume?.sampled
+    ? `<p class="empty">O período tem ${compact(requests)} requisições e a análise leu ${compact(item.dossier.volume.rows_read)}: os números descrevem uma amostra.</p>`
+    : "";
+  return `
+    <div class="detail-head">
+      <h2>Análise do período</h2>
+      <button type="button" class="ghost" id="close-detail">Fechar</button>
+    </div>
+    <p class="id">${esc(item.candidate_model || item.requested_model || "")} · ${esc(spent)}</p>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="analysis" aria-selected="true">Leitura</button>
+      <button type="button" role="tab" data-tab="dossier" aria-selected="false">Dossiê</button>
+    </div>
+    <div id="analysis-text">
+      ${sampled}
+      <p class="read">${esc(item.text || "")}</p>
+      <button type="button" class="ghost" id="reanalyse">Refazer análise</button>
+    </div>
+    <div id="analysis-dossier" hidden>
+      <p class="empty">Os números que a leitura acima tem de citar. ${compact(requests)} requisições no recorte.</p>
+      <pre class="raw">${esc(dossier)}</pre>
+    </div>
+  `;
+}
+
+function wireAnalysis() {
+  const tabs = el("detail").querySelectorAll(".tabs button");
+  for (const tab of tabs) {
+    tab.addEventListener("click", () => {
+      for (const other of tabs) other.setAttribute("aria-selected", String(other === tab));
+      el("analysis-text").hidden = tab.dataset.tab !== "analysis";
+      el("analysis-dossier").hidden = tab.dataset.tab !== "dossier";
+    });
+  }
+  el("close-detail")?.addEventListener("click", closeDetail);
+  el("reanalyse")?.addEventListener("click", () => analysePeriod({ refresh: true }));
+}
+
+async function analysePeriod({ refresh } = {}) {
+  selected = null;
+  showDetail();
+  el("detail").innerHTML = `<p class="empty loading" role="status">Analisando o período…
+    isso chama um modelo pelo próprio proxy, e custa tokens.</p>`;
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(state)) {
+    if (key !== "order_by" && value !== "" && value !== null && value !== undefined) {
+      params.set(key, value);
+    }
+  }
+  try {
+    const response = await fetch(`/api/analysis?${params}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ refresh: Boolean(refresh) }),
+    });
+    const item = await response.json();
+    if (!response.ok) {
+      el("detail").innerHTML = `
+        <div class="detail-head">
+          <h2>Análise do período</h2>
+          <button type="button" class="ghost" id="close-detail">Fechar</button>
+        </div>
+        <p class="empty">${esc(item.error || "não deu para analisar")}</p>`;
+      el("close-detail")?.addEventListener("click", closeDetail);
+      return;
+    }
+    analysis = item;
+    el("detail").innerHTML = analysisOf(item);
+    wireAnalysis();
+  } catch (err) {
+    el("detail").innerHTML = `<p class="empty">não deu para analisar: ${esc(err)}</p>`;
+  }
+}
+
+el("analyse").addEventListener("click", () => analysePeriod());
 
 function periodToState(choice) {
   delete state.since;

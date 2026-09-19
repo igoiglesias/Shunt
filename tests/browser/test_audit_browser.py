@@ -707,3 +707,141 @@ def test_at_laptop_width_the_table_keeps_duration_and_status_visible(browser, se
     assert medido["rotaVisivel"] is False
     assert medido["duracaoDentro"], "a duracao ficou fora da area visivel"
     assert medido["statusDentro"], "o status ficou fora da area visivel"
+
+
+# A analise chama um modelo de verdade, e nenhum provedor existe aqui. A rota e
+# interceptada com uma resposta canonica: o que se mede nesta secao e a TELA --
+# se o botao manda os filtros ativos, se a leitura e o dossie aparecem, e se o
+# erro vira texto legivel em vez de painel vazio.
+ANALISE = {
+    "id": 1,
+    "status": 200,
+    "cached": False,
+    "text": "1. Tire a ferramenta Bash do catálogo: oferecida 8, chamada 8.\n2. Segunda coisa.",
+    "requested_model": "claude-opus-5",
+    "candidate_model": "openai/gpt-oss-120b",
+    "provider": "groq",
+    "input_tokens": 12000,
+    "output_tokens": 800,
+    "duration_ms": 9400,
+    "dossier": {
+        "period": {"since": None, "until": None, "filters": {"provider": "groq"}},
+        "volume": {"requests": 24, "rows_read": 24, "sampled": False, "errors": 4},
+        "tools": [{"tool": "Bash", "offered": 8, "called": 8, "call_rate": 1.0}],
+    },
+}
+
+
+def stub_analysis(page, payload=ANALISE, status=200):
+    """Substitui a rota da analise e devolve os pedidos que a tela fez."""
+    import json as _json
+
+    pedidos = []
+
+    def handle(route, request):
+        pedidos.append(request.url)
+        route.fulfill(
+            status=status,
+            content_type="application/json",
+            body=_json.dumps(payload),
+        )
+
+    page.route("**/api/analysis*", handle)
+    return pedidos
+
+
+def test_analysis_button_sends_the_filters_on_screen(browser, server):
+    page, problems = open_audit(browser, server, query="?provider=groq&has_tools=true")
+    pedidos = stub_analysis(page)
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    leitura = page.inner_text(".read")
+    page.close()
+    assert problems == []
+    assert "provider=groq" in pedidos[0]
+    assert "has_tools=true" in pedidos[0]
+    # `order_by` ordena uma listagem e nao um periodo: mandar adiante faria a
+    # rota recusar o dossie.
+    assert "order_by" not in pedidos[0]
+    assert leitura.startswith("1. Tire a ferramenta Bash")
+
+
+def test_the_dossier_behind_the_reading_can_be_checked(browser, server):
+    page, problems = open_audit(browser, server)
+    stub_analysis(page)
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    page.click('.tabs button[data-tab="dossier"]')
+    page.wait_for_selector("pre.raw")
+    dossie = page.inner_text("pre.raw")
+    visivel = page.evaluate(
+        """() => ({
+            dossie: !document.getElementById('analysis-dossier').hidden,
+            leitura: !document.getElementById('analysis-text').hidden,
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert visivel["dossie"]
+    # Uma aba de cada vez: as duas juntas empilhariam o JSON embaixo da leitura
+    # e a aba deixaria de significar alguma coisa.
+    assert visivel["leitura"] is False
+    # Quem le "oferecida 8, chamada 8" precisa achar os dois numeros.
+    assert '"offered": 8' in dossie
+    assert '"called": 8' in dossie
+
+
+def test_an_analysis_error_is_shown_as_text_and_not_as_an_empty_panel(browser, server):
+    page, problems = open_audit(browser, server)
+    stub_analysis(
+        page,
+        payload={"status": 409, "error": "nenhum modelo declarado para a análise", "text": ""},
+        status=409,
+    )
+    page.click("#analyse")
+    page.wait_for_selector("#detail .empty")
+    texto = page.inner_text("#detail")
+    virou_analise = page.evaluate("() => Boolean(document.getElementById('analysis-text'))")
+    page.close()
+    # Erro NAO vira painel de analise com texto vazio: quem clicou tem de ler o
+    # motivo, e nao uma leitura em branco com abas.
+    assert virou_analise is False
+    # O 409 e a resposta esperada aqui, e o navegador registra todo status >= 400
+    # no console; o que nao pode aparecer e erro de JavaScript.
+    assert [p for p in problems if "409" not in p] == []
+    assert "nenhum modelo declarado" in texto
+
+
+def test_a_reused_analysis_says_it_cost_nothing_now(browser, server):
+    page, problems = open_audit(browser, server)
+    stub_analysis(page, payload={**ANALISE, "cached": True})
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    cabecalho = page.inner_text("#detail .id")
+    page.close()
+    assert problems == []
+    assert "reaproveitada" in cabecalho
+
+
+def test_on_a_phone_the_side_panel_takes_the_whole_width(browser, server):
+    """Medido: o painel abria com 150 px e a leitura saía numa coluna de 100 px.
+
+    `main.with-detail` tem mais especificidade que `main`, então a regra de
+    empilhamento do telefone perdia sem nunca ser lida como erro -- o painel
+    aparecia, só que espremido.
+    """
+    page, problems = open_audit(browser, server, width=390, height=844)
+    stub_analysis(page)
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    medido = page.evaluate(
+        """() => ({
+            painel: Math.round(document.getElementById('detail').getBoundingClientRect().width),
+            leitura: Math.round(document.querySelector('.read').getBoundingClientRect().width),
+            tela: document.documentElement.clientWidth,
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert medido["painel"] >= medido["tela"] - 2, medido
+    assert medido["leitura"] > 250, medido
