@@ -333,6 +333,7 @@ never sees anything before `message_start`.
 | `GET` | `/v1/models` | Your catalogue, in the dialect the caller speaks. |
 | `GET` | `/api/stats` | The panel's summary as JSON, cached for a few seconds. |
 | `GET` | `/api/stats/stream` | One SSE event per finished request, read from memory. |
+| `POST` | `/api/stats/clear` | Deletes the stored history. Needs `{"confirm": true}`. |
 
 `/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
 `x-api-key` or a Claude user agent; OpenAI shape to one sending only
@@ -383,6 +384,29 @@ visible:
 | Recording to the database | 2.92 ms | 4.85 ms | 5.85 ms |
 | Recording, panel open | 3.05 ms | 4.70 ms | 5.76 ms |
 | Database unreachable | 2.58 ms | 3.75 ms | 4.16 ms |
+
+### Clearing the history
+
+The panel's footer has a **Limpar histórico** button. It takes two clicks: the
+first arms it and says how many requests are about to go, the second does it,
+and leaving it alone disarms it after eight seconds. The same thing from a
+terminal, for a script or a cron:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/stats/clear \
+  -H 'content-type: application/json' \
+  -d '{"confirm": true}'
+# {"deleted": 194, "older_than_hours": null}
+
+# Keep the last hour, drop everything older:
+curl -X POST http://127.0.0.1:8000/api/stats/clear \
+  -H 'content-type: application/json' \
+  -d '{"confirm": true, "older_than_hours": 1}'
+```
+
+The `confirm` is required, and a POST without it is refused. Deleting history
+never touches a request in flight: the recorder only inserts, and its queue is
+not consulted here.
 
 Recording costs about a third of a millisecond at the median on a 2.6 ms floor.
 Against a real provider — 371 ms for a measured Groq call — that is under half a

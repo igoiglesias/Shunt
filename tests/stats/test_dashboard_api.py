@@ -35,6 +35,15 @@ def _request_with(recorder):
     return _FakeRequest(recorder)
 
 
+def _json(payload):
+    """Substitui `Request.json`, que e assincrono."""
+
+    async def read():
+        return payload
+
+    return read
+
+
 @pytest.fixture
 def panel(make_engine, tmp_path):
     engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
@@ -207,3 +216,66 @@ def test_the_stream_serialises_instants_the_same_way_the_summary_does():
     chunk = _sse({"started_at": moment}).decode()
     assert "2026-09-19T08:30:00+00:00" in chunk
     assert "2026-09-19 08:30" not in chunk
+
+
+async def test_clearing_needs_an_explicit_confirmation(panel):
+    from app.routers.dashboard import clear_stats
+
+    request = _request_with(panel)
+    request.json = _json({})
+    refused = await clear_stats(request)
+    assert refused.status_code == 400
+    assert b"confirm" in refused.body
+
+    request = _request_with(panel)
+    request.json = _json({"confirm": True})
+    done = await clear_stats(request)
+    assert done.status_code == 200
+    assert json.loads(done.body)["deleted"] == 2
+
+
+async def test_clearing_with_no_database_says_so_instead_of_pretending():
+    from app.routers.dashboard import clear_stats
+
+    request = _request_with(Recorder(None))
+    request.json = _json({"confirm": True})
+    answer = await clear_stats(request)
+    assert answer.status_code == 409
+
+
+async def test_clearing_only_the_past_is_accepted(panel):
+    from app.routers.dashboard import clear_stats
+
+    request = _request_with(panel)
+    request.json = _json({"confirm": True, "older_than_hours": 24})
+    answer = await clear_stats(request)
+    assert answer.status_code == 200
+    assert json.loads(answer.body)["older_than_hours"] == 24
+
+
+async def test_clearing_drops_the_cached_summary(panel):
+    """Sem isso o painel mostraria por segundos um resumo de linhas que sumiram."""
+    from app.routers import dashboard
+
+    await dashboard.stats(_request_with(panel))
+    assert dashboard._cache, "o resumo tinha de estar em cache"
+    request = _request_with(panel)
+    request.json = _json({"confirm": True})
+    await dashboard.clear_stats(request)
+    assert dashboard._cache == {}
+
+
+async def test_a_body_that_is_not_an_object_is_refused(panel):
+    from app.routers.dashboard import clear_stats
+
+    request = _request_with(panel)
+    request.json = _json(["confirm"])
+    assert (await clear_stats(request)).status_code == 400
+
+    request = _request_with(panel)
+
+    async def broken():
+        raise ValueError("corpo ilegivel")
+
+    request.json = broken
+    assert (await clear_stats(request)).status_code == 400

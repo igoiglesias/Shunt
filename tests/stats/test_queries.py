@@ -284,3 +284,17 @@ def test_a_missing_instant_comes_back_as_null_instead_of_raising():
 
     assert _utc(None) is None
     assert _utc(datetime(2026, 9, 19, 8, 30, tzinfo=UTC)).endswith("+00:00")
+
+
+def test_clearing_removes_everything_and_says_how_much(seeded):
+    assert queries.totals(seeded, hours=24)["requests"] == 5
+    assert queries.delete_events(seeded) == 5
+    assert queries.totals(seeded, hours=24)["requests"] == 0
+    assert queries.delete_events(seeded) == 0, "limpar duas vezes nao inventa linhas"
+
+
+def test_clearing_only_the_past_keeps_what_is_recent(seeded):
+    """Zerar o passado sem perder o que esta acontecendo agora."""
+    removed = queries.delete_events(seeded, older_than_hours=1)
+    assert removed == 1, "so a linha de cinco horas atras era antiga"
+    assert queries.totals(seeded, hours=24)["requests"] == 4

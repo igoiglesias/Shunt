@@ -324,3 +324,40 @@ def test_the_tape_can_show_only_the_failures(browser, server):
     assert filtered < total, "o filtro nao escondeu nada"
     assert all(kinds), "linha sem falha sobreviveu ao filtro"
     assert back == total, "o filtro nao soltou a lista"
+
+
+def test_clearing_the_history_takes_two_clicks_and_then_empties_the_panel(browser, server):
+    """Apagar e irreversivel: o primeiro clique arma e diz quanto vai embora."""
+    page, problems = open_panel(browser, server, 1400, 900)
+    before = page.evaluate("() => snapshot.totals.requests")
+    assert before > 0
+
+    button = page.locator("#clear")
+    button.click()
+    page.wait_for_timeout(200)
+    armed = button.inner_text()
+    assert str(before) in armed, f"o botao armado nao disse quanto apaga: {armed!r}"
+
+    button.click()
+    page.wait_for_function("() => snapshot.totals.requests === 0", timeout=10_000)
+    said = page.locator("#clear-said").inner_text()
+    tape = page.locator("#tape li").count()
+    page.close()
+    assert problems == []
+    assert "apagadas" in said
+    assert tape == 0
+
+
+def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
+    page, _ = open_panel(browser, server, 1400, 900)
+    page.evaluate("() => { window.__armWait = 8000; }")
+    button = page.locator("#clear")
+    button.click()
+    assert button.get_attribute("data-armed") == "true"
+    page.evaluate("() => disarmClear()")
+    page.wait_for_timeout(100)
+    state = button.get_attribute("data-armed")
+    label = button.inner_text()
+    page.close()
+    assert state == "false"
+    assert label == "Limpar histórico"

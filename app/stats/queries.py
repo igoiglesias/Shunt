@@ -18,7 +18,7 @@ dialeto do SQLite.
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, case, func, select
+from sqlalchemy import Engine, case, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.stats.models import RequestEvent
@@ -284,6 +284,27 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
         }
         for row in rows
     ]
+
+
+def delete_events(engine: Engine, older_than_hours: float | None = None) -> int:
+    """Apaga o historico e devolve quantas linhas sairam.
+
+    Sem `older_than_hours` limpa tudo; com ele guarda o recorte recente, que e
+    o caso de quem quer zerar o passado sem perder o que esta acontecendo
+    agora. Apagar estatistica nao afeta uma requisicao em voo: o gravador so
+    insere, e a fila dele nao e consultada aqui.
+    """
+    statement = delete(RequestEvent)
+    if older_than_hours is not None:
+        statement = statement.where(RequestEvent.started_at < _since(older_than_hours))
+    with Session(engine) as session:
+        result = session.execute(statement)
+        # `rowcount` existe no resultado de um DELETE, mas nao na assinatura
+        # generica de `execute`; o `getattr` e para o verificador de tipos, e
+        # nao para o tempo de execucao.
+        removed = getattr(result, "rowcount", 0) or 0
+        session.commit()
+    return int(removed)
 
 
 def snapshot(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:

@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.stats import queries
 
@@ -138,6 +138,37 @@ def _iso(value: Any) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+@router.post("/api/stats/clear")
+async def clear_stats(request: Request) -> JSONResponse:
+    """Apaga o historico do painel.
+
+    Exige `{"confirm": true}` no corpo. Nao e ceremonia: a rota apaga sem
+    volta, e um POST disparado por engano -- uma aba antiga, um `curl` de
+    historico -- nao pode levar o registro embora. `older_than_hours` guarda o
+    recorte recente para quem so quer zerar o passado.
+    """
+    engine = _engine(request)
+    if engine is None:
+        return JSONResponse(
+            status_code=409,
+            content={"error": "sem banco configurado: nao ha historico para apagar"},
+        )
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return JSONResponse(
+            status_code=400,
+            content={"error": 'envie {"confirm": true} para apagar o historico'},
+        )
+    raw = body.get("older_than_hours")
+    older = _window(str(raw)) if raw is not None else None
+    deleted = await asyncio.to_thread(queries.delete_events, engine, older)
+    _cache.clear()
+    return JSONResponse({"deleted": deleted, "older_than_hours": older})
 
 
 def _sse(payload: dict[str, Any]) -> bytes:
