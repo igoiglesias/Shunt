@@ -128,7 +128,7 @@ def _grouped(engine: Engine, column, hours: int, limit: int, label: str) -> list
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
                 func.coalesce(func.avg(RequestEvent.duration_ms), 0),
             )
-            .where(RequestEvent.started_at >= since, column.is_not(None))
+            .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
             .group_by(column)
             .order_by(func.count(RequestEvent.id).desc())
             .limit(limit)

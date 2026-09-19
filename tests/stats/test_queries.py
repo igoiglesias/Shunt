@@ -219,3 +219,24 @@ def test_the_percentile_sorts_before_it_picks(make_engine, tmp_path):
     totals = queries.totals(engine, hours=1)
     assert totals["p50_duration_ms"] == 50
     assert totals["p95_duration_ms"] == 90
+
+
+def test_a_route_that_asks_for_no_model_is_not_a_requested_model(make_engine, tmp_path):
+    """Medido com trafego real: `/v1/models` grava modelo vazio.
+
+    Vazio nao e NULL, entao o filtro de nulos deixava passar uma linha sem nome
+    no diagrama do painel.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'vazio.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="m", requested_model="claude-haiku-4-5"),
+                row(request_id="l", route="/v1/models", requested_model="", candidate_model=None),
+            ]
+        )
+        session.commit()
+    asked = queries.by_requested_model(engine)
+    assert [group["requested_model"] for group in asked] == ["claude-haiku-4-5"]
+    # A rota em si continua contada: o que sai e so o "modelo" que nao existe.
+    assert len(queries.by_route(engine)) == 2

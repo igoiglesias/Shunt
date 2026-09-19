@@ -220,3 +220,32 @@ def test_the_api_answers_the_same_json_the_panel_parses(server):
     body = httpx.get(f"{server}/api/stats", timeout=10).json()
     assert json.loads(json.dumps(body)) == body
     assert set(body) >= {"totals", "per_hour", "by_model", "chain", "tools", "recent", "health"}
+
+
+def test_a_single_hour_of_traffic_draws_bars_instead_of_a_flat_line(browser, server):
+    """Medido com trafego real: uma hora so desenhava uma linha de um ponto.
+
+    Quem acaba de subir o proxy tem exatamente uma hora de historico, e o painel
+    nao pode parecer quebrado justamente na primeira olhada.
+    """
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="1h").click()
+    page.wait_for_function("document.querySelectorAll('#series rect').length > 0", timeout=10_000)
+    bars = page.locator("#series rect").count()
+    page.close()
+    assert problems == []
+    assert bars >= 2, "uma hora de trafego desenha as duas barras"
+
+
+def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, server):
+    """`/v1/models` nao pede modelo; o diagrama nao pode ganhar uma linha sem nome."""
+    page, _ = open_panel(browser, server, 1400, 900)
+    httpx.get(f"{server}/v1/models", timeout=10)
+    page.reload(wait_until="networkidle")
+    page.wait_for_selector("#flow text.flow-label")
+    labels = page.evaluate(
+        "() => [...document.querySelectorAll('#flow text.flow-label')].map(t => t.textContent.trim())"
+    )
+    page.close()
+    assert labels
+    assert "" not in labels

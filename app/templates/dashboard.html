@@ -339,9 +339,40 @@ function drawSeries() {
   const maxRequests = Math.max(...points.map((p) => p.requests), 1);
   const maxTokens = Math.max(...points.map((p) => p.input_tokens + p.output_tokens), 1);
   const step = points.length > 1 ? (width - pad * 2) / (points.length - 1) : 0;
-  const x = (i) => pad + i * step;
+  const x = (i) => (points.length > 1 ? pad + i * step : width / 2);
   const yR = (v) => height - 22 - (v / maxRequests) * (height - 40);
   const yT = (v) => height - 22 - (v / maxTokens) * (height - 40);
+  const base = height - 22;
+  const ticks = points.map((p, i) => (i % Math.ceil(points.length / 8) === 0
+    ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(p.hour.slice(11, 16))}</text>`
+    : "")).join("");
+  const peak = `<text class="axis" x="${pad}" y="12">pico ${maxRequests} req · ${compact(maxTokens)} tok</text>`;
+
+  // Menos de três horas de tráfego não fazem uma linha: fazem duas barras.
+  // O painel de quem acabou de subir o proxy não pode parecer quebrado.
+  if (points.length < 3) {
+    const barWidth = 26;
+    el("series").innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Requisições e tokens por hora">
+        ${points.map((p, i) => {
+          const cx = x(i);
+          const tokens = p.input_tokens + p.output_tokens;
+          return `
+            <rect x="${cx - barWidth - 3}" y="${yR(p.requests)}" width="${barWidth}"
+                  height="${(base - yR(p.requests)).toFixed(1)}" fill="var(--requests)" opacity="0.85" />
+            <rect x="${cx + 3}" y="${yT(tokens)}" width="${barWidth}"
+                  height="${(base - yT(tokens)).toFixed(1)}" fill="var(--tokens)" opacity="0.85" />
+            <text class="flow-sub" x="${cx - barWidth / 2 - 3}" y="${yR(p.requests) - 6}"
+                  text-anchor="middle">${p.requests}</text>
+            <text class="flow-sub" x="${cx + barWidth / 2 + 3}" y="${yT(tokens) - 6}"
+                  text-anchor="middle">${compact(tokens)}</text>`;
+        }).join("")}
+        <line x1="${pad}" y1="${base}" x2="${width - pad}" y2="${base}" stroke="var(--panel-edge)" />
+        ${ticks}${peak}
+      </svg>`;
+    return;
+  }
+
   const line = (accessor, y) => points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(accessor(p)).toFixed(1)}`).join("");
   el("series").innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Requisições e tokens por hora">
@@ -349,9 +380,7 @@ function drawSeries() {
       <path d="${line((p) => p.requests, yR)}" fill="none" stroke="var(--requests)" stroke-width="2" />
       ${points.map((p, i) => p.errors
         ? `<circle cx="${x(i).toFixed(1)}" cy="${yR(p.requests).toFixed(1)}" r="3" fill="var(--error)" />` : "").join("")}
-      ${points.map((p, i) => (i % Math.ceil(points.length / 8) === 0
-        ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(p.hour.slice(11, 16))}</text>` : "")).join("")}
-      <text class="axis" x="${pad}" y="12">pico ${maxRequests} req · ${compact(maxTokens)} tok</text>
+      ${ticks}${peak}
     </svg>`;
 }
 
