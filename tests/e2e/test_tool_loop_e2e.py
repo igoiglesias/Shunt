@@ -108,8 +108,8 @@ def test_two_turn_tool_loop_keeps_the_tool_id_linked(shunt, provider):
         },
     )
     sent = provider.bodies[1]["messages"]
-    assistant = [m for m in sent if m.get("tool_calls")][0]
-    tool_message = [m for m in sent if m["role"] == "tool"][0]
+    assistant = next(m for m in sent if m.get("tool_calls"))
+    tool_message = next(m for m in sent if m["role"] == "tool")
     assert assistant["tool_calls"][0]["id"] == "call_xyz"
     assert tool_message["tool_call_id"] == "call_xyz"
 
@@ -183,7 +183,7 @@ def test_streaming_tool_call_arrives_fragmented_and_is_reassembled(shunt, provid
         if d.get("delta", {}).get("type") == "input_json_delta"
     ]
     assert json.loads("".join(fragments)) == {"path": "a.txt"}
-    closing = [d for d in datas_of(body) if d["type"] == "message_delta"][0]
+    closing = next(d for d in datas_of(body) if d["type"] == "message_delta")
     assert closing["delta"]["stop_reason"] == "tool_use"
     assert closing["usage"]["output_tokens"] == 7
 

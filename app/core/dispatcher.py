@@ -200,6 +200,20 @@ def _translate_response(data: dict, req: ShuntRequest, candidate: Candidate) -> 
     return anthropic_response_to_openai(data, requested)
 
 
+def _exception_text(exc: BaseException | None) -> str:
+    """Nome da classe mais a mensagem, porque a mensagem sozinha pode ser vazia.
+
+    Medido contra um llama.cpp real: `str(httpx.ReadTimeout())` e a string
+    vazia, e o cliente recebia `" - tried: qwen-local:  (attempt 1)"`, que nao
+    diz nem que houve timeout. O nome da classe e o unico pedaco que o httpx
+    sempre da.
+    """
+    if exc is None:
+        return "transport failure"
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
 def _retry_after(response: httpx.Response | None) -> float | None:
     if response is None:
         return None
@@ -335,7 +349,7 @@ async def _dispatch(
             if response is not None:
                 last_status, last_message = response.status_code, _error_message(response)
             else:
-                last_status, last_message = 502, str(exc)
+                last_status, last_message = 502, _exception_text(exc)
             trace.append(f"{label}: {last_status} (attempt {attempt})")
             if outcome is Outcome.SKIP:
                 break
@@ -658,8 +672,8 @@ async def _stream_chain(
             try:
                 response = await client.send(request, stream=True)
             except httpx.HTTPError as err:
-                trace.append(f"{label}: {err} (attempt {attempt})")
-                last_message = str(err)
+                trace.append(f"{label}: {_exception_text(err)} (attempt {attempt})")
+                last_message = _exception_text(err)
                 response = None
                 if classify(None, err, None) is not Outcome.RETRY:
                     break
@@ -740,9 +754,9 @@ async def _stream_chain(
                 # provider terminating its own stream in its own protocol
                 # (Anthropic's API does exactly that), and a `message_stop`
                 # after it would tell the client the message completed.
-                yield _stream_error(req, str(err))
+                yield _stream_error(req, _exception_text(err))
             else:
-                state.failed = str(err)
+                state.failed = _exception_text(err)
         finally:
             await response.aclose()
 

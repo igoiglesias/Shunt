@@ -647,8 +647,8 @@ async def test_every_candidate_failing_yields_one_error_event_with_the_trace(mon
     assert events_of(body) == ["error"]
     # 400 e a fronteira: status abaixo dela seguem para o corpo.
     assert "free: 400" in body
-    assert "cheap: recusou" in body
-    assert "recusou - tried:" in body
+    assert "cheap: ConnectError: recusou" in body
+    assert "ConnectError: recusou - tried:" in body
 
 
 @respx.mock
@@ -923,7 +923,7 @@ async def test_the_last_upstream_status_message_is_the_one_reported(monkeypatch)
         ]
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
-    assert "free: recusou" in body
+    assert "free: ConnectError: recusou" in body
     assert "cheap: 400" in body
     # A mensagem final e a do ULTIMO candidato, extraida do corpo do erro.
     assert "sem saldo - tried:" in body
@@ -1152,8 +1152,8 @@ async def test_a_mid_stream_failure_before_the_start_is_named_in_the_trace():
         )
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
-    assert "free: conexao caiu" in body
-    assert "conexao caiu - tried:" in body
+    assert "free: RemoteProtocolError: conexao caiu" in body
+    assert "RemoteProtocolError: conexao caiu - tried:" in body
 
 
 @respx.mock
@@ -1367,8 +1367,8 @@ async def test_the_attempt_number_is_in_the_trace(monkeypatch):
         side_effect=[httpx.ConnectError("recusou")] * MAX_ATTEMPTS
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), SOLO_SETTINGS)).decode()
-    assert "free: recusou (attempt 1)" in body
-    assert f"free: recusou (attempt {MAX_ATTEMPTS})" in body
+    assert "free: ConnectError: recusou (attempt 1)" in body
+    assert f"free: ConnectError: recusou (attempt {MAX_ATTEMPTS})" in body
     # Nenhuma espera depois da ultima tentativa: nada mais vem depois dela.
     assert seen == list(range(1, MAX_ATTEMPTS))
 
