@@ -136,3 +136,32 @@ def test_writing_with_no_engine_does_nothing(make_engine, tmp_path):
     recorder._write([event()])
     assert recorder.commits == 0
     assert recorder.failures == 0
+
+
+async def test_the_panel_bus_gets_the_event_even_with_no_database(make_engine):
+    """Olhar o proxy correndo nao pode exigir Turso configurado."""
+    recorder = Recorder(None)
+    queue = recorder.subscribe()
+    recorder.record(event(request_id="ao-vivo"))
+    assert queue.get_nowait()["request_id"] == "ao-vivo"
+
+
+async def test_a_slow_panel_reader_never_holds_up_the_recorder(make_engine, tmp_path):
+    recorder = Recorder(engine_for(make_engine, tmp_path), max_queue=10_000)
+    queue = recorder.subscribe()
+    started = time.perf_counter()
+    for i in range(500):
+        recorder.record(event(request_id=f"r{i}"))
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.2, f"record() custou {elapsed:.4f}s com um leitor parado"
+    assert queue.qsize() == 100, "a fila do assinante tem teto"
+    assert recorder.dropped == 0, "o leitor lento nao pode custar evento gravado"
+
+
+async def test_unsubscribing_stops_the_delivery(make_engine):
+    recorder = Recorder(None)
+    queue = recorder.subscribe()
+    recorder.unsubscribe(queue)
+    recorder.unsubscribe(queue)  # idempotente: o SSE fecha uma vez so, mas fecha sempre
+    recorder.record(event())
+    assert queue.empty()

@@ -30,6 +30,9 @@ logger = logging.getLogger("shunt")
 MAX_QUEUE = 10_000
 BATCH_SIZE = 200
 INTERVAL = 1.0
+# Fila de cada navegador no painel. Pequena de proposito: leitor lento perde
+# linha ao vivo, nunca segura quem esta gravando.
+SUBSCRIBER_QUEUE = 100
 # Prazo do dreno final. Um `aclose` que espera o banco indefinidamente trocaria
 # um desligamento limpo por um processo pendurado.
 DRAIN_TIMEOUT = 5.0
@@ -48,6 +51,7 @@ class Recorder:
         self._interval = interval
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=max_queue)
         self._task: asyncio.Task | None = None
+        self._subscribers: list[asyncio.Queue] = []
         self.dropped = 0
         self.failures = 0
         self.commits = 0
@@ -57,8 +61,36 @@ class Recorder:
         return self._engine is not None
 
     @property
+    def engine(self) -> Engine | None:
+        return self._engine
+
+    @property
     def queued(self) -> int:
         return self._queue.qsize()
+
+    def subscribe(self) -> asyncio.Queue:
+        """Uma fila por navegador aberto no painel.
+
+        O SSE do painel escuta AQUI, e nao o banco: um navegador aberto nao
+        pode virar consulta repetida. Cada assinante tem fila propria e
+        pequena, porque um leitor lento nao pode segurar o proxy -- quando
+        enche, o evento passa direto e aquele navegador perde a linha ao vivo,
+        que a proxima atualizacao do resumo corrige.
+        """
+        queue: asyncio.Queue = asyncio.Queue(maxsize=SUBSCRIBER_QUEUE)
+        self._subscribers.append(queue)
+        return queue
+
+    def unsubscribe(self, queue: asyncio.Queue) -> None:
+        if queue in self._subscribers:
+            self._subscribers.remove(queue)
+
+    def _publish(self, event: dict) -> None:
+        for queue in self._subscribers:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
 
     def record(self, event: dict) -> None:
         """Empilha o evento. Nunca espera, nunca levanta.
@@ -66,7 +98,11 @@ class Recorder:
         A unica coisa que pode acontecer de ruim aqui e o evento ser descartado,
         e isso e deliberado: ver o contador de descarte subir e melhor do que
         ver a latencia da API subir.
+
+        O barramento do painel e servido mesmo sem banco: quem so quer olhar o
+        proxy correndo nao precisa configurar Turso nenhum.
         """
+        self._publish(event)
         if self._engine is None:
             return
         try:
