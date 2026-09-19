@@ -3,7 +3,7 @@ import pytest
 import respx
 
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
-from app.core.dispatcher import ShuntRequest, dispatch, outbound_headers
+from app.core.dispatcher import ShuntRequest, _exception_text, dispatch, outbound_headers
 from app.core.resolver import Candidate
 from app.core.upstream import UpstreamPool
 
@@ -1412,3 +1412,10 @@ async def test_an_empty_chain_answers_an_openai_client_in_its_own_dialect():
     assert "type" not in result.body
     assert result.body["error"]["type"] == "invalid_request_error"
     assert "no candidate can serve this request" in result.body["error"]["message"]
+
+
+def test_exception_text_names_a_transport_failure_with_no_exception_object():
+    """`classify` pode dizer falha sem excecao em maos; a mensagem nao pode sair vazia."""
+    assert _exception_text(None) == "transport failure"
+    assert _exception_text(httpx.ReadTimeout("")) == "ReadTimeout"
+    assert _exception_text(httpx.ConnectError("recusou")) == "ConnectError: recusou"

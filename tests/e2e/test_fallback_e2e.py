@@ -158,6 +158,7 @@ def test_candidate_whose_credential_is_unset_is_skipped_not_called_unauthenticat
     assert response.status_code == 200
     assert response.headers["x-shunt-model"] == "qwen3-8b"
     assert len(provider.calls) == 1, "o candidato sem credencial nao pode ser chamado"
+    assert provider.calls[0].url.host == "fake.local", "a chamada foi para o provedor errado"
 
 
 def test_the_error_names_the_environment_variable_that_is_missing(shunt, settings, monkeypatch):
@@ -165,3 +166,60 @@ def test_the_error_names_the_environment_variable_that_is_missing(shunt, setting
     settings.routes = [("opus", ["free"])]
     body = shunt.post("/v1/messages", json=ASK).json()
     assert "OPENROUTER_API_KEY" in body["error"]["message"]
+
+
+def test_a_stream_also_skips_the_candidate_whose_credential_is_unset(
+    shunt, provider, settings, monkeypatch
+):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings.routes = [("opus", ["free", "qwen"])]
+    provider.queue(
+        Scripted(
+            sse=sse_chunks(
+                {"choices": [{"delta": {"content": "do local"}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            )
+        )
+    )
+    with shunt.stream("POST", "/v1/messages", json={**ASK, "stream": True}) as response:
+        body = "".join(response.iter_text())
+    assert len(provider.calls) == 1, "o candidato sem credencial nao pode ser chamado"
+    assert provider.calls[0].url.host == "fake.local", "a chamada foi para o provedor errado"
+    assert "do local" in body
+    assert "OPENROUTER_API_KEY" not in body
+
+
+def test_a_transparent_candidate_is_called_even_with_no_server_credential(
+    shunt, provider, monkeypatch
+):
+    """Transparente usa a chave do CLIENTE, entao a do servidor pode faltar.
+
+    Sem esta distincao, a regra de credencial ausente mataria justamente o modo
+    em que o proxy nao deve ter credencial nenhuma.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    provider.queue(
+        Scripted(
+            json_body={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-fable-5-1",
+                "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": "direto"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+    )
+    body = shunt.post(
+        "/v1/messages",
+        json={
+            "model": "claude-fable-5-1",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "oi"}],
+        },
+        headers={"x-api-key": "sk-ant-do-cliente"},
+    ).json()
+    assert len(provider.calls) == 1
+    assert body["content"][0]["text"] == "direto"
+    assert provider.calls[0].headers["x-api-key"] == "sk-ant-do-cliente"
