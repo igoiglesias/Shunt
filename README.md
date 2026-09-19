@@ -24,6 +24,7 @@ speaking Anthropic through the same proxy.
 - [What gets translated](#what-gets-translated)
 - [Fallback, retries and timeouts](#fallback-retries-and-timeouts)
 - [Endpoints](#endpoints)
+- [The usage panel](#the-usage-panel)
 - [Development](#development)
 - [What Shunt does not do](#what-shunt-does-not-do)
 
@@ -72,7 +73,7 @@ That runs uvicorn on port 8000 with reload enabled.
 **5. Check that it is up.**
 
 ```bash
-curl http://127.0.0.1:8000/
+curl http://127.0.0.1:8000/health
 # {"status":"ok"}
 
 curl -H 'anthropic-version: 2023-06-01' http://127.0.0.1:8000/v1/models
@@ -81,7 +82,8 @@ curl -H 'anthropic-version: 2023-06-01' http://127.0.0.1:8000/v1/models
 
 The health check deliberately touches neither your configuration nor your
 provider, so it answers even when those are broken. That is exactly the
-moment you need it to.
+moment you need it to. It lives at `/health`; the home page is the usage
+panel.
 
 **6. Send a real message.**
 
@@ -321,13 +323,16 @@ never sees anything before `message_start`.
 
 | Method | Path | Serves |
 | --- | --- | --- |
-| `GET` | `/` | Health check. Touches no configuration. |
+| `GET` | `/` | The usage panel. |
+| `GET` | `/health` | Health check. Touches no configuration. |
 | `POST` | `/v1/messages` | Anthropic Messages. Streaming supported. |
 | `POST` | `/v1/messages/count_tokens` | Forwards to an Anthropic provider when there is one; estimates locally otherwise. |
 | `POST` | `/v1/chat/completions` | OpenAI chat. Streaming supported. |
 | `POST` | `/v1/completions` | OpenAI legacy completions. No streaming. |
 | `POST` | `/v1/embeddings` | OpenAI embeddings. No streaming. |
 | `GET` | `/v1/models` | Your catalogue, in the dialect the caller speaks. |
+| `GET` | `/api/stats` | The panel's summary as JSON, cached for a few seconds. |
+| `GET` | `/api/stats/stream` | One SSE event per finished request, read from memory. |
 
 `/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
 `x-api-key` or a Claude user agent; OpenAI shape to one sending only
@@ -336,6 +341,48 @@ no signal either way, so whichever parser reads it finds its own fields.
 
 Errors follow the same rule: the envelope matches the protocol of whoever asked,
 never the protocol of whatever failed.
+
+
+---
+
+## The usage panel
+
+Open `http://127.0.0.1:8000/` and the home page shows what the proxy has been
+doing: which models were asked for against which actually answered, tokens per
+hour, time to first token, how often the first candidate sufficed, which tools
+were offered against which were called, and every error by status. Requests
+appear on the tape as they finish, pushed over SSE.
+
+Persistence is optional and off until you configure it:
+
+```bash
+# .env
+TURSO_DATABASE_URL=sqlite+libsql://your-database.turso.io
+TURSO_AUTH_TOKEN=...
+```
+
+With no database the panel still runs and still shows live traffic; it just
+keeps no history, and says so in its footer. A local file works too, which is
+the easiest way to try it: `TURSO_DATABASE_URL=sqlite+pysqlite:///./stats.db`.
+
+**The panel cannot slow the API down, and that is measured rather than claimed.**
+A finished request is put on a bounded in-memory queue and the response goes out;
+a single background worker writes batches of up to 200 rows in one commit. A full
+queue drops events and counts the drops — losing a statistic beats holding up a
+request. Against a local instant provider, so that only the proxy's own cost is
+visible:
+
+| | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| No persistence | 2.59 ms | 3.77 ms | 4.33 ms |
+| Recording to the database | 2.92 ms | 4.85 ms | 5.85 ms |
+| Recording, panel open | 3.05 ms | 4.70 ms | 5.76 ms |
+| Database unreachable | 2.58 ms | 3.75 ms | 4.16 ms |
+
+Recording costs about a third of a millisecond at the median on a 2.6 ms floor.
+Against a real provider — 371 ms for a measured Groq call — that is under half a
+percent, and an unreachable database costs nothing at all, because Shunt refuses
+to hand a dead host to the libsql driver in the first place.
 
 ---
 
@@ -347,6 +394,9 @@ make test    # the suite, without E2E
 make lint    # ruff
 make type    # mypy
 make check   # lint + type + suite with coverage
+make e2e     # the app end to end against a scripted provider
+make browser # the panel in a headless browser
+make prod    # no reload, one worker per core, access log off
 ```
 
 The proxy holds no credentials of its own. For a configured model it reads the
@@ -362,8 +412,9 @@ Stated plainly so none of it reads as an oversight:
 - **It does not make a small model behave like a large one.** Routing
   `claude-opus-4-5` to a 27B model gives you that 27B model, under a name Claude
   Code recognises.
-- **It does not cache, log or store your conversations.** Nothing is persisted
-  between requests, which is also why tool-call ids are encoded rather than
+- **It does not cache, log or store your conversations.** The usage panel keeps
+  one row per request — which model, which provider, how many tokens, how long —
+  and never the prompt or the answer. Tool-call ids are still encoded rather than
   remembered.
 - **It does not filter a provider's response.** Whatever the provider answers is
   translated and handed on. A field Shunt has never heard of reaches you intact,

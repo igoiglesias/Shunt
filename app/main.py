@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -27,7 +29,7 @@ async def lifespan(app: FastAPI):
     # engine nula e `record()` vira um no-op, sem um `if` sequer no caminho da
     # requisicao.
     if not hasattr(app.state, "recorder"):
-        app.state.recorder = Recorder(build_engine())
+        app.state.recorder = Recorder(await _engine_or_none())
     set_recorder(app.state.recorder)
     await app.state.recorder.start()
     yield
@@ -36,6 +38,30 @@ async def lifespan(app: FastAPI):
 
 
 DASHBOARD = Path(__file__).parent / "templates" / "dashboard.html"
+
+# Prazo para o banco responder no boot. Medido: com a URL apontada para uma
+# porta morta, `create_all` nao levanta -- ele PENDURA, e o proxy nunca chega a
+# servir a primeira requisicao. Um extra que impede o servico de subir deixou
+# de ser um extra, entao aqui ele tem relogio.
+ENGINE_BOOT_TIMEOUT = 10.0
+
+
+async def _engine_or_none():
+    """A engine, ou None quando o banco demora demais ou falha.
+
+    Roda em thread porque o dialeto do libsql e sincrono: sem isso o `wait_for`
+    nao teria como interromper o laco de eventos parado numa chamada bloqueante.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(build_engine), timeout=ENGINE_BOOT_TIMEOUT
+        )
+    except TimeoutError:
+        logging.getLogger("shunt").warning(
+            "stats: banco nao respondeu em %.0fs no boot; persistencia desligada",
+            ENGINE_BOOT_TIMEOUT,
+        )
+        return None
 
 app = FastAPI(lifespan=lifespan)
 

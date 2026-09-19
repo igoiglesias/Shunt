@@ -1,5 +1,7 @@
 """A home: o painel, e a checagem de vida que saiu dela."""
 
+import time
+
 from fastapi.testclient import TestClient
 
 from app.core.upstream import UpstreamPool
@@ -45,3 +47,23 @@ def test_the_panel_escapes_what_comes_from_the_provider():
 
 def test_the_panel_respects_a_reader_who_asked_for_less_motion():
     assert "prefers-reduced-motion" in DASHBOARD.read_text(encoding="utf-8")
+
+
+async def test_a_database_that_hangs_at_boot_does_not_hang_the_proxy(monkeypatch):
+    """Medido contra uma porta morta: `create_all` nao levanta, ele PENDURA.
+
+    Um extra que impede o servico de subir deixou de ser um extra. O boot
+    desiste do banco e serve sem persistencia.
+    """
+    from app import main
+
+    def never_answers():
+        # Curto o bastante para nao segurar a suite: o prazo do boot e menor ainda.
+        time.sleep(2)
+
+    monkeypatch.setattr(main, "build_engine", never_answers)
+    monkeypatch.setattr(main, "ENGINE_BOOT_TIMEOUT", 0.05)
+    started = time.monotonic()
+    engine = await main._engine_or_none()
+    assert engine is None
+    assert time.monotonic() - started < 5

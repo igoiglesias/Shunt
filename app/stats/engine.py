@@ -17,12 +17,51 @@ fora do caminho da requisicao e pode bloquear a vontade na propria thread.
 
 import logging
 import os
+import socket
+from urllib.parse import urlparse
 
 from sqlalchemy import Engine, create_engine
 
 from app.stats.models import Base
 
 logger = logging.getLogger("shunt")
+
+# Prazo do teste de alcance. Ele existe por uma medicao desagradavel: com a URL
+# do libsql apontada para uma porta morta, a conexao NAO levanta e NAO volta --
+# ela bloqueia segurando o GIL, e nem uma thread paralela consegue imprimir.
+# Quer dizer que um Turso fora do ar congelaria o proxy inteiro, que e
+# exatamente o que este epico nao pode causar. A defesa e nunca deixar o driver
+# tocar um host inalcancavel: um `connect` de socket comum, com relogio, decide
+# antes.
+REACH_TIMEOUT = 2.0
+DEFAULT_PORTS = {"libsql": 443, "https": 443, "http": 80}
+
+
+def _target(url: str) -> tuple[str, int] | None:
+    """Host e porta de uma URL de rede, ou None quando o destino e um arquivo."""
+    parsed = urlparse(url)
+    if not parsed.hostname:
+        return None
+    scheme = parsed.scheme.split("+")[-1]
+    if scheme in {"pysqlite", "sqlite"}:
+        return None
+    return parsed.hostname, parsed.port or DEFAULT_PORTS.get(scheme, 443)
+
+
+def reachable(url: str, timeout: float = REACH_TIMEOUT) -> bool:
+    """Da para abrir um socket ate o banco dentro do prazo?
+
+    Banco em arquivo responde True sem tocar em rede nenhuma.
+    """
+    target = _target(url)
+    if target is None:
+        return True
+    try:
+        with socket.create_connection(target, timeout=timeout):
+            return True
+    except OSError as err:
+        logger.warning("stats: banco inalcancavel em %s:%s (%s)", *target, err)
+        return False
 
 
 def database_url() -> str | None:
@@ -51,6 +90,8 @@ def build_engine(url: str | None = None) -> Engine | None:
     """
     url = url or database_url()
     if not url:
+        return None
+    if not reachable(url):
         return None
     try:
         engine = create_engine(url, pool_pre_ping=True)

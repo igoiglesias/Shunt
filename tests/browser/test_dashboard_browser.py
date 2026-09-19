@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 from app.stats.models import Base, RequestEvent
 
 pytest.importorskip("playwright.sync_api")
-from playwright.sync_api import sync_playwright  # noqa: E402
+from playwright.sync_api import sync_playwright
 
 
 def free_port() -> int:

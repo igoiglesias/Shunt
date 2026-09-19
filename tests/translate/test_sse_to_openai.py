@@ -292,3 +292,16 @@ def test_the_translator_reports_the_usage_it_saw():
     t.feed("message_start", {"message": {"usage": {"input_tokens": 9, "output_tokens": 0}}})
     t.feed("message_delta", {"delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 7}})
     assert t.usage() == {"input_tokens": 9, "output_tokens": 7}
+
+
+def test_thinking_blocks_are_counted_for_the_usage_panel():
+    """O contador so existe para o painel: ele nao muda um byte do que sai."""
+    translator = AnthropicStreamToOpenAI("gpt-4o", "chatcmpl-1")
+    before = translator.thinking_blocks()
+    chunks = translator.feed(
+        "content_block_start",
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+    )
+    assert translator.thinking_blocks() == before + 1
+    assert translator.tools_called() == []
+    assert chunks == []
