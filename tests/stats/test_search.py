@@ -242,3 +242,75 @@ def test_a_cursor_without_its_instant_falls_back_to_now(store):
     cursor = urlsafe_b64encode(b'{"id": 99, "duration_ms": 0}').decode().rstrip("=")
     page = queries.search_events(store, cursor=cursor)
     assert isinstance(page["events"], list)
+
+
+def test_two_requests_at_the_very_same_instant_do_not_repeat_across_pages(make_engine, tmp_path):
+    """Mutante A4: o cursor sem desempate por id sobreviveu a varredura.
+
+    Duas requisicoes do mesmo lote podem ter o mesmo instante ate o
+    microssegundo. Sem o desempate, a pagina seguinte comeca em "tudo que e
+    mais antigo que este instante" e as gemeas somem -- ou voltam duas vezes.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'gemeas.db'}")
+    instante = NOW - timedelta(minutes=1)
+    with Session(engine) as session:
+        session.add_all(
+            [row(request_id=f"gemea-{i}", started_at=instante, duration_ms=500) for i in range(4)]
+        )
+        session.commit()
+    vistos = []
+    cursor = None
+    for _ in range(4):
+        page = queries.search_events(engine, limit=2, cursor=cursor)
+        vistos += ids(page)
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert sorted(vistos) == ["gemea-0", "gemea-1", "gemea-2", "gemea-3"]
+    assert len(vistos) == len(set(vistos)), "a paginacao repetiu uma gemea"
+
+
+def test_the_same_holds_when_the_order_is_by_duration(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'iguais.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [row(request_id=f"igual-{i}", duration_ms=1234) for i in range(4)]
+        )
+        session.commit()
+    vistos = []
+    cursor = None
+    for _ in range(4):
+        page = queries.search_events(engine, order_by="duration", limit=2, cursor=cursor)
+        vistos += ids(page)
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+    assert len(vistos) == len(set(vistos)) == 4
+
+
+def test_min_tokens_counts_both_directions(make_engine, tmp_path):
+    """Mutante A6: contar so a entrada sobreviveu.
+
+    Uma resposta longa a um prompt curto e exatamente a requisicao cara que se
+    quer achar, e ela tem entrada pequena.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'tokens.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="entrada-grande", input_tokens=900, output_tokens=10),
+                row(request_id="saida-grande", input_tokens=10, output_tokens=900),
+                row(request_id="pequena", input_tokens=10, output_tokens=10),
+            ]
+        )
+        session.commit()
+    achadas = set(ids(queries.search_events(engine, min_tokens=500)))
+    assert achadas == {"entrada-grande", "saida-grande"}
+
+
+def test_ordering_by_duration_never_starts_with_the_fastest(store):
+    """Mutante A1: `asc` no lugar de `desc` devolveria a mais rapida primeiro."""
+    page = queries.search_events(store, order_by="duration")
+    durations = [event["duration_ms"] for event in page["events"]]
+    assert durations == sorted(durations, reverse=True)
+    assert durations[0] == 30_000
