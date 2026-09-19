@@ -106,7 +106,7 @@ class Recorder:
         if self._engine is None:
             return
         try:
-            asyncio.get_event_loop().run_until_complete(self._queue.put(event))
+            self._queue.put_nowait(event)
         except asyncio.QueueFull:
             self.dropped += 1
 

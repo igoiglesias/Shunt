@@ -90,3 +90,25 @@ def test_a_request_that_answered_first_try_is_not_a_fallback():
         )
     )
     assert event["fell_back"] is False
+
+
+def test_a_refused_request_with_attempts_is_not_counted_as_a_fallback():
+    """Mutante M7: `fell_back = bool(attempts)` sobreviveu a primeira varredura.
+
+    Uma requisicao recusada acumula tentativas e nao tem candidato nenhum.
+    Conta-la como fallback inflaria a metrica justamente com o caso em que
+    ninguem respondeu -- o painel mostraria troca de candidato bem-sucedida
+    onde houve fracasso da cadeia inteira.
+    """
+    event = as_event(
+        RequestLog(
+            request_id="r",
+            requested_model="m",
+            rule="exact",
+            matched="m",
+            candidate=None,
+            attempts=["free: 400 (attempt 1)", "cheap: 400 (attempt 1)"],
+        )
+    )
+    assert event["fell_back"] is False
+    assert event["candidate_model"] is None
