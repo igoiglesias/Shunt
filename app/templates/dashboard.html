@@ -90,17 +90,19 @@
   .figure.fallback .value { color: var(--fallback); }
   .figure.errors .value { color: var(--error); }
 
+  .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 5px 8px 5px 0; text-align: left; border-bottom: 1px solid #1d2835; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
   td.n, th.n { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
   tbody tr:last-child td { border-bottom: 0; }
-  .bar { position: relative; }
+  .bar { position: relative; padding-left: 9px; }
   .bar span {
     position: absolute;
     inset: 2px auto 2px 0;
-    background: rgba(91, 200, 196, 0.16);
-    border-left: 2px solid var(--requests);
+    background: rgba(91, 200, 196, 0.14);
+    border-left: 3px solid var(--requests);
+    border-radius: 0 2px 2px 0;
     z-index: 0;
   }
   .bar b { position: relative; font-weight: 400; }
@@ -108,8 +110,8 @@
   .tape { max-height: 340px; overflow-y: auto; }
   .tape li {
     display: grid;
-    grid-template-columns: 7ch 1fr auto;
-    gap: 10px;
+    grid-template-columns: 9ch minmax(0, 1fr) auto;
+    gap: 14px;
     padding: 5px 0;
     border-bottom: 1px solid #1d2835;
     font-size: 12.5px;
@@ -117,7 +119,8 @@
   }
   .tape ul { list-style: none; margin: 0; padding: 0; }
   .tape .when { color: var(--dim); font-family: var(--num); }
-  .tape .what b { font-weight: 500; }
+  .tape .what b { font-weight: 500; margin-right: 6px; }
+  .tape .what { min-width: 0; overflow-wrap: anywhere; }
   .tape .what small { color: var(--muted); }
   .tape .cost { font-family: var(--num); color: var(--muted); }
   .tape li.bad .what b { color: var(--error); }
@@ -131,7 +134,7 @@
     .tape li.fresh { animation: none; }
   }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
   .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
   svg { display: block; width: 100%; height: auto; }
   .axis { fill: var(--dim); font-size: 10px; font-family: var(--num); }
@@ -142,6 +145,11 @@
   @media (max-width: 860px) {
     .flow-band { grid-template-columns: 1fr; }
     .windows { margin-left: 0; width: 100%; }
+    /* O SVG encolhe junto com a tela, e com ele o texto dentro do viewBox.
+       Medido em 390 px: rotulo de 12 px virava 6 px, ilegivel. O diagrama
+       compensa no proprio desenho (ver `drawFlow`); a serie so precisa do
+       texto maior. */
+    #series .axis { font-size: 26px; }
   }
 </style>
 </head>
@@ -181,7 +189,7 @@
   <div class="grid">
     <section><h2>Modelo que respondeu</h2><div id="models"></div></section>
     <section><h2>Provedor</h2><div id="providers"></div></section>
-    <section><h2>Rota</h2><div id="routes"></div></section>
+    <section><h2>Rota <em>sob /v1</em></h2><div id="routes"></div></section>
     <section><h2>Cadeia de fallback</h2><div id="chain"></div></section>
     <section><h2>Ferramentas</h2><div id="tools"></div></section>
     <section><h2>Erros</h2><div id="errors"></div></section>
@@ -220,7 +228,7 @@ function draw() {
   drawSeries();
   drawTable("models", snapshot.by_model, "model", "Modelo");
   drawTable("providers", snapshot.by_provider, "provider", "Provedor");
-  drawTable("routes", snapshot.by_route, "route", "Rota");
+  drawTable("routes", snapshot.by_route.map((r) => ({ ...r, route: r.route.replace(/^\/v1\//, "") })), "route", "Rota em /v1");
   drawChain();
   drawTools();
   drawErrors();
@@ -261,39 +269,63 @@ function drawFigures() {
 // RESPONDEU à direita, e a espessura da faixa é o volume. É a pergunta que
 // um proxy de substituição de modelo existe para responder.
 function drawFlow() {
-  const asked = snapshot.by_requested_model.slice(0, 6);
-  const served = snapshot.by_model.slice(0, 6);
+  const asked = snapshot.by_requested_model.slice(0, 5);
+  const served = snapshot.by_model.slice(0, 5);
   if (!asked.length || !served.length) {
     el("flow").innerHTML = `<p class="empty">Nenhuma requisição nesta janela.</p>`;
     return;
   }
-  const rows = Math.max(asked.length, served.length);
-  const height = Math.max(150, rows * 38 + 20);
-  const total = asked.reduce((sum, a) => sum + a.requests, 0) || 1;
-  const band = (list, x, anchor) => {
-    let y = 16;
-    return list.map((item) => {
-      const name = item.model || item.requested_model || item.route;
-      const thickness = Math.max(3, (item.requests / total) * (height - 40));
-      const node = `
-        <rect x="${x - (anchor === "end" ? 0 : 4)}" y="${y}" width="4" height="${thickness}"
-              fill="${anchor === "end" ? "var(--tokens)" : "var(--requests)"}" />
-        <text class="flow-label" x="${anchor === "end" ? x - 10 : x + 10}" y="${y + 12}"
-              text-anchor="${anchor === "end" ? "end" : "start"}">${esc(name)}</text>
-        <text class="flow-sub" x="${anchor === "end" ? x - 10 : x + 10}" y="${y + 26}"
-              text-anchor="${anchor === "end" ? "end" : "start"}">${item.requests} · ${compact(item.tokens)} tok</text>`;
-      y += thickness + 26;
-      return node;
+  // Medido em 390 px: as duas colunas lado a lado colidem, e o texto escalado
+  // pelo viewBox fica ilegível. No estreito o diagrama vira duas faixas
+  // empilhadas, com o texto dimensionado em unidades do viewBox.
+  const narrow = window.innerWidth <= 860;
+  const scale = narrow ? 2 : 1;
+  const ROW = 44 * scale;
+  const BAR_MAX = 26 * scale;
+  const width = 640;
+
+  const side = (list, x, anchor, top, color) => {
+    const peak = Math.max(...list.map((item) => item.requests), 1);
+    return list.map((item, index) => {
+      const name = item.model || item.requested_model;
+      const y = top + index * ROW;
+      const thickness = Math.max(4, (item.requests / peak) * BAR_MAX);
+      const tx = anchor === "end" ? x - 12 : x + 12;
+      return `
+        <rect x="${anchor === "end" ? x - 5 : x + 1}" y="${y}" width="${4 * scale}" height="${thickness.toFixed(1)}"
+              rx="2" fill="${color}" />
+        <text class="flow-label" x="${tx}" y="${y + 11 * scale}" text-anchor="${anchor}"
+              style="font-size:${12 * scale}px">${esc(name)}</text>
+        <text class="flow-sub" x="${tx}" y="${y + 27 * scale}" text-anchor="${anchor}"
+              style="font-size:${10.5 * scale}px">${item.requests} req · ${compact(item.tokens)} tok</text>`;
     }).join("");
   };
+
+  if (narrow) {
+    const head = 26 * scale;
+    const servedTop = head + asked.length * ROW + head;
+    const height = servedTop + served.length * ROW + 10;
+    el("flow").innerHTML = `
+      <svg viewBox="0 0 ${width} ${height}" role="img"
+           aria-label="Modelos pedidos e modelos que responderam">
+        <text class="axis" x="2" y="${head - 8}" style="font-size:${11 * scale}px">pedido</text>
+        ${side(asked, 2, "start", head, "var(--requests)")}
+        <text class="axis" x="2" y="${servedTop - 8}" style="font-size:${11 * scale}px">respondeu</text>
+        ${side(served, 2, "start", servedTop, "var(--tokens)")}
+      </svg>`;
+    return;
+  }
+
+  const rows = Math.max(asked.length, served.length);
+  const height = rows * ROW + 26;
   el("flow").innerHTML = `
-    <svg viewBox="0 0 640 ${height}" role="img"
+    <svg viewBox="0 0 ${width} ${height}" role="img"
          aria-label="Modelos pedidos à esquerda, modelos que responderam à direita">
-      <text class="axis" x="4" y="10">pedido</text>
-      <text class="axis" x="636" y="10" text-anchor="end">respondeu</text>
-      ${band(asked, 4, "start")}
-      ${band(served, 636, "end")}
-      <line x1="320" y1="16" x2="320" y2="${height - 6}" stroke="var(--panel-edge)" />
+      <text class="axis" x="2" y="12">pedido</text>
+      <text class="axis" x="638" y="12" text-anchor="end">respondeu</text>
+      ${side(asked, 2, "start", 24, "var(--requests)")}
+      ${side(served, 638, "end", 24, "var(--tokens)")}
+      <line x1="320" y1="20" x2="320" y2="${height - 8}" stroke="var(--panel-edge)" />
     </svg>`;
 }
 
@@ -330,7 +362,7 @@ function drawTable(id, rows, key, heading) {
   }
   const max = Math.max(...rows.map((r) => r.requests), 1);
   el(id).innerHTML = `
-    <table><thead><tr>
+    <div class="scroll"><table><thead><tr>
       <th>${esc(heading)}</th><th class="n">req</th><th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>
     </tr></thead><tbody>
     ${rows.map((r) => `<tr>
@@ -340,7 +372,7 @@ function drawTable(id, rows, key, heading) {
       <td class="n" style="color:${r.errors ? "var(--error)" : "inherit"}">${r.errors}</td>
       <td class="n">${ms(r.avg_duration_ms)}</td>
     </tr>`).join("")}
-    </tbody></table>`;
+    </tbody></table></div>`;
 }
 
 function drawChain() {
@@ -367,7 +399,7 @@ function drawTools() {
   }
   const max = Math.max(...tools.map((t) => t.offered), 1);
   el("tools").innerHTML = `
-    <table><thead><tr>
+    <div class="scroll"><table><thead><tr>
       <th>Ferramenta</th><th class="n">oferecida</th><th class="n">chamada</th><th class="n">uso</th>
     </tr></thead><tbody>
     ${tools.map((t) => `<tr>
@@ -376,7 +408,7 @@ function drawTools() {
       <td class="n">${t.called}</td>
       <td class="n">${t.call_rate === null ? "—" : pct(t.call_rate)}</td>
     </tr>`).join("")}
-    </tbody></table>`;
+    </tbody></table></div>`;
 }
 
 function drawErrors() {

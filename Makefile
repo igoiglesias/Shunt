@@ -10,6 +10,11 @@ test:
 e2e:
 	uv run pytest -q tests/e2e
 
+# Navegador HEADLESS, sempre. Fora do `check` porque sobe servidor e leva
+# dezenas de segundos; o `check` tem de continuar em segundos.
+browser:
+	uv run pytest -q tests/browser
+
 lint:
 	uv run ruff check app tests
 
@@ -17,4 +22,4 @@ type:
 	uv run mypy app
 
 check: lint type
-	uv run pytest -q --cov=app --cov-report=term-missing
+	uv run pytest -q --cov=app --cov-report=term-missing --ignore=tests/browser
