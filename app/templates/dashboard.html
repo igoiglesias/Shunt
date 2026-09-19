@@ -108,6 +108,20 @@
   .bar b { position: relative; font-weight: 400; }
 
   .tape { max-height: 340px; overflow-y: auto; }
+  h2 .toggle {
+    float: right;
+    font: inherit;
+    font-size: 11.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--panel-edge);
+    border-radius: 3px;
+    padding: 1px 8px;
+    cursor: pointer;
+  }
+  h2 .toggle[aria-pressed="true"] { color: var(--ground); background: var(--error); border-color: var(--error); }
+  h2 .toggle:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
+  .tape li.bad { background: rgba(228, 87, 76, 0.08); }
   .tape li {
     display: grid;
     grid-template-columns: 9ch minmax(0, 1fr) auto;
@@ -118,6 +132,7 @@
     align-items: baseline;
   }
   .tape ul { list-style: none; margin: 0; padding: 0; }
+  .tape li[hidden] { display: none; }
   .tape .when { color: var(--dim); font-family: var(--num); }
   .tape .what b { font-weight: 500; margin-right: 6px; }
   .tape .what { min-width: 0; overflow-wrap: anywhere; }
@@ -158,6 +173,7 @@
   <h1>SHU<span>N</span>T</h1>
   <div class="state" id="state"></div>
   <div class="windows" id="windows">
+    <button data-hours="0.0833" aria-pressed="false">5min</button>
     <button data-hours="1" aria-pressed="false">1h</button>
     <button data-hours="24" aria-pressed="true">24h</button>
     <button data-hours="168" aria-pressed="false">7d</button>
@@ -171,8 +187,12 @@
       <div id="flow"></div>
     </section>
     <section class="tape">
-      <h2>Chegando agora</h2>
+      <h2>
+        Chegando agora
+        <button type="button" id="only-errors" class="toggle" aria-pressed="false">só erros</button>
+      </h2>
       <ul id="tape"></ul>
+      <p class="empty" id="tape-empty" hidden>Nenhuma falha nesta lista.</p>
     </section>
   </div>
 
@@ -219,6 +239,7 @@ const clock = (iso, withSeconds) => {
   const at = new Date(/[Z+]|[-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`);
   if (Number.isNaN(at.getTime())) return "";
   return at.toLocaleTimeString([], {
+    hourCycle: "h23",
     hour: "2-digit",
     minute: "2-digit",
     ...(withSeconds ? { second: "2-digit" } : {}),
@@ -270,7 +291,8 @@ function drawFigures() {
     ["", ms(t.p95_duration_ms), "latência p95"],
     ["", ms(t.p50_ttft_ms), "1º token p50"],
     ["fallback", compact(t.fallbacks), "trocas de candidato"],
-    ["errors", t.requests ? pct(t.error_rate) : "—", `erros (${t.errors})`],
+    ["", ms(t.p95_ttft_ms), "1º token p95"],
+    [t.error_rate > 0.05 ? "errors" : "", t.requests ? pct(t.error_rate) : "—", `erros (${t.errors})`],
   ];
   el("figures").innerHTML = figures.map(([kind, value, label]) =>
     `<div class="figure ${kind}"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`
@@ -493,11 +515,23 @@ function sortTape() {
   for (const item of items) tape.appendChild(item);
 }
 
+function applyTapeFilter() {
+  const only = el("only-errors").getAttribute("aria-pressed") === "true";
+  let shown = 0;
+  for (const item of el("tape").children) {
+    const hide = only && !item.classList.contains("bad");
+    item.hidden = hide;
+    if (!hide) shown += 1;
+  }
+  el("tape-empty").hidden = shown > 0;
+}
+
 function trimTape() {
   const tape = el("tape");
   while (tape.children.length > TAPE_MAX) tape.lastElementChild.remove();
   onTape.clear();
   for (const item of tape.children) onTape.add(item.dataset.id);
+  applyTapeFilter();
 }
 
 function tapeRow(event, fresh) {
@@ -538,6 +572,13 @@ function live() {
     trimTape();
   };
 }
+
+el("only-errors").addEventListener("click", (event) => {
+  const button = event.currentTarget;
+  const on = button.getAttribute("aria-pressed") === "true";
+  button.setAttribute("aria-pressed", String(!on));
+  applyTapeFilter();
+});
 
 el("windows").addEventListener("click", (clicked) => {
   const button = clicked.target.closest("button");

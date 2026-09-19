@@ -302,3 +302,25 @@ def test_the_tape_keeps_the_newest_request_on_top(browser, server):
     )
     page.close()
     assert order == sorted(order, reverse=True), "a fita saiu fora de ordem"
+
+
+def test_the_tape_can_show_only_the_failures(browser, server):
+    """Com o painel cheio, achar a requisicao que falhou e a pergunta urgente."""
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    total = page.locator("#tape li:visible").count()
+    page.get_by_role("button", name="só erros").click()
+    page.wait_for_timeout(300)
+    filtered = page.locator("#tape li:visible").count()
+    kinds = page.evaluate(
+        """() => [...document.querySelectorAll('#tape li')]
+            .filter(i => !i.hidden).map(i => i.className.includes('bad'))"""
+    )
+    page.get_by_role("button", name="só erros").click()
+    page.wait_for_timeout(300)
+    back = page.locator("#tape li:visible").count()
+    page.close()
+    assert problems == []
+    assert filtered < total, "o filtro nao escondeu nada"
+    assert all(kinds), "linha sem falha sobreviveu ao filtro"
+    assert back == total, "o filtro nao soltou a lista"

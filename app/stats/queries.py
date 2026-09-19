@@ -41,7 +41,7 @@ def _utc(moment: datetime | None) -> str | None:
     return moment.isoformat()
 
 
-def _since(hours: int) -> datetime:
+def _since(hours: float) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
 
 
@@ -58,7 +58,7 @@ def _percentile(values: list[int], fraction: float) -> int | None:
     return ordered[index]
 
 
-def totals(engine: Engine, hours: int = DEFAULT_HOURS) -> dict:
+def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     """A faixa de cima: volume, tokens, erro e latencia."""
     since = _since(hours)
     with Session(engine) as session:
@@ -102,7 +102,7 @@ def totals(engine: Engine, hours: int = DEFAULT_HOURS) -> dict:
     }
 
 
-def per_hour(engine: Engine, hours: int = DEFAULT_HOURS) -> list[dict]:
+def per_hour(engine: Engine, hours: float = DEFAULT_HOURS) -> list[dict]:
     """A serie temporal: uma linha por hora, com requisicoes e tokens."""
     since = _since(hours)
     bucket = func.strftime("%Y-%m-%dT%H:00", RequestEvent.started_at)
@@ -131,7 +131,7 @@ def per_hour(engine: Engine, hours: int = DEFAULT_HOURS) -> list[dict]:
     ]
 
 
-def _grouped(engine: Engine, column, hours: int, limit: int, label: str) -> list[dict]:
+def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> list[dict]:
     since = _since(hours)
     with Session(engine) as session:
         rows = session.execute(
@@ -159,30 +159,30 @@ def _grouped(engine: Engine, column, hours: int, limit: int, label: str) -> list
     ]
 
 
-def by_model(engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT) -> list[dict]:
+def by_model(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT) -> list[dict]:
     return _grouped(engine, RequestEvent.candidate_model, hours, limit, "model")
 
 
 def by_provider(
-    engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
 ) -> list[dict]:
     return _grouped(engine, RequestEvent.provider, hours, limit, "provider")
 
 
-def by_route(engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT) -> list[dict]:
+def by_route(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT) -> list[dict]:
     """Inclui `count_tokens` e a listagem de modelos, que nao passam pelo dispatcher."""
     return _grouped(engine, RequestEvent.route, hours, limit, "route")
 
 
 def by_requested_model(
-    engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
 ) -> list[dict]:
     """O que o cliente PEDIU, que e outra pergunta: `haiku` pedido, Groq servido."""
     return _grouped(engine, RequestEvent.requested_model, hours, limit, "requested_model")
 
 
 def errors_by_type(
-    engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
 ) -> list[dict]:
     since = _since(hours)
     with Session(engine) as session:
@@ -199,7 +199,7 @@ def errors_by_type(
     ]
 
 
-def chain_health(engine: Engine, hours: int = DEFAULT_HOURS) -> dict:
+def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     """Quantas vezes o primeiro candidato bastou, e quem foi pulado quando nao."""
     since = _since(hours)
     with Session(engine) as session:
@@ -229,7 +229,7 @@ def chain_health(engine: Engine, hours: int = DEFAULT_HOURS) -> dict:
 
 
 def tool_usage(
-    engine: Engine, hours: int = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
 ) -> list[dict]:
     """Oferecida e chamada lado a lado: a razao diz quais ferramentas pagam o prompt."""
     since = _since(hours)
@@ -246,8 +246,8 @@ def tool_usage(
     for tools_offered, tools_called in rows:
         offered.update(str(name) for name in tools_offered or [])
         called.update(str(name) for name in tools_called or [])
-    names = [name for name, _ in offered.most_common(limit)]
-    names += [name for name, _ in called.most_common(limit) if name not in names]
+    names = [name for name, _ in called.most_common(limit)]
+    names += [name for name, _ in offered.most_common(limit) if name not in names]
     return [
         {
             "tool": name,
@@ -286,7 +286,7 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
     ]
 
 
-def snapshot(engine: Engine, hours: int = DEFAULT_HOURS) -> dict:
+def snapshot(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     """Tudo que o painel desenha, num documento so."""
     return {
         "window_hours": hours,

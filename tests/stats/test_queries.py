@@ -159,6 +159,28 @@ def test_chain_health_separates_a_clean_answer_from_a_fallback(seeded):
     assert chain["skips"] == [{"candidate": "free", "count": 1}]
 
 
+def test_tools_are_listed_by_what_was_actually_called(make_engine, tmp_path):
+    """Um harness oferece o catalogo inteiro toda vez.
+
+    Ordenar por oferta enche a tabela com as ferramentas que ninguem usou --
+    medido no painel ao vivo: onze linhas, todas com 0%. Quem foi chamada vem
+    primeiro.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ordem-tools.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", tools_offered=["Read", "Bash", "Edit"], tools_called=["Edit"]),
+                row(request_id="b", tools_offered=["Read", "Bash", "Edit"], tools_called=["Edit"]),
+                row(request_id="c", tools_offered=["Read", "Bash", "Edit"], tools_called=["Bash"]),
+            ]
+        )
+        session.commit()
+    tools = queries.tool_usage(engine, limit=2)
+    assert [tool["tool"] for tool in tools] == ["Edit", "Bash"]
+    assert tools[0]["called"] == 2
+
+
 def test_tool_usage_shows_what_was_offered_against_what_was_called(seeded):
     tools = {tool["tool"]: tool for tool in queries.tool_usage(seeded, hours=1)}
     assert tools["read"] == {"tool": "read", "offered": 1, "called": 1, "call_rate": 1.0}

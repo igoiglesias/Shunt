@@ -92,9 +92,19 @@ def test_the_second_call_inside_the_cache_window_does_not_query_again(panel, mon
 
 @pytest.mark.parametrize(
     ("raw", "expected"),
-    [("1", 1), ("720", 720), ("99999", 720), ("0", 1), ("-5", 1), ("abacaxi", 24), (None, 24)],
+    [
+        ("1", 1),
+        ("720", 720),
+        ("99999", 720),
+        ("0", 1 / 60),
+        ("-5", 1 / 60),
+        ("0.0833", 0.0833),  # os cinco minutos do painel
+        ("abacaxi", 24),
+        ("nan", 24),
+        (None, 24),
+    ],
 )
-def test_the_window_is_clamped_between_one_hour_and_a_month(panel, raw, expected):
+def test_the_window_is_clamped_between_one_minute_and_a_month(panel, raw, expected):
     with TestClient(app) as c:
         url = "/api/stats" if raw is None else f"/api/stats?window={raw}"
         assert c.get(url).json()["window_hours"] == expected

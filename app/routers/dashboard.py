@@ -15,6 +15,7 @@ quebra sem Turso seria pior do que um painel vazio.
 
 import asyncio
 import json
+import math
 import time
 from datetime import datetime
 from typing import Any
@@ -29,22 +30,32 @@ router = APIRouter()
 # Janela padrao e tetos. A janela vem do cliente, mas presa entre limites: uma
 # consulta de 10 anos varreria a tabela inteira, que e o que os indices existem
 # para evitar.
-DEFAULT_HOURS = 24
-MAX_HOURS = 24 * 30
+DEFAULT_HOURS = 24.0
+MAX_HOURS = 24.0 * 30
+# Um minuto e o menor recorte util: abaixo disso a janela nao contem nem uma
+# conversa inteira de um harness.
+MIN_HOURS = 1 / 60
 CACHE_SECONDS = 5.0
 # Batida de keepalive do SSE. Proxy no meio do caminho derruba conexao ociosa,
 # e um painel que morre sozinho depois de cinco minutos parados nao serve.
 KEEPALIVE_SECONDS = 15.0
 
-_cache: dict[int, tuple[float, dict]] = {}
+_cache: dict[float, tuple[float, dict]] = {}
 
 
-def _window(raw: str | None) -> int:
+def _window(raw: str | None) -> float:
+    """A janela pedida, presa entre um minuto e trinta dias.
+
+    Fracionaria porque o painel oferece cinco minutos, que e a pergunta de quem
+    esta olhando enquanto trabalha: o que acabou de acontecer.
+    """
     try:
-        hours = int(raw) if raw is not None else DEFAULT_HOURS
+        hours = float(raw) if raw is not None else DEFAULT_HOURS
     except ValueError:
         return DEFAULT_HOURS
-    return max(1, min(hours, MAX_HOURS))
+    if math.isnan(hours):  # "nan" parseia como float e nao e uma janela
+        return DEFAULT_HOURS
+    return max(MIN_HOURS, min(hours, MAX_HOURS))
 
 
 def _health(request: Request) -> dict:
@@ -66,7 +77,7 @@ def _engine(request: Request):
     return recorder.engine if recorder is not None else None
 
 
-def empty_snapshot(hours: int) -> dict:
+def empty_snapshot(hours: float) -> dict:
     """O mesmo documento, com tudo zerado. O painel nao precisa de dois desenhos."""
     return {
         "window_hours": hours,
