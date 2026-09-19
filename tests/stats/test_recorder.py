@@ -165,3 +165,86 @@ async def test_unsubscribing_stops_the_delivery(make_engine):
     recorder.unsubscribe(queue)  # idempotente: o SSE fecha uma vez so, mas fecha sempre
     recorder.record(event())
     assert queue.empty()
+
+
+async def test_a_database_that_failed_at_boot_is_reopened_later(make_engine, tmp_path):
+    """Medido num `make prod` com oito workers: tres subiram sem engine.
+
+    Ficariam assim para sempre, e o painel respondia "sem banco" em um terco das
+    cargas enquanto os outros gravavam.
+    """
+    engine = engine_for(make_engine, tmp_path)
+    tentativas = []
+
+    def volta():
+        tentativas.append(1)
+        return engine if len(tentativas) > 1 else None
+
+    recorder = Recorder(None, reconnect=volta, reconnect_seconds=0, interval=0.01)
+    assert recorder.enabled is False
+    assert recorder.configured is True, "banco declarado nao e banco ausente"
+    await recorder.start()
+    recorder.record(event(request_id="antes"))
+    await asyncio.sleep(0.15)
+    recorder.record(event(request_id="depois"))
+    await recorder.aclose()
+    assert recorder.reconnects == 1
+    assert recorder.enabled is True
+    assert count(engine) >= 1, "o evento seguinte a reconexao tinha de entrar"
+
+
+async def test_a_reconnection_that_explodes_is_counted_and_retried(make_engine, tmp_path, caplog):
+    def explode():
+        raise RuntimeError("banco ainda fora")
+
+    recorder = Recorder(None, reconnect=explode, reconnect_seconds=0, interval=0.01)
+    await recorder.start()
+    await asyncio.sleep(0.1)
+    await recorder.aclose()
+    assert recorder.enabled is False
+    assert "reconexao falhou" in caplog.text
+
+
+async def test_without_a_reconnect_the_recorder_stays_a_no_op():
+    recorder = Recorder(None)
+    assert recorder.configured is False
+    await recorder.start()
+    recorder.record(event())
+    await recorder.aclose()
+    assert recorder.reconnects == 0
+
+
+async def test_reconnection_is_attempted_once_per_interval(make_engine, tmp_path):
+    """Banco fora do ar por uma hora nao pode virar uma tentativa por segundo."""
+    tentativas = []
+    def falha():
+        tentativas.append(1)
+
+    recorder = Recorder(None, reconnect=falha, reconnect_seconds=60, interval=0.01)
+    await recorder.start()
+    await asyncio.sleep(0.12)
+    await recorder.aclose()
+    assert len(tentativas) == 1, f"tentou {len(tentativas)} vezes em 0,12 s"
+
+
+async def test_an_open_database_is_never_reopened(make_engine, tmp_path):
+    tentativas = []
+    recorder = Recorder(
+        engine_for(make_engine, tmp_path),
+        reconnect=lambda: tentativas.append(1),
+        reconnect_seconds=0,
+        interval=0.01,
+    )
+    await recorder.start()
+    recorder.record(event())
+    await asyncio.sleep(0.1)
+    await recorder.aclose()
+    assert tentativas == [], "reabriu um banco que ja estava aberto"
+
+
+async def test_a_recorder_with_no_reconnect_never_tries_to_reopen():
+    """Sem banco declarado nao ha o que reabrir: o caminho sai na primeira linha."""
+    recorder = Recorder(None)
+    recorder._try_reconnect()
+    assert recorder.reconnects == 0
+    assert recorder.enabled is False

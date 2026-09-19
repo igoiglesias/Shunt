@@ -77,10 +77,12 @@ def test_the_summary_carries_every_section_and_the_health_footer(panel):
     assert body["totals"]["errors"] == 1
     assert body["health"] == {
         "enabled": True,
+        "configured": True,
         "queued": 0,
         "dropped": 0,
         "failures": 0,
         "commits": 0,
+        "reconnects": 0,
     }
 
 
@@ -185,10 +187,12 @@ async def test_the_health_footer_answers_even_with_no_recorder_at_all():
     body = await stats(_request_with(None))
     assert body["health"] == {
         "enabled": False,
+        "configured": False,
         "queued": 0,
         "dropped": 0,
         "failures": 0,
         "commits": 0,
+        "reconnects": 0,
     }
 
 

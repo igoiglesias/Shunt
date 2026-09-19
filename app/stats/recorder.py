@@ -19,6 +19,8 @@ a API**. Tudo aqui decorre dela.
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
@@ -36,6 +38,12 @@ SUBSCRIBER_QUEUE = 100
 # Prazo do dreno final. Um `aclose` que espera o banco indefinidamente trocaria
 # um desligamento limpo por um processo pendurado.
 DRAIN_TIMEOUT = 5.0
+# Intervalo entre tentativas de reabrir um banco que nao abriu no boot. Medido
+# num `make prod` com oito workers: tres deles subiram sem engine e ficariam
+# assim para sempre, entao o painel respondia "sem banco" em um terco das
+# cargas enquanto os outros gravavam. Um banco que volta -- ou que so estava
+# ocupado no instante do boot -- precisa de uma segunda chance.
+RECONNECT_SECONDS = 30.0
 
 
 class Recorder:
@@ -45,8 +53,15 @@ class Recorder:
         max_queue: int = MAX_QUEUE,
         batch_size: int = BATCH_SIZE,
         interval: float = INTERVAL,
+        reconnect: Callable[[], Engine | None] | None = None,
+        reconnect_seconds: float = RECONNECT_SECONDS,
     ) -> None:
         self._engine = engine
+        # Como reabrir o banco, e quando tentar de novo. Sem `reconnect` o
+        # gravador se comporta como antes: o que veio no boot e o que ha.
+        self._reconnect = reconnect
+        self._reconnect_seconds = reconnect_seconds
+        self._next_attempt = 0.0
         self._batch_size = batch_size
         self._interval = interval
         self._queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=max_queue)
@@ -55,6 +70,7 @@ class Recorder:
         self.dropped = 0
         self.failures = 0
         self.commits = 0
+        self.reconnects = 0
 
     @property
     def enabled(self) -> bool:
@@ -92,6 +108,33 @@ class Recorder:
             except asyncio.QueueFull:
                 pass
 
+    @property
+    def configured(self) -> bool:
+        """Existe um banco declarado, mesmo que agora ele nao abra?"""
+        return self._engine is not None or self._reconnect is not None
+
+    def _try_reconnect(self) -> None:
+        """Uma tentativa por intervalo, e so no worker de fundo.
+
+        Nunca no caminho da requisicao: reabrir banco fala com a rede.
+        """
+        if self._engine is not None or self._reconnect is None:
+            return
+        now = time.monotonic()
+        if now < self._next_attempt:
+            return
+        self._next_attempt = now + self._reconnect_seconds
+        try:
+            engine = self._reconnect()
+        except Exception as err:  # noqa: BLE001 - tentar de novo depois e a
+            # resposta certa para qualquer falha aqui.
+            logger.warning("stats: reconexao falhou (%s: %s)", type(err).__name__, err)
+            return
+        if engine is not None:
+            self._engine = engine
+            self.reconnects += 1
+            logger.info("stats: banco reaberto depois de %d tentativa(s)", self.reconnects)
+
     def record(self, event: dict) -> None:
         """Empilha o evento. Nunca espera, nunca levanta.
 
@@ -103,7 +146,7 @@ class Recorder:
         proxy correndo nao precisa configurar Turso nenhum.
         """
         self._publish(event)
-        if self._engine is None:
+        if self._engine is None and self._reconnect is None:
             return
         try:
             self._queue.put_nowait(event)
@@ -111,7 +154,7 @@ class Recorder:
             self.dropped += 1
 
     async def start(self) -> None:
-        if self._engine is None or self._task is not None:
+        if not self.configured or self._task is not None:
             return
         self._task = asyncio.create_task(self._run())
 
@@ -133,6 +176,8 @@ class Recorder:
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(self._interval)
+            if self._engine is None:
+                await asyncio.to_thread(self._try_reconnect)
             await self._drain()
 
     async def _drain(self) -> None:

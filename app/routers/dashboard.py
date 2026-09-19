@@ -62,13 +62,26 @@ def _health(request: Request) -> dict:
     """O rodape do painel: o que o operador precisa para saber se confiar nele."""
     recorder = getattr(request.app.state, "recorder", None)
     if recorder is None:
-        return {"enabled": False, "queued": 0, "dropped": 0, "failures": 0, "commits": 0}
+        return {
+            "enabled": False,
+            "configured": False,
+            "queued": 0,
+            "dropped": 0,
+            "failures": 0,
+            "commits": 0,
+            "reconnects": 0,
+        }
     return {
         "enabled": recorder.enabled,
+        # `configured` sem `enabled` e um banco declarado que nao abriu: o
+        # worker tenta de novo sozinho, e dizer isso evita que o operador leia
+        # "sem banco" e va procurar configuracao que ja esta certa.
+        "configured": recorder.configured,
         "queued": recorder.queued,
         "dropped": recorder.dropped,
         "failures": recorder.failures,
         "commits": recorder.commits,
+        "reconnects": recorder.reconnects,
     }
 
 

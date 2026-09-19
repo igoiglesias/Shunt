@@ -11,7 +11,7 @@ from app.core.observability import configure_logging, set_recorder
 from app.core.upstream import UpstreamPool
 from app.routers.dashboard import router as dashboard_router
 from app.routers.v1 import router as v1_router
-from app.stats.engine import build_engine
+from app.stats.engine import build_engine, database_url
 from app.stats.recorder import Recorder
 
 
@@ -29,7 +29,10 @@ async def lifespan(app: FastAPI):
     # engine nula e `record()` vira um no-op, sem um `if` sequer no caminho da
     # requisicao.
     if not hasattr(app.state, "recorder"):
-        app.state.recorder = Recorder(await _engine_or_none())
+        # `reconnect` so existe quando ha URL declarada: sem banco nenhum o
+        # gravador continua sendo um no-op, sem tentativa periodica de nada.
+        reconnect = build_engine if database_url() else None
+        app.state.recorder = Recorder(await _engine_or_none(), reconnect=reconnect)
     set_recorder(app.state.recorder)
     await app.state.recorder.start()
     yield

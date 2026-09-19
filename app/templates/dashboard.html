@@ -51,6 +51,7 @@
   .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
   .lamp.on { background: var(--requests); box-shadow: 0 0 8px var(--requests); }
   .lamp.off { background: var(--dim); }
+  .lamp.warn { background: var(--tokens); box-shadow: 0 0 8px var(--tokens); }
   .windows { margin-left: auto; display: flex; gap: 2px; }
   .windows button {
     font: inherit;
@@ -276,7 +277,21 @@ const pct = (v) => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
 
 async function load() {
   const response = await fetch(`/api/stats?window=${hours}`);
-  snapshot = await response.json();
+  const fresh = await response.json();
+  // `make prod` sobe um worker por núcleo, e cada um tem o seu banco aberto.
+  // Um worker que não conseguiu abrir o seu responde um resumo zerado, e a
+  // atualização seguinte caía nele e apagava a tela inteira por alguns
+  // segundos. Resumo vazio de um banco que existe não substitui o que já está
+  // desenhado: só o estado do cabeçalho muda, para que a reconexão apareça.
+  const emptyFromABrokenWorker =
+    fresh.health && !fresh.health.enabled && fresh.health.configured;
+  const hadData = snapshot && snapshot.totals && snapshot.totals.requests > 0;
+  if (emptyFromABrokenWorker && hadData && fresh.totals.requests === 0) {
+    snapshot = { ...snapshot, health: fresh.health };
+    drawState();
+    return;
+  }
+  snapshot = fresh;
   draw();
 }
 
@@ -297,8 +312,11 @@ function draw() {
 function drawState() {
   const health = snapshot.health;
   const on = health.enabled;
+  const waiting = !on && health.configured;
+  const lamp = on ? "on" : waiting ? "warn" : "off";
+  const word = on ? "gravando" : waiting ? "reconectando" : "sem banco";
   el("state").innerHTML = `
-    <div><span class="lamp ${on ? "on" : "off"}"></span>${on ? "gravando" : "sem banco"}</div>
+    <div><span class="lamp ${lamp}"></span>${word}</div>
     <div>fila <b class="num">${health.queued}</b></div>
     <div>descartes <b class="num">${health.dropped}</b></div>
     <div>falhas <b class="num">${health.failures}</b></div>
@@ -306,7 +324,9 @@ function drawState() {
   el("clear").disabled = !on;
   el("footer").textContent = on
     ? `Uma linha por requisição, gravada em lote fora do caminho da API.`
-    : `Persistência desligada: defina TURSO_DATABASE_URL para guardar histórico. O painel ao vivo segue funcionando.`;
+    : waiting
+      ? `Banco configurado e fora de alcance neste worker. Ele tenta reabrir a cada 30 s; o painel ao vivo segue funcionando.`
+      : `Persistência desligada: defina TURSO_DATABASE_URL para guardar histórico. O painel ao vivo segue funcionando.`;
 }
 
 function drawFigures() {

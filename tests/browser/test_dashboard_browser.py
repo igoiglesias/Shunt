@@ -326,6 +326,91 @@ def test_the_tape_can_show_only_the_failures(browser, server):
     assert back == total, "o filtro nao soltou a lista"
 
 
+def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
+    """Medido em producao: um terco das cargas caia num worker sem banco.
+
+    O painel zerava a tela inteira e voltava na atualizacao seguinte -- o
+    sintoma que o usuario descreveu como "fica todo em branco".
+    """
+    # Nao depende do que outros testes deixaram: gera o proprio trafego, porque
+    # o teste de limpeza pode ter zerado o banco antes deste rodar.
+    for _ in range(3):
+        httpx.get(f"{server}/v1/models", timeout=10)
+    page, problems = open_panel(browser, server, 1400, 900)
+    # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
+    # vez de esperar por ela, depois de dar ao worker o tempo de um lote.
+    page.wait_for_timeout(1500)
+    # Janela de duas horas: o resumo e cacheado por cinco segundos POR JANELA, e
+    # a de 24 h acabou de ser respondida zerada pelo teste que limpou o banco.
+    page.evaluate("() => { hours = 2; }")
+    page.evaluate("() => load()")
+    page.wait_for_function("() => snapshot.totals.requests > 0", timeout=10_000)
+    before = page.evaluate("() => snapshot.totals.requests")
+
+    # Responde como um worker que nao abriu o banco: zerado, mas configurado.
+    page.route(
+        "**/api/stats?*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "window_hours": 24,
+                    "totals": {
+                        "requests": 0,
+                        "input_tokens": 0,
+                        "output_tokens": 0,
+                        "errors": 0,
+                        "error_rate": 0.0,
+                        "fallbacks": 0,
+                        "streams": 0,
+                        "p50_duration_ms": None,
+                        "p95_duration_ms": None,
+                        "p50_ttft_ms": None,
+                        "p95_ttft_ms": None,
+                    },
+                    "per_hour": [],
+                    "by_model": [],
+                    "by_provider": [],
+                    "by_route": [],
+                    "by_requested_model": [],
+                    "errors": [],
+                    "chain": {
+                        "requests": 0,
+                        "first_candidate_answered": 0,
+                        "first_candidate_rate": 0.0,
+                        "skips": [],
+                    },
+                    "tools": [],
+                    "recent": [],
+                    "health": {
+                        "enabled": False,
+                        "configured": True,
+                        "queued": 0,
+                        "dropped": 0,
+                        "failures": 0,
+                        "commits": 0,
+                        "reconnects": 0,
+                    },
+                }
+            ),
+        ),
+    )
+    page.evaluate("() => load()")
+    page.wait_for_timeout(500)
+    after = page.evaluate("() => snapshot.totals.requests")
+    state = page.inner_text("#state")
+    rows = page.locator("#models tbody tr").count()
+    page.close()
+    assert problems == []
+    assert after == before, "o resumo de um worker quebrado apagou os dados"
+    assert rows > 0, "a tabela ficou em branco"
+    assert "reconectando" in state
+
+
+# Os dois testes de limpeza ficam no FIM do arquivo de proposito: eles zeram
+# o banco que o servidor deste modulo compartilha, e qualquer teste depois
+# deles veria um painel vazio que nao e o que ele quer medir.
 def test_clearing_the_history_takes_two_clicks_and_then_empties_the_panel(browser, server):
     """Apagar e irreversivel: o primeiro clique arma e diz quanto vai embora."""
     page, problems = open_panel(browser, server, 1400, 900)
@@ -346,7 +431,6 @@ def test_clearing_the_history_takes_two_clicks_and_then_empties_the_panel(browse
     assert problems == []
     assert "apagadas" in said
     assert tape == 0
-
 
 def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
     page, _ = open_panel(browser, server, 1400, 900)
