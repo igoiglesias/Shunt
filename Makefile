@@ -1,6 +1,9 @@
 dev:
 	uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
+prod:
+	uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $$(nproc) --no-access-log --log-level warning
+
 test:
 	uv run pytest -q tests --ignore=tests/e2e
 
