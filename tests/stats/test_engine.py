@@ -138,3 +138,46 @@ def test_a_destination_that_refuses_the_pragmas_is_not_a_failure(caplog):
     with caplog.at_level(logging.DEBUG, logger="shunt"):
         apply_pragmas(Recusa())
     assert "PRAGMA recusado" in caplog.text
+
+
+def test_a_column_added_later_reaches_an_existing_database(tmp_path):
+    """Medido: uma coluna nova quebrou TODA leitura da tabela antiga.
+
+    `create_all` cria tabela que falta e ignora tabela que existe, inclusive
+    quando ela esta com uma coluna a menos -- e o defeito so aparece no banco
+    de quem ja estava usando.
+    """
+    import sqlite3
+
+    from sqlalchemy import inspect
+
+    from app.stats.engine import add_missing_columns
+
+    caminho = tmp_path / "antigo.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE request_bodies (request_id VARCHAR(64) PRIMARY KEY, prompt TEXT)"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        colunas = {c["name"] for c in inspect(engine).get_columns("request_bodies")}
+        assert {"answer", "request_json", "prompt_bytes", "truncated"} <= colunas
+        # Rodar de novo nao acrescenta nada: a migracao e idempotente.
+        assert add_missing_columns(engine) == []
+    finally:
+        engine.dispose()
+
+
+def test_a_database_already_up_to_date_is_left_alone(tmp_path):
+    from app.stats.engine import add_missing_columns
+
+    engine = build_engine(f"sqlite+pysqlite:///{tmp_path / 'novo.db'}")
+    assert engine is not None
+    try:
+        assert add_missing_columns(engine) == []
+    finally:
+        engine.dispose()

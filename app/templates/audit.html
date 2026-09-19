@@ -46,13 +46,13 @@
   #count { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--num); }
 
   form {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
     gap: 10px;
-    align-items: center;
     padding: 12px 20px;
     border-bottom: 1px solid var(--panel-edge);
   }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .spacer { flex: 1 1 auto; }
   input[type="search"], input[type="text"], input[type="number"], select {
     font: inherit;
     color: var(--ink);
@@ -64,6 +64,9 @@
   input[type="search"] { flex: 1 1 320px; min-width: 200px; }
   input[type="datetime-local"] { color-scheme: dark; font-size: 12.5px; }
   #range { display: flex; gap: 6px; flex-wrap: wrap; }
+  /* `display: flex` na classe vence o `display: none` que o navegador dá ao
+     atributo `hidden` -- o mesmo tropeço do filtro de erros na outra tela. */
+  #range[hidden] { display: none; }
   #range input { min-width: 0; flex: 1 1 150px; }
   input[type="number"] { width: 10ch; }
   input:focus-visible, select:focus-visible, button:focus-visible {
@@ -115,12 +118,32 @@
   .tag { color: var(--muted); font-size: 12px; }
   .tag.fell { color: var(--fallback); }
   .tag.bad { color: var(--error); }
+  .mark {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--muted);
+    background: #1d2835;
+  }
+  .mark.fell { color: var(--fallback); }
+  .mark.tool { color: var(--requests); }
+  .signals .mark:first-child { margin-left: 0; }
+  .signals .none { color: var(--dim); }
+  /* Linha que falhou se anuncia pela borda, e não só pelo número no fim. */
+  tbody tr.failed { box-shadow: inset 3px 0 0 var(--error); }
+  tbody tr.failed[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--error), inset 0 0 0 1px #2a3a4c; }
 
   aside {
     border-left: 1px solid var(--panel-edge);
     padding: 16px 18px;
     background: var(--panel);
-    min-height: calc(100vh - 118px);
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
   }
   aside h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
   aside .id { font-family: var(--num); font-size: 12px; color: var(--muted); word-break: break-all; }
@@ -157,6 +180,9 @@
     color: var(--muted);
   }
   .pill.used { color: var(--ground); background: var(--requests); border-color: var(--requests); }
+  .rest { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .rest summary { cursor: pointer; color: var(--dim); }
+  .rest .pills { margin-top: 8px; max-height: 180px; overflow: auto; }
   .empty { color: var(--dim); padding: 18px 20px; }
 
   /* A conversa: cada turno é um bloco, e o papel de quem falou manda na cor
@@ -220,7 +246,18 @@
     cursor: pointer;
   }
   .tabs button[aria-selected="true"] { color: var(--ground); background: var(--requests); border-color: var(--requests); }
-  footer { display: flex; gap: 12px; align-items: center; padding: 14px 20px; color: var(--dim); font-size: 12.5px; }
+  footer {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+    flex-wrap: wrap;
+    padding: 14px 20px;
+    color: var(--dim);
+    font-size: 12.5px;
+  }
+  .legend-marks { display: flex; gap: 6px; align-items: center; color: var(--dim); }
+  .legend-marks .mark { margin-left: 10px; }
+  .legend-marks .mark:first-child { margin-left: 0; }
 
   @media (max-width: 900px) {
     form > * { min-width: 0; }
@@ -242,6 +279,7 @@
 </header>
 
 <form id="filters" autocomplete="off">
+  <div class="row ask">
   <input type="search" id="text" name="text" placeholder="id, modelo, provedor, ferramenta, motivo da falha">
   <div class="chips">
     <button type="button" class="chip bad" data-filter="status_min" data-value="400" aria-pressed="false">falhas</button>
@@ -250,6 +288,8 @@
     <button type="button" class="chip" data-filter="has_tools" data-value="true" aria-pressed="false">usou ferramenta</button>
     <button type="button" class="chip slow" data-filter="min_duration_ms" data-value="5000" aria-pressed="false">&gt; 5 s</button>
   </div>
+  </div>
+  <div class="row refine">
   <select id="period" aria-label="período">
     <option value="">período: tudo</option>
     <option value="0.25">últimos 15 min</option>
@@ -259,7 +299,7 @@
     <option value="168">últimos 7 dias</option>
     <option value="custom">entre duas datas…</option>
   </select>
-  <span id="range" hidden>
+  <span id="range" class="range" hidden>
     <input type="datetime-local" id="since" aria-label="de" step="60">
     <input type="datetime-local" id="until" aria-label="até" step="60">
   </span>
@@ -272,8 +312,10 @@
   <select id="provider" name="provider" aria-label="provedor">
     <option value="">provedor: todos</option>
   </select>
+  <span class="spacer"></span>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
   <button type="button" class="ghost" id="export">Exportar CSV</button>
+  </div>
 </form>
 
 <main>
@@ -285,6 +327,7 @@
           <th>Rota</th>
           <th>Modelo pedido</th>
           <th>Modelo que respondeu</th>
+          <th title="streaming, troca de candidato, ferramenta chamada">Sinais</th>
           <th class="n">Tokens</th>
           <th class="n" role="button" data-order="duration">Duração</th>
           <th class="n">Status</th>
@@ -304,6 +347,12 @@
   <button type="button" class="ghost" id="more" hidden>Carregar mais</button>
   <button type="button" class="ghost" id="top" hidden>Voltar ao início</button>
   <span id="status" role="status"></span>
+  <span class="spacer"></span>
+  <span class="legend-marks">
+    <span class="mark">~</span> streaming
+    <span class="mark fell">↳</span> trocou de candidato
+    <span class="mark tool">Bash</span> ferramenta chamada
+  </span>
 </footer>
 
 <script>
@@ -468,18 +517,24 @@ function servedLabel(event) {
 function rowOf(event) {
   const bad = event.status >= 400 || event.status === 499;
   const tokens = event.input_tokens + event.output_tokens;
+  const tools = event.tools_called || [];
   const marks = [
-    event.stream ? "stream" : "",
-    event.fell_back ? '<span class="tag fell">fallback</span>' : "",
-    (event.tools_called || []).length ? esc(event.tools_called.join(" ")) : "",
-  ].filter(Boolean).join(" · ");
-  return `<tr data-id="${esc(event.request_id)}">
+    event.stream ? '<span class="mark" title="streaming">~</span>' : "",
+    event.fell_back ? '<span class="mark fell" title="trocou de candidato">↳</span>' : "",
+    tools.length
+      ? `<span class="mark tool" title="${esc(tools.join(", "))}">${esc(tools[0])}${
+          tools.length > 1 ? ` +${tools.length - 1}` : ""
+        }</span>`
+      : "",
+  ].filter(Boolean).join("");
+  return `<tr data-id="${esc(event.request_id)}" class="${bad ? "failed" : ""}">
     <td class="when" title="${esc(day(event.started_at))}">${esc(clock(event.started_at, true))}</td>
     <td>${esc((event.route || "").replace("/v1/", ""))}</td>
     <td>${esc(event.requested_model || "—")}</td>
     <td>${bad && event.error_type
       ? `<span class="tag bad">${esc(event.error_type)}</span>`
-      : esc(event.candidate_model || servedLabel(event))} <span class="tag">${marks}</span></td>
+      : esc(event.candidate_model || servedLabel(event))}</td>
+    <td class="signals">${marks || '<span class="none">—</span>'}</td>
     <td class="n">${compact(tokens)}</td>
     <td class="n">${ms(event.duration_ms)}</td>
     <td class="n status ${bad ? "bad" : ""}">${event.status}</td>
@@ -598,16 +653,24 @@ function renderTalk(body) {
   });
 }
 
-// O texto guardado é "papel: conteúdo" por turno, separados por linha em
-// branco. Voltar a separar aqui é o que permite colorir quem falou.
+// O texto guardado é "papel: conteúdo", um turno por vez. Separar por linha em
+// branco quebrava cada parágrafo num turno próprio: medido numa conversa real,
+// 142 blocos, quase todos rotulados "texto". O corte acontece só onde começa um
+// papel conhecido no início de uma linha.
+const TURN_START = /^(system|user|assistant|tool):\s?/;
+
 function turnsOf(prompt, needle) {
   if (!prompt) return `<p class="empty">Nada no pedido.</p>`;
-  return prompt
-    .split("\n\n")
-    .map((chunk) => {
-      const match = chunk.match(/^(system|user|assistant|tool|\?):\s?([\s\S]*)$/);
-      return match ? turnOf(match[1], match[2], needle) : turnOf("", chunk, needle);
-    })
+  const turns = [];
+  for (const line of prompt.split("\n")) {
+    const match = line.match(TURN_START);
+    if (match) turns.push({ who: match[1], text: line.slice(match[0].length) });
+    else if (turns.length) turns[turns.length - 1].text += `\n${line}`;
+    else turns.push({ who: "", text: line });
+  }
+  return turns
+    .filter((turn) => turn.who || turn.text.trim())
+    .map((turn) => turnOf(turn.who, turn.text.trim(), needle))
     .join("");
 }
 
@@ -664,10 +727,17 @@ function detailOf(event) {
       `<li class="won"><b>${esc(event.candidate_model)}</b> <small>respondeu em ${ms(event.duration_ms)}</small></li>`
     );
   }
-  const offered = (event.tools_offered || []).map((tool) => {
-    const used = (event.tools_called || []).includes(tool);
-    return `<span class="pill ${used ? "used" : ""}">${esc(tool)}</span>`;
-  });
+  const called = event.tools_called || [];
+  const offered = (event.tools_offered || []).filter((tool) => !called.includes(tool));
+  const pills = called.map((tool) => `<span class="pill used">${esc(tool)}</span>`).join("");
+  const rest = offered.length
+    ? `<details class="rest">
+         <summary>${offered.length} oferecidas e não chamadas</summary>
+         <div class="pills">${offered
+           .map((tool) => `<span class="pill">${esc(tool)}</span>`)
+           .join("")}</div>
+       </details>`
+    : "";
   return `
     <h2>${esc(event.candidate_model || servedLabel(event))}</h2>
     <p class="id">${esc(event.request_id)}</p>
@@ -693,7 +763,8 @@ function detailOf(event) {
     <h3>Cadeia</h3>
     <ul class="chain">${attempts.join("") || '<li class="won"><b>sem tentativas registradas</b></li>'}</ul>
     <h3>Ferramentas</h3>
-    ${offered.length ? `<div class="pills">${offered.join("")}</div>` : '<p class="empty">Nenhuma oferecida.</p>'}
+    ${called.length ? `<div class="pills">${pills}</div>` : '<p class="empty">Nenhuma chamada.</p>'}
+    ${rest}
     </div>
   `;
 }

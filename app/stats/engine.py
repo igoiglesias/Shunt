@@ -20,7 +20,7 @@ import os
 import socket
 from urllib.parse import urlparse
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 
 from app.stats.models import Base
 
@@ -112,6 +112,35 @@ def _tune_for_many_writers(engine: Engine) -> None:
     event.listen(engine, "connect", lambda connection, _record: apply_pragmas(connection))
 
 
+def add_missing_columns(engine: Engine) -> list[str]:
+    """Acrescenta ao banco existente as colunas que o modelo ganhou depois.
+
+    `create_all` cria tabela que falta e ignora tabela que existe -- inclusive
+    quando ela esta com uma coluna a menos. Medido: uma coluna nova quebrou
+    TODA leitura da tabela antiga com `no such column`, e so no banco de quem
+    ja estava usando. Migracao de verdade e outra conversa; para um armazem de
+    telemetria, ADD COLUMN cobre o caso e nao pede ferramenta nenhuma.
+
+    Devolve o que acrescentou, para o log dizer o que mudou.
+    """
+    added = []
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in inspector.get_table_names():
+                continue
+            existing = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                kind = column.type.compile(engine.dialect)
+                connection.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {column.name} {kind}"))
+                added.append(f"{table.name}.{column.name}")
+    if added:
+        logger.info("stats: colunas acrescentadas ao banco existente: %s", ", ".join(added))
+    return added
+
+
 def build_engine(url: str | None = None) -> Engine | None:
     """A engine pronta e com a tabela criada, ou None quando nao ha URL.
 
@@ -128,6 +157,7 @@ def build_engine(url: str | None = None) -> Engine | None:
         engine = create_engine(url, pool_pre_ping=True)
         _tune_for_many_writers(engine)
         Base.metadata.create_all(engine)
+        add_missing_columns(engine)
     except Exception as err:  # noqa: BLE001 - qualquer falha de banco no boot e
         # a mesma decisao: seguir sem persistencia em vez de nao subir.
         logger.warning("stats: banco indisponivel no boot (%s: %s)", type(err).__name__, err)

@@ -203,7 +203,7 @@ def test_clicking_a_row_opens_the_whole_chain(browser, server):
     page, problems = open_audit(browser, server)
     target = page.evaluate(
         """() => [...document.querySelectorAll('#rows tr')]
-            .find(r => r.textContent.includes('fallback'))?.dataset.id"""
+            .find(r => r.querySelector('.mark.fell'))?.dataset.id"""
     )
     assert target, "nenhuma linha com fallback para abrir"
     page.click(f'#rows tr[data-id="{target}"]')
@@ -228,7 +228,7 @@ def test_the_order_can_be_changed_to_the_slowest_first(browser, server):
     page.wait_for_timeout(400)
     durations = page.evaluate(
         """() => [...document.querySelectorAll('#rows tr')]
-            .map(r => r.children[5].textContent.trim())"""
+            .map(r => r.children[6].textContent.trim())"""
     )
     page.close()
     assert problems == []
@@ -597,3 +597,22 @@ def test_a_request_with_no_candidate_says_which_story_it_is(browser, server):
     assert problems == []
     assert rotulos, "nenhuma linha sem candidato no banco semeado"
     assert all("estimada aqui" not in texto for texto in rotulos), rotulos
+
+
+def test_a_conversation_is_split_by_turn_and_not_by_paragraph(browser, server):
+    """Medido numa conversa real: 142 blocos, quase todos rotulados "texto".
+
+    Um `system` de mil linhas e um turno so; quebrar por linha em branco
+    transformava cada paragrafo num turno proprio.
+    """
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-02"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .turn")
+    papeis = page.evaluate(
+        "() => [...document.querySelectorAll('#talk .who b')].map(b => b.textContent)"
+    )
+    page.close()
+    assert problems == []
+    assert papeis == ["system", "user", "assistant", "user", "resposta"], papeis
