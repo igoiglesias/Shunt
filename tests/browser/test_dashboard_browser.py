@@ -130,7 +130,7 @@ def open_panel(browser, base, width, height):
 def test_the_panel_draws_without_a_single_console_error(browser, server):
     page, problems = open_panel(browser, server, 1440, 1000)
     assert problems == []
-    assert page.locator("#flow svg").count() == 1
+    assert page.locator("#flow .routes li").count() > 0
     # A serie desenha linha com tres ou mais horas e barras com menos; as duas
     # formas contam como desenhada.
     assert page.locator("#series path").count() + page.locator("#series rect").count() > 0
@@ -145,7 +145,7 @@ def test_the_numbers_on_screen_are_the_numbers_the_api_answered(browser, server)
         """() => ({
             requests: document.querySelector('#figures .figure .value').textContent,
             models: [...document.querySelectorAll('#models tbody tr')].map(
-                r => [...r.children].slice(0, 2).map(c => c.textContent.trim())),
+                r => [...r.children].map(c => c.textContent.trim())),
             errors: [...document.querySelectorAll('#errors tbody tr td:last-child')].map(
                 c => Number(c.textContent)),
         })"""
@@ -153,7 +153,8 @@ def test_the_numbers_on_screen_are_the_numbers_the_api_answered(browser, server)
     page.close()
     assert shown["requests"] == str(api["totals"]["requests"])
     assert shown["models"][0][0] == api["by_model"][0]["model"]
-    assert int(shown["models"][0][1]) == api["by_model"][0]["requests"]
+    assert shown["models"][0][1] == api["by_provider"][0]["provider"]
+    assert int(shown["models"][0][2]) == api["by_model"][0]["requests"]
     assert sum(shown["errors"]) == sum(row["requests"] for row in api["errors"])
 
 
@@ -163,14 +164,14 @@ def test_the_panel_never_scrolls_sideways_on_a_phone(browser, server):
         """() => ({
             scrollWidth: document.documentElement.scrollWidth,
             innerWidth: window.innerWidth,
-            flowLabel: document.querySelector('#flow text.flow-label')?.getBoundingClientRect(),
+            rotaLegivel: document.querySelector('#flow .routes .asked')?.getBoundingClientRect(),
         })"""
     )
     page.close()
     assert problems == []
     assert measured["scrollWidth"] <= measured["innerWidth"] + 1
-    # Rotulo legivel: menos de 9 px de altura na tela e texto que ninguem le.
-    assert measured["flowLabel"]["height"] >= 9, measured["flowLabel"]
+    # Rotulo legivel: menos de 12 px de altura na tela e texto que ninguem le.
+    assert measured["rotaLegivel"]["height"] >= 12, measured["rotaLegivel"]
 
 
 def test_a_request_served_right_now_lands_on_the_tape(browser, server):
@@ -259,9 +260,9 @@ def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, serve
     page, _ = open_panel(browser, server, 1400, 900)
     httpx.get(f"{server}/v1/models", timeout=10)
     page.reload(wait_until="networkidle")
-    page.wait_for_selector("#flow text.flow-label")
+    page.wait_for_selector("#flow .routes .asked")
     labels = page.evaluate(
-        "() => [...document.querySelectorAll('#flow text.flow-label')].map(t => t.textContent.trim())"
+        "() => [...document.querySelectorAll('#flow .routes .asked')].map(t => t.textContent.trim())"
     )
     page.close()
     assert labels
@@ -459,20 +460,28 @@ def test_the_series_is_two_plots_and_never_two_scales_in_one(browser, server):
 
 
 def test_the_flow_links_each_request_to_what_answered_it(browser, server):
-    """Duas colunas soltas nao diziam se foi o opus que caiu no local."""
+    """Uma linha por rota: quem pediu, quem atendeu, quanto.
+
+    O diagrama de fitas saiu: tres modelos de cada lado nao justificavam
+    trezentos pixels para dizer o que cabe numa lista.
+    """
     page, problems = open_panel(browser, server, 1500, 1000)
     medido = page.evaluate(
-        """() => ({
-            fitas: document.querySelectorAll('#flow path').length,
-            nos: [...document.querySelectorAll('#flow text.flow-label')].map(t => t.textContent),
-            titulos: [...document.querySelectorAll('#flow path title')].map(t => t.textContent),
-        })"""
+        """() => [...document.querySelectorAll('#flow .routes li')].map(li => ({
+            pedido: li.querySelector('.asked').textContent,
+            servido: li.querySelector('.served').textContent,
+            req: li.querySelector('.count').textContent,
+            barra: li.querySelector('.route-bar').style.width,
+        }))"""
     )
     page.close()
     assert problems == []
-    assert medido["fitas"] > 0, "nenhuma fita ligando os dois lados"
-    assert medido["nos"], "nenhum modelo no diagrama"
-    assert any("→" in titulo for titulo in medido["titulos"]), medido["titulos"]
+    assert medido, "nenhuma rota na lista"
+    assert all(linha["pedido"] and linha["servido"] for linha in medido)
+    assert all(linha["barra"].endswith("%") for linha in medido)
+    # A lista vem da maior para a menor: a rota dominante é a primeira leitura.
+    partes = [float(linha["barra"].rstrip("%")) for linha in medido]
+    assert partes == sorted(partes, reverse=True)
 
 
 def test_an_empty_window_offers_the_way_out(browser, server):

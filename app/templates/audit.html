@@ -11,11 +11,12 @@
     --panel-edge: #23303f;
     --ink: #e6eaf0;
     --muted: #8a99ac;
-    --dim: #5b6b7e;
+    --dim: #7d8ea3;
     --requests: #3987e5;
     --tokens: #d95926;
     --fallback: #9085e9;
     --error: #d03b3b;
+    --error-text: #e05a5a;
     --good: #0ca30c;
     --warning: #fab219;
     --num: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
@@ -43,7 +44,12 @@
   header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.14em; }
   header h1 span { color: var(--requests); }
   header nav { display: flex; gap: 16px; font-size: 13px; }
-  header nav a { color: var(--muted); text-decoration: none; }
+  header nav a {
+    color: var(--muted);
+    text-decoration: none;
+    padding: 4px 2px;
+    display: inline-block;
+  }
   header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
   #count { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--num); }
 
@@ -116,10 +122,10 @@
   tbody tr[aria-selected="true"] { background: #1d2a39; box-shadow: inset 3px 0 0 var(--requests); }
   .when { font-family: var(--num); color: var(--dim); }
   .status { font-family: var(--num); }
-  .status.bad { color: var(--error); }
+  .status.bad { color: var(--error-text); }
   .tag { color: var(--muted); font-size: 12px; }
   .tag.fell { color: var(--fallback); }
-  .tag.bad { color: var(--error); }
+  .tag.bad { color: var(--error-text); }
   .mark {
     display: inline-block;
     margin-left: 6px;
@@ -130,7 +136,7 @@
     background: #1d2835;
   }
   .mark.fell { color: var(--fallback); }
-  .mark.tool { color: var(--requests); }
+  .mark.tool { color: var(--ink); background: #1f2b3a; }
   .signals .mark:first-child { margin-left: 0; }
   .signals .none { color: var(--dim); }
   /* Linha que falhou se anuncia pela borda, e não só pelo número no fim. */
@@ -170,7 +176,7 @@
     border-radius: 50%;
     background: var(--error);
   }
-  .chain li.won::before { background: var(--requests); }
+  .chain li.won::before { background: var(--good); }
   .chain li b { font-weight: 500; }
   .chain li small { color: var(--muted); }
   .pills { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -257,9 +263,7 @@
     color: var(--dim);
     font-size: 12.5px;
   }
-  .legend-marks { display: flex; gap: 6px; align-items: center; color: var(--dim); }
-  .legend-marks .mark { margin-left: 10px; }
-  .legend-marks .mark:first-child { margin-left: 0; }
+
 
   /* Entre 900 e 1280 a tabela divide a tela com o detalhe e não cabe inteira.
      A rota é quase sempre a mesma e cede o lugar para duração e status, que é
@@ -397,11 +401,6 @@
   <button type="button" class="ghost" id="top" hidden>Voltar ao início</button>
   <span id="status" role="status"></span>
   <span class="spacer"></span>
-  <span class="legend-marks">
-    <span class="mark">~</span> streaming
-    <span class="mark fell">↳</span> trocou de candidato
-    <span class="mark tool">Bash</span> ferramenta chamada
-  </span>
 </footer>
 
 <script>
@@ -568,8 +567,8 @@ function rowOf(event) {
   const tokens = event.input_tokens + event.output_tokens;
   const tools = event.tools_called || [];
   const marks = [
-    event.stream ? '<span class="mark" title="streaming">~</span>' : "",
-    event.fell_back ? '<span class="mark fell" title="trocou de candidato">↳</span>' : "",
+    event.stream ? '<span class="mark">stream</span>' : "",
+    event.fell_back ? '<span class="mark fell">fallback</span>' : "",
     tools.length
       ? `<span class="mark tool" title="${esc(tools.join(", "))}">${esc(tools[0])}${
           tools.length > 1 ? ` +${tools.length - 1}` : ""
