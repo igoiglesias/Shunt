@@ -29,10 +29,12 @@ providers = {
         "protocol": "anthropic",
         "api_key_env": "ANTHROPIC_API_KEY",
     },
-    "cloudflare": {
-        "base_url": "https://api.cloudflare.com/client/v4/accounts/8166f248db4975c6bfa6129b6cd618da/ai/v1",
+    # Groq: dialeto OpenAI puro, com tool calling e streaming. O plano gratis
+    # limita por minuto e por dia, e nao pede cartao.
+    "groq": {
+        "base_url": "https://api.groq.com/openai/v1",
         "protocol": "openai",
-        "api_key_env": "CLOUDFLARE_API_KEY",
+        "api_key_env": "GROQ_API_KEY",
     },
 }
 
@@ -53,30 +55,30 @@ models = {
         "context_window": 262144,
         "max_output_tokens": 8192,
     },
-    "cf-free": {
-        "provider": "cloudflare",
-        "model": "@cf/qwen/qwen3.8-27b",
+    "groq-free": {
+        "provider": "groq",
+        "model": "llama-3.3-70b-versatile",
         "supports": {"tools": True, "streaming": True, "vision": False},
-        "context_window": 262144,
-        "max_output_tokens": 8192,
+        "context_window": 131072,
+        "max_output_tokens": 32768,
     },
 }
 
 # Os tres nomes que o Claude Code pede. O padrao casa por substring, entao
 # `haiku` pega `claude-haiku-4-5` e qualquer outra versao do mesmo porte.
 routes = [
-    # Escotilha para forcar a Cloudflare. O nome NAO pode conter o padrao de
+    # Escotilha para forcar o Groq. O nome NAO pode conter o padrao de
     # nenhuma outra rota: a resolucao por familia e por substring, na ordem
-    # desta lista, entao um alias chamado `free-cloudflare` casaria com a rota
-    # `free` e nunca chegaria na Cloudflare.
-    ("cf", ["cf-free"]),
+    # desta lista, entao um alias chamado `free-groq` casaria com a rota
+    # `free` e nunca chegaria no Groq.
+    ("groq", ["groq-free"]),
     # Escotilha para forcar o remoto: o alias do modelo tambem e um padrao de
     # rota, entao `model: "free"` sobe direto para o OpenRouter, sem passar
     # pelo local. Serve para conferir a cadeia de fallback sem derrubar nada.
     ("free", ["free"]),
-    ("haiku", ["free", "qwen-local", "cf-free"]),
-    ("sonnet", ["free", "qwen-local", "cf-free"]),
-    ("opus", ["qwen-local", "free", "cf-free"]),
+    ("haiku", ["free", "qwen-local", "groq-free"]),
+    ("sonnet", ["free", "qwen-local", "groq-free"]),
+    ("opus", ["qwen-local", "free", "groq-free"]),
 ]
 
 default_model = "qwen-local"
