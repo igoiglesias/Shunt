@@ -76,7 +76,7 @@ routes = [
     # rota, entao `model: "free"` sobe direto para o OpenRouter, sem passar
     # pelo local. Serve para conferir a cadeia de fallback sem derrubar nada.
     ("free", ["free"]),
-    ("haiku", ["free", "qwen-local", "groq-free"]),
+    ("haiku", ["groq-free", "qwen-local", "free"]),
     ("sonnet", ["free", "qwen-local", "groq-free"]),
     ("opus", ["qwen-local", "free", "groq-free"]),
 ]

@@ -23,6 +23,7 @@ e `/v1/embeddings` respondem um unico documento JSON neste proxy.
 from collections.abc import Mapping
 from json import JSONDecodeError
 
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
@@ -197,13 +198,22 @@ async def count_tokens(request: Request):
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     if candidate.protocol == "anthropic":
         shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
-        upstream = await pool.get(candidate.provider).post(
-            "/v1/messages/count_tokens",
-            json={**body, "model": candidate.model},
-            headers=outbound_headers(shunt_request, candidate, settings),
-        )
-        if upstream.status_code == 200:
-            return upstream.json()
+        try:
+            upstream = await pool.get(candidate.provider).post(
+                "/v1/messages/count_tokens",
+                json={**body, "model": candidate.model},
+                headers=outbound_headers(shunt_request, candidate, settings),
+            )
+        except httpx.HTTPError:
+            # Conexao que morre e a mesma situacao de um status diferente de
+            # 200: a contagem autoritativa nao veio, e a estimativa local e uma
+            # resposta util. Sem este ramo a excecao sobe pela pilha do ASGI e
+            # o cliente recebe um 500 de `text/plain`, que nem o envelope de
+            # erro do protocolo respeita.
+            pass
+        else:
+            if upstream.status_code == 200:
+                return upstream.json()
     return {"input_tokens": estimate_input_tokens(body)}
 
 
