@@ -103,3 +103,35 @@ class RequestBody(Base):
     prompt_bytes: Mapped[int] = mapped_column(Integer, default=0)
     answer_bytes: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(default=False)
+
+
+class Analysis(Base):
+    """A leitura de um periodo por um modelo, guardada com o dossie que a gerou.
+
+    Tabela propria porque a analise custa token: pedir duas vezes a mesma janela
+    e pagar duas vezes pela mesma resposta. A chave `fingerprint` e o periodo
+    mais os filtros, que e o que define "a mesma janela".
+
+    O dossie fica junto do texto de proposito. Uma recomendacao sem o numero que
+    a sustenta e conselho generico, e o numero so pode ser conferido se ele for
+    guardado -- o periodo ja passou, e a mesma consulta amanha da outro valor.
+    """
+
+    __tablename__ = "analyses"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    filters_json: Mapped[str] = mapped_column(Text, default="{}")
+    dossier_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    requested_model: Mapped[str] = mapped_column(String(200))
+    candidate_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    status: Mapped[int] = mapped_column(Integer, default=200)
+    text: Mapped[str] = mapped_column(Text, default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)

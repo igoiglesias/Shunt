@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.stats import queries
+from app.stats import analysis, queries
 
 router = APIRouter()
 
@@ -223,3 +223,70 @@ async def one_request(request: Request, request_id: str):
     if event is None:
         return JSONResponse(status_code=404, content={"error": "requisicao nao encontrada"})
     return JSONResponse(event)
+
+
+# --- Analise do periodo -------------------------------------------------------
+#
+# O botao "Analisar este periodo" herda os filtros da tela: o periodo analisado
+# e o periodo que a pessoa esta olhando. Por isso os filtros vem da query, os
+# MESMOS parametros da busca, e o corpo carrega so o que e da analise -- o
+# modelo e o pedido explicito de refazer.
+
+
+def _analysis_filters(params) -> dict:
+    filters = filters_from(params)
+    # `order_by` ordena uma listagem; um dossie nao tem ordem de leitura, e
+    # passa-lo adiante seria um filtro que a busca entende e a analise nao.
+    filters.pop("order_by", None)
+    return filters
+
+
+async def _body_of(request: Request) -> dict:
+    """O corpo JSON, ou vazio. O botao manda POST sem corpo, e isso e valido."""
+    try:
+        payload = await request.json()
+    except ValueError:
+        # Corpo vazio levanta `JSONDecodeError`, que e um `ValueError`: POST sem
+        # corpo e o caminho normal do botao, e nao um erro para mostrar na tela.
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+@router.post("/api/analysis")
+async def analyse_period(request: Request):
+    """Manda o periodo para um modelo e devolve a leitura dele."""
+    engine = _engine(request)
+    if engine is None:
+        return _no_database()
+    payload = await _body_of(request)
+    state = request.app.state
+    result = await analysis.analyse(
+        engine,
+        state.settings,
+        getattr(state, "pool", None),
+        filters=_analysis_filters(request.query_params),
+        model=payload.get("model"),
+        refresh=bool(payload.get("refresh")),
+    )
+    return JSONResponse(status_code=result["status"], content=result)
+
+
+@router.get("/api/analysis")
+async def list_analyses(request: Request):
+    """As analises ja pagas. Sem o dossie: a listagem e um menu."""
+    engine = _engine(request)
+    if engine is None:
+        return _no_database()
+    items = await asyncio.to_thread(analysis.recent, engine)
+    return JSONResponse({"analyses": items})
+
+
+@router.get("/api/analysis/{analysis_id}")
+async def one_analysis(request: Request, analysis_id: int):
+    engine = _engine(request)
+    if engine is None:
+        return _no_database()
+    item = await asyncio.to_thread(analysis.one, engine, analysis_id)
+    if item is None:
+        return JSONResponse(status_code=404, content={"error": "analise nao encontrada"})
+    return JSONResponse(item)
