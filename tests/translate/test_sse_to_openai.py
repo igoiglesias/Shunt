@@ -305,3 +305,22 @@ def test_thinking_blocks_are_counted_for_the_usage_panel():
     assert translator.thinking_blocks() == before + 1
     assert translator.tools_called() == []
     assert chunks == []
+
+
+def test_a_thinking_block_reaches_the_stored_conversation(monkeypatch):
+    """O mesmo prefixo dos dois lados: `[pensando] ` antes do raciocinio."""
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "1")
+    translator = AnthropicStreamToOpenAI("gpt-4o", "chatcmpl-1")
+    translator.feed(
+        "content_block_start",
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking"}},
+    )
+    translator.feed(
+        "content_block_delta",
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "pensei alto"},
+        },
+    )
+    assert translator.answer_text() == "[pensando] pensei alto"

@@ -211,7 +211,9 @@ class OpenAIStreamToAnthropic:
         reasoning = reasoning_of(delta)
         if reasoning:
             if self._open_kind != "thinking":
+                self._remember("[pensando] ")
                 events.extend(self._open_thinking())
+            self._remember(reasoning)
             events.append(
                 (
                     "content_block_delta",

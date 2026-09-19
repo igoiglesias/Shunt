@@ -164,3 +164,18 @@ def test_a_limit_that_does_not_parse_falls_back(monkeypatch):
 def test_nothing_to_store_stores_nothing():
     assert bodies.capture("", "") is None
     assert bodies.capture("oi", "")["answer"] == ""
+
+
+@pytest.mark.parametrize(
+    ("bloco", "esperado"),
+    [
+        ("texto solto", "texto solto"),
+        (["isso nao e bloco"], ""),
+        (7, ""),
+        ({"type": "document"}, "[document]"),
+        ({}, "[bloco]"),
+    ],
+)
+def test_a_block_shape_never_seen_before_still_reads(bloco, esperado):
+    """Provedor inventa tipo de bloco; a conversa nao pode virar excecao."""
+    assert bodies._block_text(bloco) == esperado

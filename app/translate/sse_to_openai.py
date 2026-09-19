@@ -106,6 +106,7 @@ class AnthropicStreamToOpenAI:
         block = data.get("content_block") or {}
         if block.get("type") == "thinking":
             self._thinking_blocks += 1
+            self._remember("[pensando] ")
         if block.get("type") != "tool_use":
             return []
         if isinstance(block.get("name"), str):
@@ -137,6 +138,8 @@ class AnthropicStreamToOpenAI:
             texto = delta.get("text", "")
             self._remember(texto)
             return [self._chunk({"content": texto})]
+        if delta.get("type") == "thinking_delta":
+            self._remember(delta.get("thinking", ""))
         if delta.get("type") == "input_json_delta":
             block_index = data.get("index", 0)
             if block_index not in self._tool_index_of_block:
