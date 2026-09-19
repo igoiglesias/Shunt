@@ -96,6 +96,10 @@ class RequestBody(Base):
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Tamanho ANTES do corte, para que a tela possa dizer "mostrando 64 KB de
     # 380 KB" em vez de fingir que a conversa acabou ali.
+    # O corpo CRU da requisicao, redigido e cortado. O texto responde "o que
+    # foi dito"; isto responde "como reproduzir" -- os parametros, as
+    # ferramentas declaradas, o que o cliente mandou de fato.
+    request_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_bytes: Mapped[int] = mapped_column(Integer, default=0)
     answer_bytes: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(default=False)

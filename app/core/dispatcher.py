@@ -355,7 +355,9 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             tools_offered=tools_offered(req),
             tools_called=called,
             thinking_blocks=thinking,
-            body=bodies.capture(bodies.prompt_text(req.body), bodies.answer_text(result.body)),
+            body=bodies.capture(
+                bodies.prompt_text(req.body), bodies.answer_text(result.body), req.body
+            ),
         )
     )
     return result
@@ -941,6 +943,15 @@ async def dispatch_stream(
                 yield chunk
         if req.protocol != "anthropic" and not passthrough.happened:
             yield DONE
+    except GeneratorExit:
+        # O cliente foi embora no meio. Isso nao e sucesso nem falha do
+        # provedor, e registrar como 200 escondia justamente as requisicoes que
+        # o harness cancelou -- que sao as que interessam quando alguem
+        # pergunta por que a cadeia parou no meio. 499 e a convencao do nginx
+        # para "o cliente fechou antes da resposta".
+        tally.status = 499
+        tally.error_type = "client_disconnected"
+        raise
     finally:
         ttft = tally.first_byte_at
         log_request(
@@ -965,6 +976,8 @@ async def dispatch_stream(
                 tools_offered=tools_offered(req),
                 tools_called=tally.tools_called,
                 thinking_blocks=tally.thinking_blocks,
-                body=bodies.capture(bodies.prompt_text(req.body), tally.answer_text),
+                body=bodies.capture(
+                    bodies.prompt_text(req.body), tally.answer_text, req.body
+                ),
             )
         )

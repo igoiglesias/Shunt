@@ -195,3 +195,43 @@ def test_the_capture_redacts_before_storing():
     assert "ghp_" not in capturado["answer"]
     assert capturado["prompt"].count("[redigido]") == 1
     assert capturado["answer"].count("[redigido]") == 1
+
+
+def test_the_raw_request_is_stored_redacted_and_cut(monkeypatch):
+    """O texto responde o que foi dito; o JSON responde como reproduzir."""
+    monkeypatch.setenv("SHUNT_BODY_LIMIT", "400")
+    capturado = bodies.capture(
+        "user: oi",
+        "ok",
+        {
+            "model": "claude-opus-5",
+            "temperature": 0.2,
+            "metadata": {"chave": "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA"},
+            "messages": [{"role": "user", "content": "oi"}],
+        },
+    )
+    assert '"temperature": 0.2' in capturado["request_json"]
+    assert "sk-ant-api03" not in capturado["request_json"]
+    assert len(capturado["request_json"]) <= 400
+
+
+def test_a_body_that_does_not_serialise_does_not_break_the_capture():
+    """Um corpo impossivel de serializar vira texto vazio, e nao excecao.
+
+    `default=str` da conta de quase tudo -- conjunto, objeto, data. O que sobra
+    e o ciclo, que nenhuma conversao resolve.
+    """
+
+    class Estranho:
+        pass
+
+    assert '"x"' in bodies.request_json({"x": Estranho()})
+    assert '"x"' in bodies.request_json({"x": {1, 2}})
+
+    ciclo: dict = {}
+    ciclo["eu"] = ciclo
+    assert bodies.request_json(ciclo) == ""
+
+
+def test_without_a_body_there_is_no_raw_json():
+    assert bodies.capture("oi", "ok")["request_json"] is None

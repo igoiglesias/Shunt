@@ -169,10 +169,20 @@ async def export_requests(request: Request):
         )
     buffer.seek(0)
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    cut = page["total"] > len(page["events"])
+    headers = {
+        "content-disposition": f'attachment; filename="shunt-requests-{stamp}.csv"',
+        # Quem exporta precisa saber que levou uma parte. Um cabecalho porque o
+        # CSV em si nao tem onde dizer isso sem sujar a planilha, e a tela le
+        # daqui para avisar antes do download.
+        "x-shunt-exported": str(len(page["events"])),
+        "x-shunt-total": str(page["total"]),
+        "x-shunt-truncated": "1" if cut else "0",
+    }
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv; charset=utf-8",
-        headers={"content-disposition": f'attachment; filename="shunt-requests-{stamp}.csv"'},
+        headers=headers,
     )
 
 

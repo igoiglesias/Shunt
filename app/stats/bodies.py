@@ -143,7 +143,21 @@ def answer_text(body: dict) -> str:
     return "\n".join(lines)
 
 
-def capture(prompt: str, answer: str) -> dict | None:
+def request_json(body: dict) -> str:
+    """O corpo cru da requisicao, redigido e cortado.
+
+    O texto da conversa responde "o que foi dito"; isto responde "como
+    reproduzir" -- temperatura, ferramentas declaradas, tudo que o cliente
+    mandou. Guardar os dois custa pouco e evita a pergunta sem resposta.
+    """
+    try:
+        raw = json.dumps(body, ensure_ascii=False, indent=2, default=str)
+    except (TypeError, ValueError):
+        return ""
+    return redact(raw)[:limit()]
+
+
+def capture(prompt: str, answer: str, body: dict | None = None) -> dict | None:
     """O par pronto para gravar, ou None quando nao ha nada que valha a pena.
 
     Devolve o tamanho ORIGINAL de cada lado junto do texto cortado: sem isso a
@@ -158,6 +172,7 @@ def capture(prompt: str, answer: str) -> dict | None:
     return {
         "prompt": prompt[:ceiling],
         "answer": answer[:ceiling],
+        "request_json": request_json(body) if body is not None else None,
         "prompt_bytes": len(prompt),
         "answer_bytes": len(answer),
         "truncated": len(prompt) > ceiling or len(answer) > ceiling,

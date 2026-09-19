@@ -534,6 +534,7 @@ def body_of(engine: Engine, request_id: str) -> dict | None:
             "request_id": row.request_id,
             "prompt": row.prompt or "",
             "answer": row.answer or "",
+            "request_json": row.request_json or "",
             "prompt_bytes": row.prompt_bytes,
             "answer_bytes": row.answer_bytes,
             "truncated": row.truncated,

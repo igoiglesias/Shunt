@@ -1420,3 +1420,27 @@ async def test_a_stream_that_reasons_before_answering_delivers_the_thinking():
     assert '"text": "Paris"' in body
     # O bloco de pensamento fecha antes de o de texto abrir.
     assert body.index("content_block_stop") < body.index('"type": "text"')
+
+
+@respx.mock
+async def test_a_client_that_walks_away_is_logged_as_such(caplog):
+    """Medido no proxy real: stream abandonado no meio era gravado como 200 sem
+    candidato, e o painel o exibia como se tivesse sido respondido."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices": [{"delta": {"content": "um"}}]}\n\n',
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    stream = dispatch_stream(ShuntRequest("anthropic", BODY, {}, endpoint="messages"), SETTINGS, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await anext(stream)  # le um pedaco
+        await stream.aclose()  # e desiste
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "a requisicao abandonada nao foi registrada"
+    linha = linhas[-1]
+    assert linha["status"] == 499
+    assert linha["error_type"] == "client_disconnected"
+    await pool.aclose()

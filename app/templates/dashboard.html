@@ -588,12 +588,23 @@ function trimTape() {
   applyTapeFilter();
 }
 
+// Sem candidato há três histórias diferentes, e o painel dizia a mesma para as
+// três. Medido ao vivo: um stream que a cadeia inteira recusou aparecia como
+// "estimada aqui", que é o caso de `count_tokens`.
+function servedLabel(event, bad) {
+  if (event.status === 499) return "cliente desistiu";
+  if ((event.route || "").includes("count_tokens")) return "estimada aqui";
+  if ((event.route || "").includes("models")) return "catálogo";
+  if (bad) return "recusada";
+  return "nenhum candidato respondeu";
+}
+
 function tapeRow(event, fresh) {
   const when = clock(event.started_at || "", true) || "agora";
   const id = event.request_id || `${when}-${event.route}-${event.duration_ms}`;
-  const bad = event.status >= 400;
+  const bad = event.status >= 400 || event.status === 499;
   const classes = ["", fresh ? "fresh" : "", bad ? "bad" : "", event.fell_back ? "fell" : ""].join(" ");
-  const served = event.candidate_model || (bad ? "recusada" : "estimada aqui");
+  const served = event.candidate_model || servedLabel(event, bad);
   const tools = (event.tools_called || []).length ? ` · ${esc(event.tools_called.join(", "))}` : "";
   return `<li class="${classes}" data-id="${esc(id)}" data-when="${esc(event.started_at || "")}">
     <span class="when">${esc(when)}</span>

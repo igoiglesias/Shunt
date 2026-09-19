@@ -64,6 +64,10 @@ def seed(path) -> None:
     conversas = [
         RequestBody(
             request_id=f"req-{index:02d}",
+            request_json=(
+                '{\n  "model": "claude-opus-5",\n  "max_tokens": 64,\n'
+                '  "messages": [{"role": "user", "content": "oi"}]\n}'
+            ),
             prompt=(
                 "system: seja breve\n\n"
                 f"user: leia o arquivo {index}.txt e resuma\n\n"
@@ -244,16 +248,27 @@ def test_loading_more_appends_without_repeating(browser, server):
     assert after[:10] == first
 
 
-def test_the_export_link_carries_the_same_filters(browser, server):
+def test_the_export_carries_the_same_filters(browser, server):
     page, _ = open_audit(browser, server)
     page.get_by_role("button", name="falhas").click()
     page.wait_for_timeout(400)
-    href = page.get_attribute("#export", "href")
+    query = page.get_attribute("#export", "data-query")
     page.close()
-    assert "status_min=400" in href
-    csv_text = httpx.get(f"{server}{href}", timeout=10).text
+    assert "status_min=400" in query
+    csv_text = httpx.get(f"{server}/api/requests/export?{query}", timeout=10).text
     assert csv_text.startswith("started_at,request_id")
     assert csv_text.count("\n") > 1
+
+
+def test_the_export_says_how_many_it_took(browser, server):
+    """CSV cortado em silencio vira conclusao errada numa planilha."""
+    page, problems = open_audit(browser, server)
+    page.get_by_role("button", name="Exportar CSV").click()
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('exportadas')")
+    said = page.inner_text("#status")
+    page.close()
+    assert problems == []
+    assert "exportadas" in said
 
 
 def test_clearing_the_filters_brings_everything_back(browser, server):
@@ -469,3 +484,116 @@ def test_the_summary_comes_back_when_the_tab_switches_back(browser, server):
     page.close()
     assert problems == []
     assert hidden is True
+
+
+def test_the_period_shortcut_becomes_an_instant_in_the_url(browser, server):
+    """Janela relativa nao sobrevive a um link mandado meia hora depois."""
+    page, problems = open_audit(browser, server)
+    page.select_option("#period", "1")
+    page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
+    since = page.evaluate("() => new URLSearchParams(location.search).get('since')")
+    rows = page.locator("#rows tr").count()
+    page.close()
+    assert problems == []
+    assert since.endswith("Z") or "+" in since, since
+    assert rows > 0
+
+
+def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
+    page, problems = open_audit(browser, server)
+    page.select_option("#period", "custom")
+    page.wait_for_selector("#since:visible")
+    page.fill("#since", "2026-09-19T00:00")
+    page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
+    page.fill("#until", "2026-09-19T00:05")
+    page.wait_for_function("() => new URLSearchParams(location.search).has('until')")
+    page.wait_for_timeout(400)
+    count = page.inner_text("#count")
+    page.close()
+    assert problems == []
+    assert "nenhuma requisição" in count or "de 0" in count
+
+
+def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
+    # A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha.
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda error: problems.append(str(error)))
+    page.goto(
+        f"{server}/requests?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z",
+        wait_until="networkidle",
+    )
+    page.wait_for_selector("#empty:visible")
+    mostrado = page.evaluate(
+        """() => ({
+            period: document.getElementById('period').value,
+            since: document.getElementById('since').value,
+            visivel: !document.getElementById('range').hidden,
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert mostrado["period"] == "custom"
+    assert mostrado["since"].startswith("2019-12-31") or mostrado["since"].startswith("2020-01-01")
+    assert mostrado["visivel"] is True
+
+
+def test_paging_goes_forward_and_back(browser, server):
+    page, problems = open_audit(browser, server, query="?limit=8")
+    primeira = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
+    assert page.locator("#back").is_hidden(), "nao ha para onde voltar na primeira pagina"
+
+    page.get_by_role("button", name="Carregar mais").click()
+    page.wait_for_function("() => document.querySelectorAll('#rows tr').length > 8")
+    page.wait_for_selector("#back:visible")
+
+    page.get_by_role("button", name="Página anterior").click()
+    page.wait_for_function("() => document.querySelectorAll('#rows tr').length === 8")
+    depois = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
+    page.close()
+    assert problems == []
+    assert depois == primeira, "voltar devolveu uma lista diferente da que a pessoa viu"
+
+
+def test_the_raw_request_tab_shows_what_would_reproduce_it(browser, server):
+    """O texto diz o que foi dito; o JSON diz com que parametros."""
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-02"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Requisição").click()
+    page.wait_for_selector("#raw pre")
+    raw = page.inner_text("#raw pre")
+    botoes = page.evaluate(
+        "() => [...document.querySelectorAll('#raw .ghost')].map(b => b.textContent.trim())"
+    )
+    page.close()
+    assert problems == []
+    assert '"max_tokens": 64' in raw
+    assert botoes == ["Copiar JSON", "Copiar como curl"]
+
+
+def test_a_request_without_a_raw_body_says_so(browser, server):
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-01"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Requisição").click()
+    page.wait_for_selector("#raw .empty:not(.loading)")
+    said = page.inner_text("#raw")
+    page.close()
+    assert [p for p in problems if "Failed to load resource" not in p] == []
+    assert "nao gravada" in said or "não foi gravado" in said
+
+
+def test_a_request_with_no_candidate_says_which_story_it_is(browser, server):
+    """Medido no painel ao vivo: uma cadeia que ninguem atendeu aparecia como
+    "estimada aqui", que e o rotulo do `count_tokens`."""
+    page, problems = open_audit(browser, server)
+    rotulos = page.evaluate(
+        """() => [...document.querySelectorAll('#rows tr')]
+            .filter(r => r.children[3].textContent.includes('rate_limit_error'))
+            .map(r => r.children[3].textContent.trim())"""
+    )
+    page.close()
+    assert problems == []
+    assert rotulos, "nenhuma linha sem candidato no banco semeado"
+    assert all("estimada aqui" not in texto for texto in rotulos), rotulos

@@ -431,6 +431,10 @@ token, an AWS key, a JWT, a `FOO_API_KEY=` line — is replaced with `[redigido]
 before it reaches the database, because an agent that pastes a `.env` into a
 prompt would otherwise store the key forever.
 
+The **Requisição** tab beside it shows the raw body that was sent, redacted and
+cut the same way, with a button that copies it as a `curl` — the conversation
+says what was said, this says how to reproduce it.
+
 Clearing the history takes the stored conversations with it.
 
 ### Clearing the history

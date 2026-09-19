@@ -62,6 +62,9 @@
     padding: 5px 9px;
   }
   input[type="search"] { flex: 1 1 320px; min-width: 200px; }
+  input[type="datetime-local"] { color-scheme: dark; font-size: 12.5px; }
+  #range { display: flex; gap: 6px; flex-wrap: wrap; }
+  #range input { min-width: 0; flex: 1 1 150px; }
   input[type="number"] { width: 10ch; }
   input:focus-visible, select:focus-visible, button:focus-visible {
     outline: 2px solid var(--tokens);
@@ -220,6 +223,8 @@
   footer { display: flex; gap: 12px; align-items: center; padding: 14px 20px; color: var(--dim); font-size: 12.5px; }
 
   @media (max-width: 900px) {
+    form > * { min-width: 0; }
+    #range { width: 100%; }
     main { grid-template-columns: 1fr; }
     aside { border-left: 0; border-top: 1px solid var(--panel-edge); min-height: 0; }
     #count { margin-left: 0; }
@@ -245,6 +250,19 @@
     <button type="button" class="chip" data-filter="has_tools" data-value="true" aria-pressed="false">usou ferramenta</button>
     <button type="button" class="chip slow" data-filter="min_duration_ms" data-value="5000" aria-pressed="false">&gt; 5 s</button>
   </div>
+  <select id="period" aria-label="período">
+    <option value="">período: tudo</option>
+    <option value="0.25">últimos 15 min</option>
+    <option value="1">última hora</option>
+    <option value="6">últimas 6 h</option>
+    <option value="24">últimas 24 h</option>
+    <option value="168">últimos 7 dias</option>
+    <option value="custom">entre duas datas…</option>
+  </select>
+  <span id="range" hidden>
+    <input type="datetime-local" id="since" aria-label="de" step="60">
+    <input type="datetime-local" id="until" aria-label="até" step="60">
+  </span>
   <select id="requested_model" name="requested_model" aria-label="modelo pedido">
     <option value="">modelo pedido: todos</option>
   </select>
@@ -255,7 +273,7 @@
     <option value="">provedor: todos</option>
   </select>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
-  <a class="ghost" id="export" href="/api/requests/export">Exportar CSV</a>
+  <button type="button" class="ghost" id="export">Exportar CSV</button>
 </form>
 
 <main>
@@ -282,8 +300,10 @@
 </main>
 
 <footer>
+  <button type="button" class="ghost" id="back" hidden>Página anterior</button>
   <button type="button" class="ghost" id="more" hidden>Carregar mais</button>
-  <span id="status"></span>
+  <button type="button" class="ghost" id="top" hidden>Voltar ao início</button>
+  <span id="status" role="status"></span>
 </footer>
 
 <script>
@@ -313,6 +333,10 @@ const day = (iso) => {
 };
 
 let state = { order_by: "time" };
+// A pilha de cursores é o que permite VOLTAR: keyset não tem endereço de
+// página, então quem quer a página anterior precisa ter guardado onde ela
+// começou.
+let history_cursors = [];
 const SELECTS = {
   requested_model: "modelo pedido",
   candidate_model: "modelo que respondeu",
@@ -364,6 +388,11 @@ function readUrl() {
   if (!state.order_by) state.order_by = "time";
   el("text").value = state.text || "";
   for (const id of Object.keys(SELECTS)) el(id).value = state[id] || "";
+  const hasRange = Boolean(state.since || state.until);
+  el("period").value = hasRange ? "custom" : "";
+  el("range").hidden = !hasRange;
+  el("since").value = state.since ? localValue(state.since) : "";
+  el("until").value = state.until ? localValue(state.until) : "";
   for (const chip of document.querySelectorAll(".chip")) {
     const on = state[chip.dataset.filter] === chip.dataset.value;
     chip.setAttribute("aria-pressed", String(on));
@@ -382,15 +411,16 @@ function writeUrl(push) {
   const url = `${location.pathname}?${params}`;
   if (push) history.pushState(null, "", url);
   else history.replaceState(null, "", url);
-  el("export").href = `/api/requests/export?${params}`;
+  el("export").dataset.query = params.toString();
 }
 
-async function search({ append } = {}) {
+async function search({ append, cursorOverride } = {}) {
   if (loading) return;
   loading = true;
   el("status").textContent = "buscando…";
   const params = new URLSearchParams(state);
-  if (append && cursor) params.set("cursor", cursor);
+  const useCursor = cursorOverride !== undefined ? cursorOverride : append ? cursor : null;
+  if (useCursor) params.set("cursor", useCursor);
   try {
     const response = await fetch(`/api/requests?${params}`);
     const page = await response.json();
@@ -417,6 +447,8 @@ function render(page, append) {
     : "nenhuma requisição";
   el("empty").hidden = shown > 0;
   el("more").hidden = !cursor;
+  el("back").hidden = history_cursors.length === 0;
+  el("top").hidden = shown <= 25;
   el("status").textContent = "";
   if (selected) {
     const row = rows.querySelector(`tr[data-id="${CSS.escape(selected)}"]`);
@@ -424,8 +456,17 @@ function render(page, append) {
   }
 }
 
+// Sem candidato há histórias diferentes: o `count_tokens` estimado aqui, o
+// catálogo, a cadeia que ninguém atendeu, e o cliente que desistiu.
+function servedLabel(event) {
+  if (event.status === 499) return "cliente desistiu";
+  if ((event.route || "").includes("count_tokens")) return "estimada aqui";
+  if ((event.route || "").includes("models")) return "catálogo";
+  return "nenhum candidato respondeu";
+}
+
 function rowOf(event) {
-  const bad = event.status >= 400;
+  const bad = event.status >= 400 || event.status === 499;
   const tokens = event.input_tokens + event.output_tokens;
   const marks = [
     event.stream ? "stream" : "",
@@ -438,7 +479,7 @@ function rowOf(event) {
     <td>${esc(event.requested_model || "—")}</td>
     <td>${bad && event.error_type
       ? `<span class="tag bad">${esc(event.error_type)}</span>`
-      : esc(event.candidate_model || "—")} <span class="tag">${marks}</span></td>
+      : esc(event.candidate_model || servedLabel(event))} <span class="tag">${marks}</span></td>
     <td class="n">${compact(tokens)}</td>
     <td class="n">${ms(event.duration_ms)}</td>
     <td class="n status ${bad ? "bad" : ""}">${event.status}</td>
@@ -482,6 +523,55 @@ async function loadTalk(requestId) {
   }
   talkCache.set(requestId, body);
   renderTalk(body);
+}
+
+// O corpo cru responde outra pergunta: como reproduzir esta requisição. O
+// texto diz o que foi dito; isto diz com que parâmetros e com quais
+// ferramentas declaradas.
+async function loadRaw(requestId) {
+  const target = el("raw");
+  if (!target) return;
+  if (!talkCache.has(requestId)) {
+    target.innerHTML = `<p class="empty loading" role="status">Carregando…</p>`;
+    const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/body`);
+    const body = await response.json();
+    if (!response.ok) {
+      target.innerHTML = `<p class="empty">${esc(body.error || "sem corpo gravado")}</p>`;
+      return;
+    }
+    talkCache.set(requestId, body);
+  }
+  const body = talkCache.get(requestId);
+  if (!body.request_json) {
+    target.innerHTML = `<p class="empty">O corpo cru não foi gravado para esta requisição.</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <div class="body-bar">
+      <button type="button" class="ghost" id="copy-raw">Copiar JSON</button>
+      <button type="button" class="ghost" id="copy-curl">Copiar como curl</button>
+    </div>
+    <div class="turn"><pre>${esc(body.request_json)}</pre></div>`;
+  el("copy-raw").addEventListener("click", () => copyTo("copy-raw", body.request_json));
+  el("copy-curl").addEventListener("click", () =>
+    copyTo(
+      "copy-curl",
+      [
+        `curl -X POST ${location.origin}/v1/messages \\`,
+        `  -H 'content-type: application/json' \\`,
+        `  -H "x-api-key: $SUA_CHAVE" \\`,
+        `  -d '${body.request_json.replace(/'/g, "'\\''")}'`,
+      ].join("\n")
+    )
+  );
+}
+
+async function copyTo(id, text) {
+  await navigator.clipboard?.writeText(text);
+  const button = el(id);
+  const antes = button.textContent;
+  button.textContent = "Copiado";
+  setTimeout(() => (button.textContent = antes), 1500);
 }
 
 function renderTalk(body) {
@@ -546,7 +636,9 @@ function wireTabs(requestId) {
       for (const other of tabs) other.setAttribute("aria-selected", String(other === tab));
       el("summary").hidden = tab.dataset.tab !== "summary";
       el("talk").hidden = tab.dataset.tab !== "talk";
+      el("raw").hidden = tab.dataset.tab !== "raw";
       if (tab.dataset.tab === "talk") loadTalk(requestId);
+      if (tab.dataset.tab === "raw") loadRaw(requestId);
     });
   }
 }
@@ -577,12 +669,14 @@ function detailOf(event) {
     return `<span class="pill ${used ? "used" : ""}">${esc(tool)}</span>`;
   });
   return `
-    <h2>${esc(event.candidate_model || "nenhum candidato respondeu")}</h2>
+    <h2>${esc(event.candidate_model || servedLabel(event))}</h2>
     <p class="id">${esc(event.request_id)}</p>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="summary" aria-selected="true">Resumo</button>
       <button type="button" role="tab" data-tab="talk" aria-selected="false">Conversa</button>
+      <button type="button" role="tab" data-tab="raw" aria-selected="false">Requisição</button>
     </div>
+    <div id="raw" hidden></div>
     <div id="talk" hidden></div>
     <div id="summary">
     <dl>
@@ -604,8 +698,27 @@ function detailOf(event) {
   `;
 }
 
+function periodToState(choice) {
+  delete state.since;
+  delete state.until;
+  el("range").hidden = choice !== "custom";
+  if (!choice || choice === "custom") return;
+  // Vira instante, e não "últimas N horas": um link mandado meia hora depois
+  // tem de mostrar a mesma janela que o autor viu.
+  const since = new Date(Date.now() - Number(choice) * 3600 * 1000);
+  state.since = since.toISOString();
+}
+
+function localValue(iso) {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
 function update(push = true) {
   cursor = null;
+  history_cursors = [];
   writeUrl(push);
   search();
 }
@@ -635,6 +748,20 @@ el("text").addEventListener("input", (event) => {
   }, 300);
 });
 
+el("period").addEventListener("change", (event) => {
+  periodToState(event.target.value);
+  update();
+});
+
+for (const id of ["since", "until"]) {
+  el(id).addEventListener("change", (event) => {
+    const value = event.target.value;
+    if (value) state[id] = new Date(value).toISOString();
+    else delete state[id];
+    update();
+  });
+}
+
 for (const id of Object.keys(SELECTS)) {
   el(id).addEventListener("change", (event) => {
     const value = event.target.value;
@@ -656,7 +783,55 @@ el("rows").addEventListener("click", (event) => {
   if (row?.dataset.id) openDetail(row.dataset.id);
 });
 
-el("more").addEventListener("click", () => search({ append: true }));
+// O download passa por `fetch` para ler o cabeçalho que diz se o resultado saiu
+// inteiro: um CSV cortado em silêncio vira uma conclusão errada numa planilha.
+el("export").addEventListener("click", async () => {
+  const query = el("export").dataset.query || "";
+  el("status").textContent = "exportando…";
+  try {
+    const response = await fetch(`/api/requests/export?${query}`);
+    if (!response.ok) {
+      el("status").textContent = "não deu para exportar.";
+      return;
+    }
+    const cut = response.headers.get("x-shunt-truncated") === "1";
+    const exported = response.headers.get("x-shunt-exported");
+    const total = response.headers.get("x-shunt-total");
+    const blob = await response.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `shunt-requests-${new Date().toISOString().slice(0, 19)}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    el("status").textContent = cut
+      ? `exportadas ${exported} de ${total} — o arquivo está cortado.`
+      : `exportadas ${exported} requisições.`;
+  } catch (err) {
+    el("status").textContent = `não deu para exportar: ${err}`;
+  }
+});
+
+el("more").addEventListener("click", () => {
+  if (cursor) history_cursors.push(cursor);
+  search({ append: true });
+});
+
+el("back").addEventListener("click", () => {
+  // Uma página para trás é redesenhar até o cursor anterior: keyset não anda
+  // ao contrário, e fingir que anda daria uma lista diferente da que a pessoa
+  // acabou de ver.
+  history_cursors.pop();
+  const target = history_cursors.length ? history_cursors[history_cursors.length - 1] : null;
+  cursor = null;
+  search({ cursorOverride: target });
+});
+
+el("top").addEventListener("click", () => {
+  history_cursors = [];
+  cursor = null;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  search();
+});
 
 el("reset").addEventListener("click", () => {
   state = { order_by: "time" };
@@ -666,6 +841,10 @@ el("reset").addEventListener("click", () => {
 
 function readUrlFromState() {
   el("text").value = "";
+  el("period").value = "";
+  el("range").hidden = true;
+  el("since").value = "";
+  el("until").value = "";
   for (const id of Object.keys(SELECTS)) el(id).value = "";
   for (const chip of document.querySelectorAll(".chip")) chip.setAttribute("aria-pressed", "false");
 }

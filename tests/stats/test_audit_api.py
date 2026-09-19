@@ -235,3 +235,18 @@ async def test_the_facets_never_offer_an_empty_value(store, make_engine, tmp_pat
     facets = body_of(await audit.facets(with_params(store)))
     for lista in facets.values():
         assert all(item["value"] for item in lista), lista
+
+
+async def test_the_export_says_when_it_cut_the_result(store, monkeypatch):
+    """Quem exporta precisa saber que levou uma parte."""
+    monkeypatch.setattr(audit, "EXPORT_LIMIT", 1)
+    answer = await audit.export_requests(with_params(store))
+    assert answer.headers["x-shunt-truncated"] == "1"
+    assert answer.headers["x-shunt-exported"] == "1"
+    assert answer.headers["x-shunt-total"] == "2"
+
+
+async def test_a_whole_export_says_it_is_whole(store):
+    answer = await audit.export_requests(with_params(store))
+    assert answer.headers["x-shunt-truncated"] == "0"
+    assert answer.headers["x-shunt-exported"] == answer.headers["x-shunt-total"]
