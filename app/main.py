@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from app.config.settings import load_settings
 from app.core.observability import configure_logging, set_recorder
@@ -33,13 +35,15 @@ async def lifespan(app: FastAPI):
     await app.state.pool.aclose()
 
 
+DASHBOARD = Path(__file__).parent / "templates" / "dashboard.html"
+
 app = FastAPI(lifespan=lifespan)
 
 app.include_router(v1_router)
 app.include_router(dashboard_router)
 
 
-@app.get("/")
+@app.get("/health")
 async def health() -> dict[str, str]:
     """Liveness check.
 
@@ -52,3 +56,14 @@ async def health() -> dict[str, str]:
     operator is trying to diagnose.
     """
     return {"status": "ok"}
+
+
+@app.get("/", response_class=HTMLResponse)
+async def dashboard() -> str:
+    """O painel de uso, servido do disco a cada carga.
+
+    Ler o arquivo por requisicao em vez de na importacao custa microssegundos e
+    faz `make dev` recarregar a pagina sem reiniciar o processo. A home era a
+    checagem de vida; ela mudou para `/health`, e o README registra a troca.
+    """
+    return DASHBOARD.read_text(encoding="utf-8")

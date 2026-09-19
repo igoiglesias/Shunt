@@ -38,13 +38,14 @@ def _isolated_app_state():
 
 
 def test_health_endpoint_answers_ok_without_touching_state():
+    """A checagem de vida mora em `/health` desde que o painel tomou a home."""
     injected_settings = Settings(providers={}, models={}, routes=[], default_model=None)
     injected_pool = UpstreamPool(injected_settings)
     app.state.settings = injected_settings
     app.state.pool = injected_pool
     try:
         with TestClient(app) as client:
-            response = client.get("/")
+            response = client.get("/health")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
     finally:

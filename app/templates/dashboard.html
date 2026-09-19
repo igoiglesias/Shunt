@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt</title>
+<style>
+  :root {
+    --ground: #0e1620;
+    --panel: #16202c;
+    --panel-edge: #23303f;
+    --ink: #e6eaf0;
+    --muted: #8a99ac;
+    --dim: #5b6b7e;
+    --requests: #5bc8c4;
+    --tokens: #e8a33d;
+    --fallback: #9b8cf0;
+    --error: #e4574c;
+    --num: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    --text: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 14px/1.5 var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  .num { font-family: var(--num); font-variant-numeric: tabular-nums; }
+
+  /* Barra de estado: uma linha, como o mostrador de um instrumento. */
+  header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px 22px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--panel-edge);
+    background: linear-gradient(180deg, #16202c, #111a24);
+  }
+  header h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+  }
+  header h1 span { color: var(--requests); }
+  .state { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+  .state b { color: var(--ink); font-weight: 500; }
+  .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+  .lamp.on { background: var(--requests); box-shadow: 0 0 8px var(--requests); }
+  .lamp.off { background: var(--dim); }
+  .windows { margin-left: auto; display: flex; gap: 2px; }
+  .windows button {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  .windows button[aria-pressed="true"] { color: var(--ground); background: var(--requests); }
+  .windows button:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
+
+  main { padding: 20px; display: grid; gap: 20px; }
+  .flow-band { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 4px;
+    padding: 14px 16px 16px;
+    min-width: 0;
+  }
+  h2 {
+    margin: 0 0 12px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--muted);
+  }
+  h2 em { font-style: normal; color: var(--dim); font-weight: 400; }
+
+  .figures { display: flex; flex-wrap: wrap; gap: 26px; }
+  .figure .value { font-family: var(--num); font-size: 26px; line-height: 1.1; }
+  .figure .label { font-size: 12px; color: var(--muted); }
+  .figure.requests .value { color: var(--requests); }
+  .figure.tokens .value { color: var(--tokens); }
+  .figure.fallback .value { color: var(--fallback); }
+  .figure.errors .value { color: var(--error); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 5px 8px 5px 0; text-align: left; border-bottom: 1px solid #1d2835; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; }
+  td.n, th.n { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
+  tbody tr:last-child td { border-bottom: 0; }
+  .bar { position: relative; }
+  .bar span {
+    position: absolute;
+    inset: 2px auto 2px 0;
+    background: rgba(91, 200, 196, 0.16);
+    border-left: 2px solid var(--requests);
+    z-index: 0;
+  }
+  .bar b { position: relative; font-weight: 400; }
+
+  .tape { max-height: 340px; overflow-y: auto; }
+  .tape li {
+    display: grid;
+    grid-template-columns: 7ch 1fr auto;
+    gap: 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid #1d2835;
+    font-size: 12.5px;
+    align-items: baseline;
+  }
+  .tape ul { list-style: none; margin: 0; padding: 0; }
+  .tape .when { color: var(--dim); font-family: var(--num); }
+  .tape .what b { font-weight: 500; }
+  .tape .what small { color: var(--muted); }
+  .tape .cost { font-family: var(--num); color: var(--muted); }
+  .tape li.bad .what b { color: var(--error); }
+  .tape li.fell .what b { color: var(--fallback); }
+  .tape li.fresh { animation: land 900ms ease-out; }
+  @keyframes land {
+    from { background: rgba(91, 200, 196, 0.14); }
+    to { background: transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tape li.fresh { animation: none; }
+  }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 20px; }
+  .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
+  svg { display: block; width: 100%; height: auto; }
+  .axis { fill: var(--dim); font-size: 10px; font-family: var(--num); }
+  .flow-label { fill: var(--ink); font-size: 12px; }
+  .flow-sub { fill: var(--muted); font-size: 10.5px; font-family: var(--num); }
+  footer { padding: 0 20px 26px; color: var(--dim); font-size: 12px; }
+
+  @media (max-width: 860px) {
+    .flow-band { grid-template-columns: 1fr; }
+    .windows { margin-left: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>SHU<span>N</span>T</h1>
+  <div class="state" id="state"></div>
+  <div class="windows" id="windows">
+    <button data-hours="1" aria-pressed="false">1h</button>
+    <button data-hours="24" aria-pressed="true">24h</button>
+    <button data-hours="168" aria-pressed="false">7d</button>
+  </div>
+</header>
+
+<main>
+  <div class="flow-band">
+    <section>
+      <h2>Para onde cada pedido foi <em>largura = requisições</em></h2>
+      <div id="flow"></div>
+    </section>
+    <section class="tape">
+      <h2>Chegando agora</h2>
+      <ul id="tape"></ul>
+    </section>
+  </div>
+
+  <section>
+    <h2>Resumo da janela</h2>
+    <div class="figures" id="figures"></div>
+  </section>
+
+  <section>
+    <h2>Requisições e tokens por hora</h2>
+    <div id="series"></div>
+  </section>
+
+  <div class="grid">
+    <section><h2>Modelo que respondeu</h2><div id="models"></div></section>
+    <section><h2>Provedor</h2><div id="providers"></div></section>
+    <section><h2>Rota</h2><div id="routes"></div></section>
+    <section><h2>Cadeia de fallback</h2><div id="chain"></div></section>
+    <section><h2>Ferramentas</h2><div id="tools"></div></section>
+    <section><h2>Erros</h2><div id="errors"></div></section>
+  </div>
+</main>
+
+<footer id="footer"></footer>
+
+<script>
+const REFRESH_MS = 15000;
+let hours = 24;
+let snapshot = null;
+
+const el = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const compact = (n) => {
+  if (n === null || n === undefined) return "—";
+  if (n < 1000) return String(n);
+  if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
+  return (n / 1000000).toFixed(1) + "M";
+};
+const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? v + "ms" : (v / 1000).toFixed(1) + "s");
+const pct = (v) => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
+
+async function load() {
+  const response = await fetch(`/api/stats?window=${hours}`);
+  snapshot = await response.json();
+  draw();
+}
+
+function draw() {
+  drawState();
+  drawFigures();
+  drawFlow();
+  drawSeries();
+  drawTable("models", snapshot.by_model, "model", "Modelo");
+  drawTable("providers", snapshot.by_provider, "provider", "Provedor");
+  drawTable("routes", snapshot.by_route, "route", "Rota");
+  drawChain();
+  drawTools();
+  drawErrors();
+  if (!el("tape").children.length) drawTape();
+}
+
+function drawState() {
+  const health = snapshot.health;
+  const on = health.enabled;
+  el("state").innerHTML = `
+    <div><span class="lamp ${on ? "on" : "off"}"></span>${on ? "gravando" : "sem banco"}</div>
+    <div>fila <b class="num">${health.queued}</b></div>
+    <div>descartes <b class="num">${health.dropped}</b></div>
+    <div>falhas <b class="num">${health.failures}</b></div>
+    <div>lotes <b class="num">${health.commits}</b></div>`;
+  el("footer").textContent = on
+    ? `Uma linha por requisição, gravada em lote fora do caminho da API.`
+    : `Persistência desligada: defina TURSO_DATABASE_URL para guardar histórico. O painel ao vivo segue funcionando.`;
+}
+
+function drawFigures() {
+  const t = snapshot.totals;
+  const figures = [
+    ["requests", compact(t.requests), "requisições"],
+    ["tokens", compact(t.input_tokens + t.output_tokens), `tokens (${compact(t.input_tokens)} entrada)`],
+    ["", ms(t.p50_duration_ms), "latência p50"],
+    ["", ms(t.p95_duration_ms), "latência p95"],
+    ["", ms(t.p50_ttft_ms), "1º token p50"],
+    ["fallback", compact(t.fallbacks), "trocas de candidato"],
+    ["errors", t.requests ? pct(t.error_rate) : "—", `erros (${t.errors})`],
+  ];
+  el("figures").innerHTML = figures.map(([kind, value, label]) =>
+    `<div class="figure ${kind}"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`
+  ).join("");
+}
+
+// O diagrama que dá nome ao painel: o que foi PEDIDO à esquerda, o que
+// RESPONDEU à direita, e a espessura da faixa é o volume. É a pergunta que
+// um proxy de substituição de modelo existe para responder.
+function drawFlow() {
+  const asked = snapshot.by_requested_model.slice(0, 6);
+  const served = snapshot.by_model.slice(0, 6);
+  if (!asked.length || !served.length) {
+    el("flow").innerHTML = `<p class="empty">Nenhuma requisição nesta janela.</p>`;
+    return;
+  }
+  const rows = Math.max(asked.length, served.length);
+  const height = Math.max(150, rows * 38 + 20);
+  const total = asked.reduce((sum, a) => sum + a.requests, 0) || 1;
+  const band = (list, x, anchor) => {
+    let y = 16;
+    return list.map((item) => {
+      const name = item.model || item.requested_model || item.route;
+      const thickness = Math.max(3, (item.requests / total) * (height - 40));
+      const node = `
+        <rect x="${x - (anchor === "end" ? 0 : 4)}" y="${y}" width="4" height="${thickness}"
+              fill="${anchor === "end" ? "var(--tokens)" : "var(--requests)"}" />
+        <text class="flow-label" x="${anchor === "end" ? x - 10 : x + 10}" y="${y + 12}"
+              text-anchor="${anchor === "end" ? "end" : "start"}">${esc(name)}</text>
+        <text class="flow-sub" x="${anchor === "end" ? x - 10 : x + 10}" y="${y + 26}"
+              text-anchor="${anchor === "end" ? "end" : "start"}">${item.requests} · ${compact(item.tokens)} tok</text>`;
+      y += thickness + 26;
+      return node;
+    }).join("");
+  };
+  el("flow").innerHTML = `
+    <svg viewBox="0 0 640 ${height}" role="img"
+         aria-label="Modelos pedidos à esquerda, modelos que responderam à direita">
+      <text class="axis" x="4" y="10">pedido</text>
+      <text class="axis" x="636" y="10" text-anchor="end">respondeu</text>
+      ${band(asked, 4, "start")}
+      ${band(served, 636, "end")}
+      <line x1="320" y1="16" x2="320" y2="${height - 6}" stroke="var(--panel-edge)" />
+    </svg>`;
+}
+
+function drawSeries() {
+  const points = snapshot.per_hour;
+  if (!points.length) {
+    el("series").innerHTML = `<p class="empty">Sem tráfego nesta janela.</p>`;
+    return;
+  }
+  const width = 960, height = 140, pad = 24;
+  const maxRequests = Math.max(...points.map((p) => p.requests), 1);
+  const maxTokens = Math.max(...points.map((p) => p.input_tokens + p.output_tokens), 1);
+  const step = points.length > 1 ? (width - pad * 2) / (points.length - 1) : 0;
+  const x = (i) => pad + i * step;
+  const yR = (v) => height - 22 - (v / maxRequests) * (height - 40);
+  const yT = (v) => height - 22 - (v / maxTokens) * (height - 40);
+  const line = (accessor, y) => points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(accessor(p)).toFixed(1)}`).join("");
+  el("series").innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Requisições e tokens por hora">
+      <path d="${line((p) => p.input_tokens + p.output_tokens, yT)}" fill="none" stroke="var(--tokens)" stroke-width="1.5" opacity="0.8" />
+      <path d="${line((p) => p.requests, yR)}" fill="none" stroke="var(--requests)" stroke-width="2" />
+      ${points.map((p, i) => p.errors
+        ? `<circle cx="${x(i).toFixed(1)}" cy="${yR(p.requests).toFixed(1)}" r="3" fill="var(--error)" />` : "").join("")}
+      ${points.map((p, i) => (i % Math.ceil(points.length / 8) === 0
+        ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(p.hour.slice(11, 16))}</text>` : "")).join("")}
+      <text class="axis" x="${pad}" y="12">pico ${maxRequests} req · ${compact(maxTokens)} tok</text>
+    </svg>`;
+}
+
+function drawTable(id, rows, key, heading) {
+  if (!rows.length) {
+    el(id).innerHTML = `<p class="empty">Nada aqui ainda.</p>`;
+    return;
+  }
+  const max = Math.max(...rows.map((r) => r.requests), 1);
+  el(id).innerHTML = `
+    <table><thead><tr>
+      <th>${esc(heading)}</th><th class="n">req</th><th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>
+    </tr></thead><tbody>
+    ${rows.map((r) => `<tr>
+      <td class="bar"><span style="width:${(r.requests / max) * 100}%"></span><b>${esc(r[key])}</b></td>
+      <td class="n">${r.requests}</td>
+      <td class="n">${compact(r.tokens)}</td>
+      <td class="n" style="color:${r.errors ? "var(--error)" : "inherit"}">${r.errors}</td>
+      <td class="n">${ms(r.avg_duration_ms)}</td>
+    </tr>`).join("")}
+    </tbody></table>`;
+}
+
+function drawChain() {
+  const chain = snapshot.chain;
+  const skips = chain.skips.length
+    ? `<table><thead><tr><th>Pulou</th><th class="n">vezes</th></tr></thead><tbody>
+       ${chain.skips.map((s) => `<tr><td>${esc(s.candidate)}</td><td class="n">${s.count}</td></tr>`).join("")}
+       </tbody></table>`
+    : `<p class="empty">Nenhum candidato foi pulado.</p>`;
+  el("chain").innerHTML = `
+    <div class="figures" style="margin-bottom:12px">
+      <div class="figure requests">
+        <div class="value">${chain.requests ? pct(chain.first_candidate_rate) : "—"}</div>
+        <div class="label">atendidas pelo primeiro candidato</div>
+      </div>
+    </div>${skips}`;
+}
+
+function drawTools() {
+  const tools = snapshot.tools;
+  if (!tools.length) {
+    el("tools").innerHTML = `<p class="empty">Nenhuma ferramenta oferecida nesta janela.</p>`;
+    return;
+  }
+  const max = Math.max(...tools.map((t) => t.offered), 1);
+  el("tools").innerHTML = `
+    <table><thead><tr>
+      <th>Ferramenta</th><th class="n">oferecida</th><th class="n">chamada</th><th class="n">uso</th>
+    </tr></thead><tbody>
+    ${tools.map((t) => `<tr>
+      <td class="bar"><span style="width:${(t.offered / max) * 100}%"></span><b>${esc(t.tool)}</b></td>
+      <td class="n">${t.offered}</td>
+      <td class="n">${t.called}</td>
+      <td class="n">${t.call_rate === null ? "—" : pct(t.call_rate)}</td>
+    </tr>`).join("")}
+    </tbody></table>`;
+}
+
+function drawErrors() {
+  const errors = snapshot.errors;
+  el("errors").innerHTML = errors.length
+    ? `<table><thead><tr><th>Status</th><th>Tipo</th><th class="n">req</th></tr></thead><tbody>
+       ${errors.map((e) => `<tr><td class="num" style="color:var(--error)">${e.status}</td>
+         <td>${esc(e.error_type ?? "—")}</td><td class="n">${e.requests}</td></tr>`).join("")}
+       </tbody></table>`
+    : `<p class="empty">Nenhum erro nesta janela.</p>`;
+}
+
+function drawTape() {
+  el("tape").innerHTML = snapshot.recent.map((r) => tapeRow(r, false)).join("");
+}
+
+function tapeRow(event, fresh) {
+  const when = (event.started_at || "").slice(11, 19) || "agora";
+  const bad = event.status >= 400;
+  const classes = ["", fresh ? "fresh" : "", bad ? "bad" : "", event.fell_back ? "fell" : ""].join(" ");
+  const served = event.candidate_model || (bad ? "recusada" : "estimada aqui");
+  const tools = (event.tools_called || []).length ? ` · ${esc(event.tools_called.join(", "))}` : "";
+  return `<li class="${classes}">
+    <span class="when">${esc(when)}</span>
+    <span class="what"><b>${esc(served)}</b>
+      <small>${esc(event.requested_model || event.route)}${event.stream ? " · stream" : ""}${tools}</small></span>
+    <span class="cost">${event.status} · ${ms(event.duration_ms)}</span>
+  </li>`;
+}
+
+function live() {
+  const source = new EventSource("/api/stats/stream");
+  source.onmessage = (message) => {
+    const event = JSON.parse(message.data);
+    const tape = el("tape");
+    tape.insertAdjacentHTML("afterbegin", tapeRow({
+      started_at: event.started_at,
+      route: event.route,
+      requested_model: event.requested_model,
+      candidate_model: event.candidate_model,
+      status: event.status,
+      stream: event.stream,
+      duration_ms: event.duration_ms,
+      fell_back: event.fell_back,
+      tools_called: event.tools_called,
+    }, true));
+    while (tape.children.length > 40) tape.lastElementChild.remove();
+  };
+}
+
+el("windows").addEventListener("click", (clicked) => {
+  const button = clicked.target.closest("button");
+  if (!button) return;
+  hours = Number(button.dataset.hours);
+  for (const other of el("windows").querySelectorAll("button")) {
+    other.setAttribute("aria-pressed", String(other === button));
+  }
+  load();
+});
+
+load();
+live();
+setInterval(load, REFRESH_MS);
+</script>
+</body>
+</html>
