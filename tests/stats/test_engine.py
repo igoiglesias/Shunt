@@ -181,3 +181,41 @@ def test_a_database_already_up_to_date_is_left_alone(tmp_path):
         assert add_missing_columns(engine) == []
     finally:
         engine.dispose()
+
+
+def test_um_banco_em_uso_ganha_as_colunas_de_projeto_no_boot(tmp_path):
+    """Quem ja usa o proxy tem `request_events` sem `project` nem `session_id`."""
+    import sqlite3
+
+    from sqlalchemy import inspect
+
+    from app.stats.engine import add_missing_columns
+
+    caminho = tmp_path / "em-uso.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE request_events ("
+        " id INTEGER PRIMARY KEY, request_id VARCHAR(64), started_at DATETIME,"
+        " route VARCHAR(64), dialect VARCHAR(16), stream BOOLEAN, status INTEGER)"
+    )
+    antigo.execute(
+        "INSERT INTO request_events (request_id, started_at, route, dialect, stream, status)"
+        " VALUES ('antiga', '2026-09-01 10:00:00', '/v1/messages', 'anthropic', 0, 200)"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        colunas = {c["name"] for c in inspect(engine).get_columns("request_events")}
+        assert {"project", "session_id"} <= colunas
+        assert add_missing_columns(engine) == []
+        # A linha que ja estava la continua legivel, com o projeto vazio.
+        with engine.connect() as conexao:
+            from sqlalchemy import text as sql
+
+            linha = conexao.execute(sql("SELECT request_id, project FROM request_events")).one()
+        assert linha == ("antiga", None)
+    finally:
+        engine.dispose()

@@ -283,3 +283,16 @@ async def test_a_body_that_is_not_an_object_is_refused(panel):
 
     request.json = broken
     assert (await clear_stats(request)).status_code == 400
+
+
+def test_sem_banco_a_taxa_de_geracao_vem_nula_e_nao_zero():
+    """Zero diria "o modelo é lento"; None diz "não houve o que medir"."""
+    app.state.settings = SETTINGS
+    app.state.pool = UpstreamPool(SETTINGS)
+    app.state.recorder = Recorder(None)
+    with TestClient(app) as c:
+        totais = c.get("/api/stats").json()["totals"]
+    del app.state.recorder
+
+    assert totais["tokens_per_second"] is None
+    assert totais["rated_requests"] == 0

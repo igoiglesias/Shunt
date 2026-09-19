@@ -52,6 +52,7 @@ FILTER_FIELDS = (
     "candidate_model",
     "requested_model",
     "error_type",
+    "project",
     "status_min",
     "status_max",
     "stream",
@@ -149,6 +150,24 @@ def _by_requested_model(rows: list[RequestEvent], limit: int) -> list[dict]:
         tokens[name] += (row.input_tokens or 0) + (row.output_tokens or 0)
     return [
         {"requested_model": name, "requests": count, "total_tokens": tokens[name]}
+        for name, count in counted.most_common(limit)
+    ]
+
+
+def _by_project(rows: list[RequestEvent], limit: int) -> list[dict]:
+    """De quais projetos veio o periodo, com o "sem projeto" a mostra.
+
+    Escondido, ele viraria uma conta que nao fecha com o volume, e o analista
+    concluiria sobre a parte achando que via o todo.
+    """
+    counted: Counter[str] = Counter()
+    tokens: Counter[str] = Counter()
+    for row in rows:
+        name = (row.project or "").strip() or "sem projeto"
+        counted[name] += 1
+        tokens[name] += (row.input_tokens or 0) + (row.output_tokens or 0)
+    return [
+        {"project": name, "requests": count, "total_tokens": tokens[name]}
         for name, count in counted.most_common(limit)
     ]
 
@@ -292,7 +311,9 @@ def build(
     if unknown:
         raise ValueError(f"filtro desconhecido no dossie: {', '.join(unknown)}")
     declared = _declared(filters)
-    clauses = queries._search_clauses(*(filters.get(field) for field in FILTER_FIELDS))
+    # Por NOME, e nao por posicao: a lista de filtros cresce, e um argumento a
+    # mais no meio faria o valor de um filtro chegar como outro sem erro nenhum.
+    clauses = queries._search_clauses(**{field: filters.get(field) for field in FILTER_FIELDS})
 
     with Session(engine) as session:
         total = int(
@@ -327,6 +348,7 @@ def build(
         "volume": _volume(rows, total, row_limit),
         "by_model": _by_model(rows, top * 2),
         "by_requested_model": _by_requested_model(rows, top * 2),
+        "by_project": _by_project(rows, top * 2),
         "chain": _chain(rows, top * 2),
         "tools": _tools(rows, top * 2),
         "errors": _errors(rows, top * 2),

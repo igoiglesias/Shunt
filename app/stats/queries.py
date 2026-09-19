@@ -72,6 +72,11 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
                 func.coalesce(func.sum(case((RequestEvent.fell_back, 1), else_=0)), 0),
                 func.coalesce(func.sum(case((RequestEvent.stream, 1), else_=0)), 0),
+                func.coalesce(
+                    func.sum(case((_rated(), RequestEvent.output_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
+                func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
             ).where(RequestEvent.started_at >= since)
         ).one()
         durations = list(
@@ -88,7 +93,17 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
             )
             if value is not None
         ]
-    requests, input_tokens, output_tokens, errors, fallbacks, streams = row
+    (
+        requests,
+        input_tokens,
+        output_tokens,
+        errors,
+        fallbacks,
+        streams,
+        rated_tokens,
+        generation_ms,
+        rated_requests,
+    ) = row
     return {
         "requests": requests,
         "input_tokens": input_tokens,
@@ -101,6 +116,9 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         "p95_duration_ms": _percentile(durations, 0.95),
         "p50_ttft_ms": _percentile(ttfts, 0.50),
         "p95_ttft_ms": _percentile(ttfts, 0.95),
+        "rated_requests": rated_requests,
+        "generation_ms": int(generation_ms),
+        "tokens_per_second": _rate(int(rated_tokens), int(generation_ms)),
     }
 
 
@@ -212,6 +230,46 @@ def series(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     }
 
 
+# --- Taxa de geracao ---------------------------------------------------------
+#
+# Tempo de GERACAO, e nao duracao. No streaming, `ttft_ms` e espera: fila,
+# prefill do provedor e as tentativas nos candidatos anteriores. Subtrai-lo e o
+# que faz a taxa descrever o modelo em vez da cadeia. Fora do streaming os dois
+# nao sao separaveis, entao a duracao inteira entra -- e a taxa sai um pouco
+# menor que a real, o que a tela precisa dizer.
+#
+# Streaming SEM `ttft_ms` fica de fora: contar a duracao inteira ali chamaria a
+# espera de geracao, e nenhum numero e melhor que um numero torto.
+
+
+def _generation_ms():
+    return case(
+        (
+            and_(RequestEvent.stream, RequestEvent.ttft_ms.is_not(None)),
+            RequestEvent.duration_ms - RequestEvent.ttft_ms,
+        ),
+        (RequestEvent.stream, None),
+        else_=RequestEvent.duration_ms,
+    )
+
+
+def _rated():
+    """Linha que pode ser medida: gerou token e levou tempo para gerar.
+
+    Independe do status: um 499 -- cliente foi embora -- com token gerado e
+    medicao valida. O que nao serve e dividir por zero e somar requisicao sem
+    saida, que puxaria a taxa para baixo sem nada a ver com velocidade.
+    """
+    generation = _generation_ms()
+    return and_(RequestEvent.output_tokens > 0, generation.is_not(None), generation > 0)
+
+
+def _rate(tokens: int, generation_ms: int) -> float | None:
+    if not generation_ms:
+        return None
+    return round(tokens * 1000 / generation_ms, 1)
+
+
 def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> list[dict]:
     since = _since(hours)
     with Session(engine) as session:
@@ -222,6 +280,11 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
                 func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
                 func.coalesce(func.avg(RequestEvent.duration_ms), 0),
+                func.coalesce(
+                    func.sum(case((_rated(), RequestEvent.output_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
+                func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
             )
             .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
             .group_by(column)
@@ -235,13 +298,51 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
             "tokens": tokens,
             "errors": errors,
             "avg_duration_ms": int(avg),
+            "rated_requests": rated,
+            "generation_ms": int(generation),
+            "tokens_per_second": _rate(int(rated_tokens), int(generation)),
         }
-        for value, requests, tokens, errors, avg in rows
+        for value, requests, tokens, errors, avg, rated_tokens, generation, rated in rows
     ]
 
 
+def _providers_of(engine: Engine, hours: float, models: list[str]) -> dict[str, str]:
+    """De qual provedor veio cada modelo na janela.
+
+    A tela pareava as duas listas por POSICAO -- `by_model[i]` com
+    `by_provider[i]` -- e as duas sao ordenadas por contagem de forma
+    independente: bastava um modelo a mais para a coluna mostrar o provedor
+    errado. Um modelo servido por dois provedores devolve "varios", porque
+    escolher um dos dois seria inventar.
+    """
+    if not models:
+        return {}
+    since = _since(hours)
+    with Session(engine) as session:
+        rows = session.execute(
+            select(RequestEvent.candidate_model, RequestEvent.provider)
+            .where(
+                RequestEvent.started_at >= since,
+                RequestEvent.candidate_model.in_(models),
+                RequestEvent.provider.is_not(None),
+            )
+            .group_by(RequestEvent.candidate_model, RequestEvent.provider)
+        ).all()
+    encontrados: dict[str, set[str]] = {}
+    for model, provider in rows:
+        encontrados.setdefault(str(model), set()).add(str(provider))
+    return {
+        model: (next(iter(provedores)) if len(provedores) == 1 else "vários")
+        for model, provedores in encontrados.items()
+    }
+
+
 def by_model(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT) -> list[dict]:
-    return _grouped(engine, RequestEvent.candidate_model, hours, limit, "model")
+    linhas = _grouped(engine, RequestEvent.candidate_model, hours, limit, "model")
+    provedores = _providers_of(engine, hours, [linha["model"] for linha in linhas])
+    for linha in linhas:
+        linha["provider"] = provedores.get(linha["model"], "—")
+    return linhas
 
 
 def by_provider(
@@ -260,6 +361,55 @@ def by_requested_model(
 ) -> list[dict]:
     """O que o cliente PEDIU, que e outra pergunta: `haiku` pedido, Groq servido."""
     return _grouped(engine, RequestEvent.requested_model, hours, limit, "requested_model")
+
+
+def by_project(
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+) -> list[dict]:
+    """Quanto cada projeto consumiu -- INCLUINDO o que nao tem projeto.
+
+    `_grouped` descarta nulo e vazio de proposito nas outras perguntas: um
+    provedor vazio e uma linha sem informacao. Aqui e o contrario: a requisicao
+    sem projeto e a MEDIDA da cobertura da extracao, e escondida ela viraria uma
+    conta que nao fecha com o total da janela.
+    """
+    since = _since(hours)
+    rotulo = func.coalesce(RequestEvent.project, "")
+    with Session(engine) as session:
+        rows = session.execute(
+            select(
+                rotulo,
+                func.count(RequestEvent.id),
+                func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
+                func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
+                func.coalesce(func.avg(RequestEvent.duration_ms), 0),
+                func.coalesce(
+                    func.sum(case((_rated(), RequestEvent.output_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
+                func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
+            )
+            .where(RequestEvent.started_at >= since)
+            .group_by(rotulo)
+            .order_by(func.count(RequestEvent.id).desc())
+            .limit(limit)
+        ).all()
+    return [
+        {
+            "project": path,
+            # O ultimo segmento e o nome que a pessoa usa; o caminho inteiro fica
+            # no `title` da tela, para dois projetos de mesmo nome se distinguirem.
+            "name": path.rstrip("/").rsplit("/", 1)[-1] if path else "sem projeto",
+            "requests": requests,
+            "tokens": tokens,
+            "errors": errors,
+            "avg_duration_ms": int(avg),
+            "rated_requests": rated,
+            "generation_ms": int(generation),
+            "tokens_per_second": _rate(int(rated_tokens), int(generation)),
+        }
+        for path, requests, tokens, errors, avg, rated_tokens, generation, rated in rows
+    ]
 
 
 def pairs(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = 12) -> list[dict]:
@@ -505,6 +655,8 @@ def _as_event(row: RequestEvent) -> dict:
         "tools_offered": list(row.tools_offered or []),
         "tools_called": list(row.tools_called or []),
         "thinking_blocks": row.thinking_blocks,
+        "project": row.project,
+        "session_id": row.session_id,
     }
 
 
@@ -524,6 +676,7 @@ def _text_clause(text: str):
         RequestEvent.route,
         RequestEvent.error_type,
         RequestEvent.matched,
+        RequestEvent.project,
         cast(RequestEvent.tools_offered, String),
         cast(RequestEvent.tools_called, String),
         cast(RequestEvent.attempts, String),
@@ -548,6 +701,7 @@ def _search_clauses(
     has_tools: bool | None,
     min_duration_ms: int | None,
     min_tokens: int | None,
+    project: str | None = None,
 ) -> list:
     clauses = []
     if since is not None:
@@ -563,6 +717,7 @@ def _search_clauses(
         (RequestEvent.candidate_model, candidate_model),
         (RequestEvent.requested_model, requested_model),
         (RequestEvent.error_type, error_type),
+        (RequestEvent.project, project),
     ):
         if value:
             clauses.append(column == value)
@@ -604,6 +759,7 @@ def search_events(
     has_tools: bool | None = None,
     min_duration_ms: int | None = None,
     min_tokens: int | None = None,
+    project: str | None = None,
     order_by: str = "time",
     limit: int = SEARCH_LIMIT,
     cursor: str | None = None,
@@ -623,7 +779,7 @@ def search_events(
     clauses = _search_clauses(
         since, until, text, route, dialect, provider, candidate_model, requested_model,
         error_type, status_min, status_max, stream, fell_back, has_tools,
-        min_duration_ms, min_tokens,
+        min_duration_ms, min_tokens, project,
     )
     # Ordenar por `id` NAO e ordenar por tempo: o id cresce com a INSERCAO, e o
     # gravador entrega em lote, entao duas requisicoes da mesma rajada podem
@@ -712,6 +868,7 @@ def facets(engine: Engine, hours: float = 24 * 30, limit: int = 60) -> dict:
         return [{"value": value, "count": count} for value, count in rows]
 
     return {
+        "projects": distinct(RequestEvent.project),
         "providers": distinct(RequestEvent.provider),
         "candidate_models": distinct(RequestEvent.candidate_model),
         "requested_models": distinct(RequestEvent.requested_model),
@@ -761,6 +918,7 @@ def snapshot(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         "by_provider": by_provider(engine, hours),
         "by_route": by_route(engine, hours),
         "by_requested_model": by_requested_model(engine, hours),
+        "by_project": by_project(engine, hours),
         "pairs": pairs(engine, hours),
         "errors": errors_by_type(engine, hours),
         "chain": chain_health(engine, hours),

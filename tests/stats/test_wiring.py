@@ -153,6 +153,37 @@ def test_a_stream_is_stored_with_its_time_to_first_token(stored):
     assert event.ttft_ms is not None
 
 
+@respx.mock
+def test_uma_requisicao_em_streaming_tambem_guarda_o_projeto(stored):
+    """O caminho de streaming tem log proprio, num `finally` -- e proprio bug."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"choices": [{"delta": {"content": "oi"}}]}\n\n'
+                b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+    )
+    corpo = {
+        **ASK,
+        "stream": True,
+        "messages": [
+            {"role": "user", "content": "Primary working directory: /home/x/streaming\n"}
+        ],
+        "metadata": {"user_id": '{"session_id":"sessao-stream"}'},
+    }
+    with client() as c, c.stream("POST", "/v1/messages", json=corpo) as response:
+        "".join(response.iter_text())
+    (event,) = stored()
+
+    assert event.stream is True
+    assert event.project == "/home/x/streaming"
+    assert event.session_id == "sessao-stream"
+
+
 def test_a_refused_request_is_stored_with_no_candidate(stored):
     with client() as c:
         c.post("/v1/messages", json={**ASK, "model": "modelo-sem-dono"})
@@ -197,3 +228,57 @@ def test_every_openai_route_is_stored_under_its_own_path(stored):
     routes = [event.route for event in stored()]
     assert routes == ["/v1/chat/completions", "/v1/completions", "/v1/embeddings"]
     assert {event.dialect for event in stored()} == {"openai"}
+
+
+@respx.mock
+def test_o_projeto_e_gravado_com_a_captura_de_conversa_desligada(stored, monkeypatch):
+    """A extracao roda na ingestao: o corpo GUARDADO e cortado e opcional."""
+    monkeypatch.delenv("SHUNT_STORE_BODIES", raising=False)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=answer())
+    )
+    with client() as c:
+        c.post(
+            "/v1/messages",
+            json={
+                **ASK,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "<system-reminder>\n# Environment\n"
+                            " - Primary working directory: /home/x/agenda\n"
+                            " - Is a git repository: true\n</system-reminder>\nresuma"
+                        ),
+                    }
+                ],
+                "metadata": {"user_id": '{"session_id":"sessao-1"}'},
+            },
+        )
+    (event,) = stored()
+
+    assert event.project == "/home/x/agenda"
+    assert event.session_id == "sessao-1"
+
+
+@respx.mock
+def test_a_requisicao_seguinte_da_mesma_sessao_herda_o_projeto(stored):
+    """O bloco de ambiente so vem na primeira requisicao da conversa."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=answer())
+    )
+    corpo = {
+        **ASK,
+        "messages": [
+            {"role": "user", "content": "Primary working directory: /home/x/agenda\n"}
+        ],
+        "metadata": {"user_id": '{"session_id":"sessao-2"}'},
+    }
+    with client() as c:
+        c.post("/v1/messages", json=corpo)
+        c.post("/v1/messages", json={**corpo, "messages": [{"role": "user", "content": "e agora?"}]})
+    primeiro, segundo = stored()
+
+    assert primeiro.project == "/home/x/agenda"
+    assert segundo.project == "/home/x/agenda"
+    assert segundo.session_id == "sessao-2"

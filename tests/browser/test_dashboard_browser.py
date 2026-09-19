@@ -62,6 +62,8 @@ def seed(path) -> None:
                 tools_offered=["read"],
                 tools_called=["read"] if index % 3 == 0 else [],
                 thinking_blocks=1,
+                project="/home/iglesias/Projetos/agenda" if index % 3 else None,
+                session_id=f"s-{index % 4}",
             )
         )
     with Session(engine) as session:
@@ -153,8 +155,13 @@ def test_the_numbers_on_screen_are_the_numbers_the_api_answered(browser, server)
     page.close()
     assert shown["requests"] == str(api["totals"]["requests"])
     assert shown["models"][0][0] == api["by_model"][0]["model"]
-    assert shown["models"][0][1] == api["by_provider"][0]["provider"]
+    # O provedor vem da LINHA do modelo, e nao de `by_provider[i]`: as duas
+    # listas sao ordenadas por contagem de forma independente.
+    assert shown["models"][0][1] == api["by_model"][0]["provider"]
     assert int(shown["models"][0][2]) == api["by_model"][0]["requests"]
+    taxa = api["by_model"][0]["tokens_per_second"]
+    assert shown["models"][0][6] == ("—" if taxa is None else
+                                     str(round(taxa)) if taxa >= 100 else f"{taxa:.1f}")
     assert sum(shown["errors"]) == sum(row["requests"] for row in api["errors"])
 
 
@@ -667,3 +674,50 @@ def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
     assert label == "Limpar histórico"
 
 
+
+
+def test_the_panel_shows_where_the_requests_came_from(browser, server):
+    """Projeto na tela, com a linha "sem projeto" à vista."""
+    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    page, problems = open_panel(browser, server, 1440, 1000)
+    linhas = page.evaluate(
+        """() => [...document.querySelectorAll('#projects tbody tr')].map(
+            r => [...r.children].map(c => c.textContent.trim()))"""
+    )
+    page.close()
+    assert problems == []
+    nomes = [linha[0] for linha in linhas]
+    # Contra a API do MESMO instante: outro teste do módulo pode ter limpado o
+    # histórico antes deste, e o que se afirma aqui é a correspondência.
+    assert nomes == [linha["name"] for linha in api["by_project"]]
+    if api["totals"]["requests"]:
+        # A requisição sem projeto aparece: escondida, a soma da tela não
+        # fecharia com o total da janela.
+        assert sum(int(linha[1]) for linha in linhas) == api["totals"]["requests"]
+
+
+def test_the_generation_rate_is_on_screen_for_every_model(browser, server):
+    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    page, problems = open_panel(browser, server, 1440, 1000)
+    taxa = page.evaluate(
+        """() => ({
+            coluna: [...document.querySelectorAll('#models thead th')].map(t => t.textContent.trim()),
+            resumo: [...document.querySelectorAll('#figures .figure')].map(f => f.textContent),
+        })"""
+    )
+    page.close()
+    assert problems == []
+    if not api["totals"]["requests"]:
+        # Janela vazia desenha uma faixa só, e não sete cartões dizendo "nada":
+        # não há tabela nem figura para conferir. Outro teste do módulo pode ter
+        # limpado o histórico antes deste.
+        return
+    assert "tok/s" in taxa["coluna"]
+    resumo = " ".join(taxa["resumo"])
+    assert "geração" in resumo
+    # Sem nada para medir a figura diz "nada a medir" em vez de zero: zero
+    # afirmaria que o modelo é lento.
+    if api["totals"]["tokens_per_second"] is None:
+        assert "nada a medir" in resumo
+    else:
+        assert "medidas" in resumo

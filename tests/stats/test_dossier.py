@@ -394,3 +394,38 @@ def test_filtro_desconhecido_e_recusado(engine):
     # mostra, e ninguem teria como notar.
     with pytest.raises(ValueError, match="order_by"):
         dossier.build(engine, filters={"order_by": "duration"})
+
+
+def test_o_dossie_diz_de_quais_projetos_veio_o_periodo(engine):
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", project="/home/x/agenda"),
+                row(request_id="b", project="/home/x/agenda"),
+                row(request_id="c", project=None),
+            ]
+        )
+        session.commit()
+
+    projetos = {linha["project"]: linha["requests"] for linha in
+                dossier.build(engine)["by_project"]}
+
+    # "sem projeto" aparece: escondido, o analista concluiria sobre a parte
+    # achando que via o todo.
+    assert projetos == {"/home/x/agenda": 2, "sem projeto": 1}
+
+
+def test_a_analise_pode_ser_de_um_projeto_so(engine):
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", project="/home/x/agenda"),
+                row(request_id="b", project="/home/x/shunt"),
+            ]
+        )
+        session.commit()
+
+    dossie = dossier.build(engine, filters={"project": "/home/x/agenda"})
+
+    assert dossie["volume"]["requests"] == 1
+    assert dossie["period"]["filters"] == {"project": "/home/x/agenda"}

@@ -280,6 +280,7 @@ def test_the_snapshot_carries_every_section_the_panel_draws(seeded):
         "by_provider",
         "by_route",
         "by_requested_model",
+        "by_project",
         "pairs",
         "errors",
         "chain",
@@ -516,3 +517,185 @@ def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine, tmp_path):
     assert [(s["candidate"], s["reason"], s["count"]) for s in chain["skips"]] == [
         ("curto", "não coube", 1)
     ]
+
+
+# --- Taxa de geracao (tokens de saida por segundo) ---------------------------
+#
+# A taxa e AGRUPADA -- soma de tokens sobre soma de tempo -- e nao a mediana da
+# taxa de cada requisicao: uma requisicao de 22 tokens tem de pesar 22 tokens, e
+# nao um voto inteiro igual ao de uma de 8.000.
+
+
+def test_a_taxa_soma_tokens_sobre_tempo_de_geracao(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                # Streaming: o tempo ate o primeiro token e espera, nao geracao.
+                row(request_id="s", stream=True, ttft_ms=900, duration_ms=30000,
+                    output_tokens=1200, provider="local"),
+                # Sem streaming nao da para separar: a duracao inteira conta.
+                row(request_id="n", stream=False, duration_ms=300, output_tokens=50,
+                    provider="local"),
+                # Sem saida nao entra na conta -- nem em cima nem embaixo.
+                row(request_id="erro", status=500, duration_ms=80, output_tokens=0,
+                    provider="local"),
+            ]
+        )
+        session.commit()
+
+    linha = queries.by_provider(engine)[0]
+
+    assert linha["rated_requests"] == 2
+    assert linha["generation_ms"] == 29400
+    assert linha["tokens_per_second"] == 42.5
+
+
+def test_stream_sem_primeiro_token_fica_fora_da_taxa(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+    with Session(engine) as session:
+        # Streaming sem `ttft_ms`: nao ha como separar espera de geracao, e
+        # contar a duracao inteira chamaria a espera de geracao.
+        session.add_all(
+            [
+                row(request_id="s", stream=True, ttft_ms=None, duration_ms=1000,
+                    output_tokens=500, provider="local"),
+                row(request_id="n", stream=False, duration_ms=1000, output_tokens=100,
+                    provider="local"),
+            ]
+        )
+        session.commit()
+
+    linha = queries.by_provider(engine)[0]
+
+    assert linha["rated_requests"] == 1
+    assert linha["tokens_per_second"] == 100.0
+
+
+def test_grupo_sem_nada_para_medir_responde_none(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+    with Session(engine) as session:
+        session.add(row(request_id="vazio", output_tokens=0, duration_ms=120))
+        session.commit()
+
+    linha = queries.by_model(engine)[0]
+
+    # Zero e uma AFIRMACAO sobre velocidade; None diz que nao houve o que medir.
+    assert linha["tokens_per_second"] is None
+    assert linha["rated_requests"] == 0
+
+
+def test_duracao_zero_nao_divide_por_zero(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="instantanea", duration_ms=0, output_tokens=40),
+                row(request_id="normal", duration_ms=500, output_tokens=50),
+            ]
+        )
+        session.commit()
+
+    linha = queries.by_model(engine)[0]
+
+    assert linha["rated_requests"] == 1
+    assert linha["tokens_per_second"] == 100.0
+
+
+def test_a_janela_inteira_tem_a_propria_taxa(seeded):
+    totais = queries.totals(seeded, hours=1)
+
+    # a: 5 tokens / 100ms, b: 10 / 200ms, c: 5 / 300ms, d: 5 / (400-50)ms.
+    # Somados: 25 tokens em 950ms.
+    assert totais["rated_requests"] == 4
+    assert totais["generation_ms"] == 950
+    assert totais["tokens_per_second"] == 26.3
+
+
+def test_o_modelo_carrega_o_proprio_provedor(make_engine, tmp_path):
+    """Sem isso a tela pareava modelo e provedor por POSICAO nas duas listas."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'par.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="1", candidate_model="qwen", provider="local"),
+                row(request_id="2", candidate_model="qwen", provider="local"),
+                row(request_id="3", candidate_model="oss", provider="groq"),
+            ]
+        )
+        session.commit()
+
+    por_modelo = {linha["model"]: linha["provider"] for linha in queries.by_model(engine)}
+
+    assert por_modelo == {"qwen": "local", "oss": "groq"}
+
+
+def test_modelo_servido_por_dois_provedores_diz_varios(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'par.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="1", candidate_model="oss", provider="groq"),
+                row(request_id="2", candidate_model="oss", provider="openrouter"),
+            ]
+        )
+        session.commit()
+
+    # Escolher um dos dois seria inventar; dizer "vários" e o que se sabe.
+    assert queries.by_model(engine)[0]["provider"] == "vários"
+
+
+def test_por_projeto_mostra_tambem_o_que_nao_tem_projeto(make_engine, tmp_path):
+    """A linha "sem projeto" e a medida da cobertura da extracao."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="1", project="/home/x/agenda"),
+                row(request_id="2", project="/home/x/agenda"),
+                row(request_id="3", project="/home/x/shunt"),
+                row(request_id="4", project=None),
+                row(request_id="5", project=None),
+            ]
+        )
+        session.commit()
+
+    linhas = {linha["name"]: linha["requests"] for linha in queries.by_project(engine)}
+
+    assert linhas == {"agenda": 2, "shunt": 1, "sem projeto": 2}
+    # A soma fecha com a janela: esconder os sem projeto daria conta que nao bate.
+    assert sum(linhas.values()) == queries.totals(engine)["requests"]
+
+
+def test_o_projeto_entra_no_evento_e_nas_facetas(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+    with Session(engine) as session:
+        session.add(row(request_id="1", project="/home/x/agenda", session_id="s1"))
+        session.commit()
+
+    evento = queries.search_events(engine)["events"][0]
+    facetas = queries.facets(engine)
+
+    assert evento["project"] == "/home/x/agenda"
+    assert evento["session_id"] == "s1"
+    assert facetas["projects"] == [{"value": "/home/x/agenda", "count": 1}]
+
+
+def test_a_busca_filtra_e_acha_pelo_projeto(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="um", project="/home/x/agenda"),
+                row(request_id="dois", project="/home/x/proxy-shunt"),
+            ]
+        )
+        session.commit()
+
+    exato = queries.search_events(engine, project="/home/x/agenda")
+    # O trecho existe SO no caminho do projeto: buscar por "dois" acharia pelo
+    # id e nao provaria nada sobre o projeto.
+    livre = queries.search_events(engine, text="proxy-shunt")
+
+    assert [e["request_id"] for e in exato["events"]] == ["um"]
+    assert [e["request_id"] for e in livre["events"]] == ["dois"]

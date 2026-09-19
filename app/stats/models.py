@@ -60,6 +60,15 @@ class RequestEvent(Base):
     attempts: Mapped[list] = mapped_column(JSON, default=list)
     fell_back: Mapped[bool] = mapped_column(default=False)
 
+    # De qual projeto veio, lido do corpo na ingestao (veja `app/core/project.py`).
+    # Nulo e o caso comum e legitimo: cliente que nao e o Claude Code, ou versao
+    # que mudou o rotulo do bloco de ambiente. A tela mostra "sem projeto" com a
+    # contagem, para a perda aparecer em vez de sumir.
+    project: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # A sessao do harness. Serve para herdar o projeto nas requisicoes seguintes
+    # da mesma conversa, que nao repetem o bloco.
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
     tools_offered: Mapped[list] = mapped_column(JSON, default=list)
     tools_called: Mapped[list] = mapped_column(JSON, default=list)
     thinking_blocks: Mapped[int] = mapped_column(Integer, default=0)
@@ -71,6 +80,7 @@ class RequestEvent(Base):
         Index("ix_request_events_started_at", "started_at"),
         Index("ix_request_events_provider_started_at", "provider", "started_at"),
         Index("ix_request_events_candidate_started_at", "candidate_model", "started_at"),
+        Index("ix_request_events_project_started_at", "project", "started_at"),
     )
 
 

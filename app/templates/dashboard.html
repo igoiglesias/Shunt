@@ -405,6 +405,7 @@
   </div>
   <div class="grid">
     <section><h2>Rota <em>sob /v1</em></h2><div id="routes"></div></section>
+    <section><h2>Projeto <em>de onde veio o pedido</em></h2><div id="projects"></div></section>
     <section><h2>Erros</h2><div id="errors"></div></section>
   </div>
 </main>
@@ -448,6 +449,9 @@ const msParts = (v) => {
   return [(v / 1000).toFixed(1), "s"];
 };
 const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? v + "ms" : (v / 1000).toFixed(1) + "s");
+// Sem nada para medir a taxa é "—", e não 0: zero afirma que o modelo é lento,
+// e o que aconteceu foi não ter havido geração nenhuma na janela.
+const taxa = (v) => (v === null || v === undefined ? "—" : v >= 100 ? String(Math.round(v)) : v.toFixed(1));
 const pct = (v) => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
 
 async function load() {
@@ -491,6 +495,9 @@ function draw() {
   drawSeries();
   drawServed();
   drawTable("routes", snapshot.by_route.map((r) => ({ ...r, route: r.route.replace(/^\/v1\//, "") })), "route", "Rota em /v1");
+  // O nome curto na coluna e o caminho inteiro no `title`: dois projetos podem
+  // se chamar "api" em pastas diferentes.
+  drawTable("projects", snapshot.by_project || [], "name", "Projeto", { rate: true, titleKey: "project" });
   drawChain();
   drawTools();
   drawErrors();
@@ -546,6 +553,14 @@ function drawFigures() {
       [
         ["", msParts(t.p50_duration_ms), "mediana", `p95 ${ms(t.p95_duration_ms)}`],
         ["", msParts(t.p50_ttft_ms), "1º token", `p95 ${ms(t.p95_ttft_ms)}`],
+        [
+          "",
+          [taxa(t.tokens_per_second), "tok/s"],
+          "geração",
+          t.rated_requests
+            ? `${compact(t.rated_requests)} de ${compact(t.requests)} medidas`
+            : "nada a medir",
+        ],
       ],
     ],
     [
@@ -1009,45 +1024,47 @@ function drawServed() {
     el("models").innerHTML = `<p class="empty">Nada aqui ainda.</p>`;
     return;
   }
-  const provedorDe = new Map();
-  for (const par of snapshot.pairs || []) provedorDe.set(par.served, null);
-  const provedores = snapshot.by_provider || [];
+  // O provedor vem na própria linha do modelo. Antes era `by_provider[i]`,
+  // pareado por POSIÇÃO com `by_model[i]`: as duas listas são ordenadas por
+  // contagem de forma independente, e bastava um modelo a mais para a coluna
+  // mostrar o provedor de outro.
   el("models").innerHTML = `
     <div class="scroll"><table><thead><tr>
       <th>Modelo</th><th>Provedor</th><th class="n">req</th>
       <th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>
+      <th class="n" title="tokens de saída por segundo de geração; fora do streaming a conta inclui o tempo até o primeiro token">tok/s</th>
     </tr></thead><tbody>
     ${rows
-      .map((r, i) => {
-        const provedor = provedores[i] ? provedores[i].provider : "—";
-        return `<tr>
+      .map((r) => `<tr>
           <td><b>${esc(r.model)}</b></td>
-          <td class="muted">${esc(provedor)}</td>
+          <td class="muted">${esc(r.provider || "—")}</td>
           <td class="n">${r.requests}</td>
           <td class="n">${compact(r.tokens)}</td>
           <td class="n" style="color:${r.errors ? "var(--error-text)" : "inherit"}">${r.errors}</td>
           <td class="n">${ms(r.avg_duration_ms)}</td>
-        </tr>`;
-      })
+          <td class="n" title="${r.rated_requests} de ${r.requests} requisições medidas">${taxa(r.tokens_per_second)}</td>
+        </tr>`)
       .join("")}
     </tbody></table></div>`;
 }
 
-function drawTable(id, rows, key, heading) {
+function drawTable(id, rows, key, heading, { rate = false, titleKey = null } = {}) {
   if (!rows.length) {
     el(id).innerHTML = `<p class="empty">Nada aqui ainda.</p>`;
     return;
   }
   el(id).innerHTML = `
     <div class="scroll"><table><thead><tr>
-      <th>${esc(heading)}</th><th class="n">req</th><th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>
+      <th>${esc(heading)}</th><th class="n">req</th><th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>${
+        rate ? '<th class="n" title="tokens de saída por segundo de geração">tok/s</th>' : ""}
     </tr></thead><tbody>
     ${rows.map((r) => `<tr>
-      <td><b>${esc(r[key])}</b></td>
+      <td${titleKey ? ` title="${esc(r[titleKey] || "")}"` : ""}><b>${esc(r[key])}</b></td>
       <td class="n">${r.requests}</td>
       <td class="n">${compact(r.tokens)}</td>
       <td class="n" style="color:${r.errors ? "var(--error-text)" : "inherit"}">${r.errors}</td>
-      <td class="n">${ms(r.avg_duration_ms)}</td>
+      <td class="n">${ms(r.avg_duration_ms)}</td>${
+        rate ? `<td class="n">${taxa(r.tokens_per_second)}</td>` : ""}
     </tr>`).join("")}
     </tbody></table></div>`;
 }

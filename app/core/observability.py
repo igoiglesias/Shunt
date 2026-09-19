@@ -65,6 +65,10 @@ class RequestLog:
     tools_offered: list[str] = field(default_factory=list)
     tools_called: list[str] = field(default_factory=list)
     thinking_blocks: int = 0
+    # De qual projeto veio, e em que sessao do harness. Extraidos do corpo na
+    # ingestao, porque o corpo GUARDADO e cortado e nem sempre existe.
+    project: str | None = None
+    session_id: str | None = None
     # O texto da conversa, quando `SHUNT_STORE_BODIES` esta ligado. Fica FORA
     # do que vai para o log: uma conversa inteira no stdout do proxy seria
     # outra coisa, e o log e lido por quem so quer a linha estruturada.
@@ -137,6 +141,8 @@ def as_event(entry: RequestLog) -> dict:
         "tools_offered": list(entry.tools_offered),
         "tools_called": list(entry.tools_called),
         "thinking_blocks": entry.thinking_blocks,
+        "project": entry.project,
+        "session_id": entry.session_id,
         **({"body": entry.body} if entry.body else {}),
     }
 

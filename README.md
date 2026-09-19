@@ -26,6 +26,7 @@ speaking Anthropic through the same proxy.
 - [Endpoints](#endpoints)
 - [The usage panel](#the-usage-panel)
 - [The request screen](#the-request-screen)
+- [Generation rate and project](#generation-rate-and-project)
 - [Analysing a period](#analysing-a-period)
 - [Development](#development)
 - [What Shunt does not do](#what-shunt-does-not-do)
@@ -437,6 +438,40 @@ cut the same way, with a button that copies it as a `curl` — the conversation
 says what was said, this says how to reproduce it.
 
 Clearing the history takes the stored conversations with it.
+
+## Generation rate and project
+
+**tok/s** is on the panel, per model and per provider, and in the window
+summary. It is output tokens over *generation* time: for a streamed request
+that is `duration - time to first token`, because the wait before the first
+token is queueing, prefill and whatever candidates were tried and skipped —
+counting it would describe the chain, not the model. Outside streaming the two
+cannot be separated, so the whole duration counts and the number comes out a
+little lower than the truth; the column says so.
+
+The rate is pooled — tokens summed over time summed — rather than a median of
+per-request rates, so a 22-token reply weighs 22 tokens instead of one whole
+vote. Requests with no output, or no measurable generation time, are in neither
+half of the fraction, and each row carries how many of its requests were
+actually measured. Nothing to measure shows `—`, never `0`: zero would be a
+claim about speed.
+
+**Projeto** answers where a request came from. Claude Code does not send the
+directory in a header — it sends it in the body, in an environment block that
+sits sometimes in a `system` message and sometimes inside a `<system-reminder>`
+of the first user message. Shunt reads it as the request goes through and
+stores it in a column of its own, so it works with conversation recording
+**off** (measured: of the bodies that were stored, 249 of 261 were cut at the
+64k limit and could not be parsed afterwards — reading it later does not work).
+Requests of the same session that no longer repeat the block inherit the
+project from the session.
+
+A request with no project is normal — another client, or a version that renamed
+the block — and the panel shows it as a row called **sem projeto** with its
+count rather than hiding it, so the table still adds up to the window. The
+request screen has a project selector, the column, and the CSV carries it.
+
+An existing database gains the two columns at boot; no migration tool involved.
 
 ### Analysing a period
 

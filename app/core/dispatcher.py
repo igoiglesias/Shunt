@@ -43,6 +43,7 @@ from app.core.attempt import (
 )
 from app.core.capabilities import filter_chain, requirements_of
 from app.core.observability import RequestLog, log_request
+from app.core.project import project_and_session
 from app.core.resolver import Candidate, Resolution, last_resort, resolve
 from app.core.upstream import UpstreamPool
 from app.schemas.openai import OpenAIErrorResponse
@@ -330,6 +331,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     """
     started = time.monotonic()
     resolution = resolve(req.body.get("model", ""), settings)
+    project, session_id = project_and_session(req.body)
     result = await _dispatch(req, settings, pool, resolution)
     usage = result.body.get("usage") or {}
     called, thinking = _tools_called(result.body)
@@ -355,6 +357,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             tools_offered=tools_offered(req),
             tools_called=called,
             thinking_blocks=thinking,
+            project=project,
+            session_id=session_id,
             body=bodies.capture(
                 bodies.prompt_text(req.body), bodies.answer_text(result.body), req.body
             ),
@@ -956,6 +960,9 @@ async def dispatch_stream(
     passthrough = _Passthrough()
     started = time.monotonic()
     tally = _Tally()
+    # Lido ANTES do stream comecar: o corpo e o mesmo o tempo todo, e a linha de
+    # log e escrita num `finally` que pode rodar com o cliente ja embora.
+    project, session_id = project_and_session(req.body)
     # `aclosing` is the whole client-disconnect story: when the client goes
     # away this generator is closed, and without it the inner generator would
     # only run its `finally` whenever the garbage collector got to it -- while
@@ -1005,6 +1012,8 @@ async def dispatch_stream(
                 tools_offered=tools_offered(req),
                 tools_called=tally.tools_called,
                 thinking_blocks=tally.thinking_blocks,
+                project=project,
+                session_id=session_id,
                 body=bodies.capture(
                     bodies.prompt_text(req.body), tally.answer_text, req.body
                 ),

@@ -90,3 +90,30 @@ def test_the_time_axis_and_the_two_grouping_axes_are_indexed(make_engine, tmp_pa
     columns = {name for (name,) in indexed}
     assert "started_at" in columns
     assert {"provider", "candidate_model"} & columns
+
+
+def test_o_projeto_e_a_sessao_fazem_round_trip(make_engine, tmp_path):
+    """De qual projeto veio a requisicao, guardado na propria linha do evento."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'projeto.db'}")
+    with Session(engine) as session:
+        session.add(sample(project="/home/x/agenda", session_id="s-1"))
+        session.commit()
+    with Session(engine) as session:
+        stored = session.scalars(select(RequestEvent)).one()
+
+    assert stored.project == "/home/x/agenda"
+    assert stored.session_id == "s-1"
+
+
+def test_requisicao_sem_projeto_continua_valida(make_engine, tmp_path):
+    # Requisicao de outro cliente, ou de uma versao do harness que mudou o
+    # rotulo: e justamente a que nao pode ser perdida.
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'projeto.db'}")
+    with Session(engine) as session:
+        session.add(sample())
+        session.commit()
+    with Session(engine) as session:
+        stored = session.scalars(select(RequestEvent)).one()
+
+    assert stored.project is None
+    assert stored.session_id is None

@@ -60,6 +60,8 @@ def seed(path) -> None:
                 tools_offered=["Read", "Bash"] if index % 3 == 0 else [],
                 tools_called=["Bash"] if index % 3 == 0 else [],
                 thinking_blocks=1,
+                project="/home/iglesias/Projetos/agenda" if index % 2 else None,
+                session_id=f"s-{index % 3}",
             )
         )
     conversas = [
@@ -227,9 +229,11 @@ def test_the_order_can_be_changed_to_the_slowest_first(browser, server):
     page.get_by_role("button", name="Duração").click()
     page.wait_for_function("() => new URLSearchParams(location.search).get('order_by') === 'duration'")
     page.wait_for_timeout(400)
+    # Pela CLASSE da célula, e não pelo índice: uma coluna nova na tabela
+    # deslocava o índice e o teste passava a ler outra coluna.
     durations = page.evaluate(
         """() => [...document.querySelectorAll('#rows tr')]
-            .map(r => r.children[6].textContent.trim())"""
+            .map(r => r.querySelector('td[data-label="Duração"]').textContent.trim())"""
     )
     page.close()
     assert problems == []
@@ -917,3 +921,29 @@ def test_on_a_phone_opening_the_panel_scrolls_to_it(browser, server):
     # com o painel no fim do documento a página não tem para onde rolar mais.
     visivel = min(caixa["base"], caixa["tela"]) - max(caixa["topo"], 0)
     assert visivel >= 250, caixa
+
+
+def test_the_project_selector_narrows_the_list(browser, server):
+    """De qual projeto veio o pedido: a pergunta que separa um dia de trabalho."""
+    page, problems = open_audit(browser, server)
+    page.wait_for_function(
+        "() => document.getElementById('project').options.length > 1"
+    )
+    opcoes = page.evaluate(
+        "() => [...document.getElementById('project').options].map((o) => [o.value, o.text])"
+    )
+    page.select_option("#project", "/home/iglesias/Projetos/agenda")
+    page.wait_for_timeout(700)
+    medido = page.evaluate(
+        """() => ({
+            linhas: document.querySelectorAll('#rows tr').length,
+            contagem: document.getElementById('count').textContent,
+            url: location.search,
+        })"""
+    )
+    page.close()
+    assert problems == []
+    # A opção mostra o nome curto e guarda o caminho inteiro.
+    assert ["/home/iglesias/Projetos/agenda", "agenda (12)"] in opcoes
+    assert medido["linhas"] == 12
+    assert "project=" in medido["url"]

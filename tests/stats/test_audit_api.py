@@ -33,6 +33,8 @@ def store(make_engine, tmp_path):
                     started_at=NOW - timedelta(minutes=1),
                     provider="groq",
                     candidate_model="openai/gpt-oss-120b",
+                    project="/home/x/agenda",
+                    session_id="s-1",
                     tools_offered=["Read"],
                     tools_called=["Read"],
                 ),
@@ -250,3 +252,24 @@ async def test_a_whole_export_says_it_is_whole(store):
     answer = await audit.export_requests(with_params(store))
     assert answer.headers["x-shunt-truncated"] == "0"
     assert answer.headers["x-shunt-exported"] == answer.headers["x-shunt-total"]
+
+
+async def test_a_busca_filtra_por_projeto_e_o_csv_leva_a_coluna(store):
+    pagina = body_of(await audit.search_requests(with_params(store, project="/home/x/agenda")))
+
+    assert [e["request_id"] for e in pagina["events"]] == ["ok"]
+
+    exportado = await audit.export_requests(with_params(store))
+    partes = [parte async for parte in exportado.body_iterator]
+    texto = "".join(p if isinstance(p, str) else p.decode() for p in partes)
+    linhas = list(csv.DictReader(io.StringIO(texto)))
+
+    # A planilha leva o projeto: a investigacao continua fora da tela.
+    assert "project" in linhas[0]
+    assert {linha["project"] for linha in linhas} == {"/home/x/agenda", ""}
+
+
+async def test_as_facetas_oferecem_os_projetos_que_existem(store):
+    facetas = body_of(await audit.facets(with_params(store)))
+
+    assert facetas["projects"] == [{"value": "/home/x/agenda", "count": 1}]

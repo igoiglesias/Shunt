@@ -253,7 +253,10 @@
      A rota é quase sempre a mesma e cede o lugar para duração e status, que é
      o que alguém está procurando. */
   @media (max-width: 1280px) and (min-width: 721px) {
-    th.route, td.route { display: none; }
+    /* Entre 900 e 1280 a tabela divide a largura com o painel: a rota e o
+       projeto cedem primeiro -- a rota é quase sempre a mesma, e o projeto tem
+       seletor próprio logo acima. */
+    th.route, td.route, th.project, td.project { display: none; }
     .scroll table, table { min-width: 0; }
   
   }
@@ -352,6 +355,9 @@
   <select id="provider" name="provider" aria-label="provedor">
     <option value="">provedor: todos</option>
   </select>
+  <select id="project" name="project" aria-label="projeto">
+    <option value="">projeto: todos</option>
+  </select>
   <span class="spacer"></span>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
   <button type="button" class="ghost" id="export">Exportar CSV</button>
@@ -369,6 +375,7 @@
           <th class="route">Rota</th>
           <th>Modelo pedido</th>
           <th>Modelo que respondeu</th>
+          <th class="project">Projeto</th>
           <th title="streaming, troca de candidato, ferramenta chamada">Sinais</th>
           <th class="n">Tokens</th>
           <th class="n" role="button" data-order="duration">Duração</th>
@@ -424,6 +431,7 @@ let history_cursors = [];
 const SELECTS = {
   requested_model: "modelo pedido",
   candidate_model: "modelo que respondeu",
+  project: "projeto",
   provider: "provedor",
 };
 
@@ -437,6 +445,7 @@ async function loadFacets() {
     fill("requested_model", facets.requested_models);
     fill("candidate_model", facets.candidate_models);
     fill("provider", facets.providers);
+    fill("project", facets.projects);
   } catch {
     // Sem os seletores a busca por texto continua funcionando.
   }
@@ -447,8 +456,12 @@ function fill(id, values) {
   const chosen = state[id] || "";
   const options = [`<option value="">${SELECTS[id]}: todos</option>`];
   for (const item of values || []) {
+    // O projeto entra pelo último segmento: o caminho inteiro não cabe num
+    // seletor, e é ele que fica no `title` para dois projetos homônimos se
+    // distinguirem.
+    const rotulo = id === "project" ? String(item.value).replace(/\/+$/, "").split("/").pop() : item.value;
     options.push(
-      `<option value="${esc(item.value)}">${esc(item.value)} (${item.count})</option>`
+      `<option value="${esc(item.value)}" title="${esc(item.value)}">${esc(rotulo)} (${item.count})</option>`
     );
   }
   // Um valor que veio da URL e não está mais no banco continua selecionável,
@@ -573,6 +586,9 @@ function rowOf(event) {
       : event.candidate_model
         ? esc(event.candidate_model)
         : `<span class="tag">${esc(servedLabel(event))}</span>`}</td>
+    <td class="project" data-label="Projeto" title="${esc(event.project || "")}">${
+      event.project ? esc(String(event.project).replace(/\/+$/, "").split("/").pop()) : "—"
+    }</td>
     <td class="signals" data-label="Sinais">${marks || '<span class="none">—</span>'}</td>
     <td class="n" data-label="Tokens">${compact(tokens)}</td>
     <td class="n" data-label="Duração">${ms(event.duration_ms)}</td>
@@ -832,6 +848,7 @@ function detailOf(event) {
       <dt>Modelo pedido</dt><dd>${esc(event.requested_model || "—")}</dd>
       <dt>Regra de rota</dt><dd>${esc(event.rule)}${event.matched ? ` → ${esc(event.matched)}` : ""}</dd>
       <dt>Provedor</dt><dd>${esc(event.provider || "—")}</dd>
+      <dt>Projeto</dt><dd title="${esc(event.project || "")}">${esc(event.project || "—")}</dd>
       <dt>Status</dt><dd>${event.status}${event.error_type ? ` · ${esc(event.error_type)}` : ""}</dd>
       <dt>Tokens</dt><dd>${compact(event.input_tokens)} entrada · ${compact(event.output_tokens)} saída · ${compact(tokens)} total</dd>
       <dt>Duração</dt><dd>${ms(event.duration_ms)}${event.ttft_ms !== null ? ` · 1º token ${ms(event.ttft_ms)}` : ""}</dd>
