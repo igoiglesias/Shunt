@@ -361,9 +361,14 @@ TURSO_DATABASE_URL=sqlite+libsql://your-database.turso.io
 TURSO_AUTH_TOKEN=...
 ```
 
-With no database the panel still runs and still shows live traffic; it just
-keeps no history, and says so in its footer. A local file works too, which is
-the easiest way to try it: `TURSO_DATABASE_URL=sqlite+pysqlite:///./stats.db`.
+A local file works too, and is the easiest way to start — no account, no token:
+
+```bash
+TURSO_DATABASE_URL=sqlite+pysqlite:///./stats.db
+```
+
+With no database at all the panel still runs and still shows live traffic; it
+just keeps no history, and says so in its footer.
 
 **The panel cannot slow the API down, and that is measured rather than claimed.**
 A finished request is put on a bounded in-memory queue and the response goes out;

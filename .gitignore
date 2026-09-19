@@ -15,3 +15,7 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# Banco local do painel de uso
+stats.db
+stats.db-*
