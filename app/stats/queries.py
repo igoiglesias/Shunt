@@ -27,6 +27,20 @@ DEFAULT_HOURS = 24
 DEFAULT_LIMIT = 10
 
 
+def _utc(moment: datetime | None) -> str | None:
+    """Instante sempre com fuso explicito, em ISO.
+
+    O SQLite devolve o `datetime` ingenuo mesmo em coluna com `timezone=True`.
+    Quem grava e o `Recorder`, sempre em UTC, entao o ingenuo que volta e UTC --
+    e dizer isso e o que impede o navegador de ler como hora local.
+    """
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.isoformat()
+
+
 def _since(hours: int) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
 
@@ -254,7 +268,7 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
     return [
         {
             "request_id": row.request_id,
-            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "started_at": _utc(row.started_at),
             "route": row.route,
             "requested_model": row.requested_model,
             "provider": row.provider,

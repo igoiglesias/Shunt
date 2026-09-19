@@ -183,3 +183,17 @@ async def test_a_subscriber_that_went_away_does_not_break_the_stream(panel, monk
     chunk = await anext(events)
     assert b"primeiro" in chunk
     await events.aclose()
+
+
+def test_the_stream_serialises_instants_the_same_way_the_summary_does():
+    """Dois formatos de data na mesma fita a deixam fora de ordem."""
+    from datetime import UTC, datetime
+
+    from app.routers.dashboard import _iso, _sse
+
+    moment = datetime(2026, 9, 19, 8, 30, tzinfo=UTC)
+    assert _iso(moment) == "2026-09-19T08:30:00+00:00"
+    assert _iso("ja e texto") == "ja e texto"
+    chunk = _sse({"started_at": moment}).decode()
+    assert "2026-09-19T08:30:00+00:00" in chunk
+    assert "2026-09-19 08:30" not in chunk

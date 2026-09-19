@@ -20,7 +20,7 @@ import os
 import socket
 from urllib.parse import urlparse
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, event
 
 from app.stats.models import Base
 
@@ -35,6 +35,11 @@ logger = logging.getLogger("shunt")
 # antes.
 REACH_TIMEOUT = 2.0
 DEFAULT_PORTS = {"libsql": 443, "https": 443, "http": 80}
+# Quanto um worker espera por uma trava antes de desistir do lote. `make prod`
+# sobe um processo por nucleo, e oito processos gravando no mesmo arquivo com o
+# journal padrao se atropelam: o primeiro que pegar a trava bloqueia os outros,
+# e sem prazo eles levantam `database is locked` na hora.
+BUSY_TIMEOUT_MS = 5000
 
 
 def _target(url: str) -> tuple[str, int] | None:
@@ -81,6 +86,32 @@ def database_url() -> str | None:
     return url
 
 
+def apply_pragmas(dbapi_connection: object) -> None:
+    """WAL e prazo de trava numa conexao recem-aberta.
+
+    Destino que nao conhece PRAGMA -- o Turso, por exemplo -- recusa, e recusar
+    aqui nao e falha: e outro banco. A conexao segue valida.
+    """
+    try:
+        cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        cursor.close()
+    except Exception as err:  # noqa: BLE001 - ver docstring.
+        logger.debug("stats: PRAGMA recusado (%s: %s)", type(err).__name__, err)
+
+
+def _tune_for_many_writers(engine: Engine) -> None:
+    """WAL e prazo de trava, em toda conexao nova do pool.
+
+    WAL deixa um leitor -- o painel -- ler enquanto um worker grava, o que com o
+    journal padrao seria bloqueio mutuo. Vale so para SQLite em arquivo; o
+    Turso ignora e nao se importa, entao a falha aqui nao e erro.
+    """
+
+    event.listen(engine, "connect", lambda connection, _record: apply_pragmas(connection))
+
+
 def build_engine(url: str | None = None) -> Engine | None:
     """A engine pronta e com a tabela criada, ou None quando nao ha URL.
 
@@ -95,6 +126,7 @@ def build_engine(url: str | None = None) -> Engine | None:
         return None
     try:
         engine = create_engine(url, pool_pre_ping=True)
+        _tune_for_many_writers(engine)
         Base.metadata.create_all(engine)
     except Exception as err:  # noqa: BLE001 - qualquer falha de banco no boot e
         # a mesma decisao: seguir sem persistencia em vez de nao subir.

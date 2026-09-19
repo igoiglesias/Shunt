@@ -72,6 +72,8 @@ routes = [
     # desta lista, entao um alias chamado `free-groq` casaria com a rota
     # `free` e nunca chegaria no Groq.
     ("groq", ["groq-free"]),
+    # Escotilha para forcar o llama.cpp local pelo nome.
+    ("local", ["qwen-local"]),
     # Escotilha para forcar o remoto: o alias do modelo tambem e um padrao de
     # rota, entao `model: "free"` sobe direto para o OpenRouter, sem passar
     # pelo local. Serve para conferir a cadeia de fallback sem derrubar nada.
@@ -81,4 +83,4 @@ routes = [
     ("opus", ["qwen-local", "free", "groq-free"]),
 ]
 
-default_model = "qwen-local"
+default_model = None

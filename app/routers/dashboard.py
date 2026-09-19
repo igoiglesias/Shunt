@@ -16,6 +16,7 @@ quebra sem Turso seria pior do que um painel vazio.
 import asyncio
 import json
 import time
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -116,8 +117,20 @@ async def stats(request: Request) -> dict:
     return {**snapshot, "health": _health(request)}
 
 
+def _iso(value: Any) -> str:
+    """Datas sempre em ISO.
+
+    O resumo vem do banco ja em `isoformat()`; o `str()` de um `datetime`
+    devolve a mesma data com espaco no lugar do "T". A fita do painel ordena
+    por esse texto, entao dois formatos na mesma lista a embaralham.
+    """
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
 def _sse(payload: dict[str, Any]) -> bytes:
-    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n".encode()
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=_iso)}\n\n".encode()
 
 
 @router.get("/api/stats/stream")

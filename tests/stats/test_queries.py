@@ -240,3 +240,25 @@ def test_a_route_that_asks_for_no_model_is_not_a_requested_model(make_engine, tm
     assert [group["requested_model"] for group in asked] == ["claude-haiku-4-5"]
     # A rota em si continua contada: o que sai e so o "modelo" que nao existe.
     assert len(queries.by_route(engine)) == 2
+
+
+def test_a_stored_instant_comes_back_saying_it_is_utc(make_engine, tmp_path):
+    """O SQLite devolve `datetime` ingenuo mesmo em coluna com `timezone=True`.
+
+    Medido no painel: a fita misturava o ISO sem offset do banco com o ISO em
+    UTC do SSE, lia o primeiro como hora local e saia tres horas fora de ordem.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'fuso.db'}")
+    with Session(engine) as session:
+        session.add(row(request_id="z", started_at=datetime(2026, 9, 19, 8, 30, tzinfo=UTC)))
+        session.commit()
+    (stored,) = queries.recent(engine)
+    assert stored["started_at"].endswith("+00:00")
+    assert stored["started_at"].startswith("2026-09-19T08:30")
+
+
+def test_a_missing_instant_comes_back_as_null_instead_of_raising():
+    from app.stats.queries import _utc
+
+    assert _utc(None) is None
+    assert _utc(datetime(2026, 9, 19, 8, 30, tzinfo=UTC)).endswith("+00:00")

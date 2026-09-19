@@ -212,6 +212,18 @@ const compact = (n) => {
   if (n < 1000000) return (n / 1000).toFixed(n < 10000 ? 1 : 0) + "k";
   return (n / 1000000).toFixed(1) + "M";
 };
+// O banco guarda UTC; quem le o painel vive em outro fuso. Um balde por hora
+// vem como "2026-09-19T08:00" sem offset, e sem o "Z" o navegador o leria como
+// hora local -- deslocando o gráfico inteiro.
+const clock = (iso, withSeconds) => {
+  const at = new Date(/[Z+]|[-]\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`);
+  if (Number.isNaN(at.getTime())) return "";
+  return at.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(withSeconds ? { second: "2-digit" } : {}),
+  });
+};
 const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? v + "ms" : (v / 1000).toFixed(1) + "s");
 const pct = (v) => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
 
@@ -232,7 +244,7 @@ function draw() {
   drawChain();
   drawTools();
   drawErrors();
-  if (!el("tape").children.length) drawTape();
+  mergeTape();
 }
 
 function drawState() {
@@ -344,7 +356,7 @@ function drawSeries() {
   const yT = (v) => height - 22 - (v / maxTokens) * (height - 40);
   const base = height - 22;
   const ticks = points.map((p, i) => (i % Math.ceil(points.length / 8) === 0
-    ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(p.hour.slice(11, 16))}</text>`
+    ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(clock(p.hour, false))}</text>`
     : "")).join("");
   const peak = `<text class="axis" x="${pad}" y="12">pico ${maxRequests} req · ${compact(maxTokens)} tok</text>`;
 
@@ -450,17 +462,52 @@ function drawErrors() {
     : `<p class="empty">Nenhum erro nesta janela.</p>`;
 }
 
-function drawTape() {
-  el("tape").innerHTML = snapshot.recent.map((r) => tapeRow(r, false)).join("");
+// A fita mistura duas fontes, e precisa das duas. O SSE so alcança o worker
+// que atendeu esta conexão: `make prod` sobe um processo por núcleo, então um
+// painel sozinho veria uma fração do tráfego. O resumo, que vem do banco
+// compartilhado, completa o resto a cada atualização. O `request_id` decide
+// quem já está na tela.
+const TAPE_MAX = 40;
+const onTape = new Set();
+
+function mergeTape() {
+  const tape = el("tape");
+  const known = new Set(
+    [...tape.children].map((item) => item.dataset.id).filter(Boolean)
+  );
+  const missing = snapshot.recent.filter((event) => !known.has(event.request_id));
+  if (!missing.length) return;
+  // Do mais antigo para o mais novo, para que a ordem da tela não inverta.
+  for (const event of [...missing].reverse()) {
+    tape.insertAdjacentHTML("afterbegin", tapeRow(event, false));
+  }
+  sortTape();
+  trimTape();
+}
+
+function sortTape() {
+  const tape = el("tape");
+  const items = [...tape.children];
+  const at = (item) => Date.parse(item.dataset.when || "") || 0;
+  items.sort((a, b) => at(b) - at(a));
+  for (const item of items) tape.appendChild(item);
+}
+
+function trimTape() {
+  const tape = el("tape");
+  while (tape.children.length > TAPE_MAX) tape.lastElementChild.remove();
+  onTape.clear();
+  for (const item of tape.children) onTape.add(item.dataset.id);
 }
 
 function tapeRow(event, fresh) {
-  const when = (event.started_at || "").slice(11, 19) || "agora";
+  const when = clock(event.started_at || "", true) || "agora";
+  const id = event.request_id || `${when}-${event.route}-${event.duration_ms}`;
   const bad = event.status >= 400;
   const classes = ["", fresh ? "fresh" : "", bad ? "bad" : "", event.fell_back ? "fell" : ""].join(" ");
   const served = event.candidate_model || (bad ? "recusada" : "estimada aqui");
   const tools = (event.tools_called || []).length ? ` · ${esc(event.tools_called.join(", "))}` : "";
-  return `<li class="${classes}">
+  return `<li class="${classes}" data-id="${esc(id)}" data-when="${esc(event.started_at || "")}">
     <span class="when">${esc(when)}</span>
     <span class="what"><b>${esc(served)}</b>
       <small>${esc(event.requested_model || event.route)}${event.stream ? " · stream" : ""}${tools}</small></span>
@@ -473,7 +520,11 @@ function live() {
   source.onmessage = (message) => {
     const event = JSON.parse(message.data);
     const tape = el("tape");
+    if (event.request_id && [...tape.children].some((item) => item.dataset.id === event.request_id)) {
+      return;
+    }
     tape.insertAdjacentHTML("afterbegin", tapeRow({
+      request_id: event.request_id,
       started_at: event.started_at,
       route: event.route,
       requested_model: event.requested_model,
@@ -484,7 +535,7 @@ function live() {
       fell_back: event.fell_back,
       tools_called: event.tools_called,
     }, true));
-    while (tape.children.length > 40) tape.lastElementChild.remove();
+    trimTape();
   };
 }
 

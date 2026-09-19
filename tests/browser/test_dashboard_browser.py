@@ -94,7 +94,13 @@ def server(tmp_path_factory):
         pytest.fail("o servidor do painel nao subiu")
     yield base
     process.terminate()
-    process.wait(timeout=10)
+    try:
+        process.wait(timeout=20)
+    except subprocess.TimeoutExpired:
+        # `uv run` repassa o sinal; se o worker demorar, nao vale pendurar a
+        # suite esperando um servidor de teste.
+        process.kill()
+        process.wait(timeout=10)
 
 
 @pytest.fixture(scope="module")
@@ -122,7 +128,9 @@ def test_the_panel_draws_without_a_single_console_error(browser, server):
     page, problems = open_panel(browser, server, 1440, 1000)
     assert problems == []
     assert page.locator("#flow svg").count() == 1
-    assert page.locator("#series path").count() == 2
+    # A serie desenha linha com tres ou mais horas e barras com menos; as duas
+    # formas contam como desenhada.
+    assert page.locator("#series path").count() + page.locator("#series rect").count() > 0
     page.close()
 
 
@@ -191,7 +199,9 @@ def test_the_panel_says_so_when_there_is_no_database(browser, tmp_path_factory):
     port = free_port()
     process = subprocess.Popen(
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env={k: v for k, v in os.environ.items() if k != "TURSO_DATABASE_URL"},
+        # Vazio, e nao ausente: `load_dotenv` nao sobrescreve variavel ja
+        # definida, entao so assim o `.env` do repositorio nao repoe o banco.
+        env={**os.environ, "TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -209,7 +219,11 @@ def test_the_panel_says_so_when_there_is_no_database(browser, tmp_path_factory):
         page.close()
     finally:
         process.terminate()
-        process.wait(timeout=10)
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=10)
     assert problems == []
     assert "sem banco" in text
     assert "TURSO_DATABASE_URL" in text
@@ -249,3 +263,42 @@ def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, serve
     page.close()
     assert labels
     assert "" not in labels
+
+
+def test_the_tape_fills_in_what_the_live_stream_could_not_see(browser, server):
+    """`make prod` sobe um processo por nucleo, e o SSE so alcanca um deles.
+
+    O resumo vem do banco compartilhado, entao a fita tem de completar a partir
+    dele -- e sem duplicar o que o ao vivo ja colocou na tela.
+    """
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    ids = page.evaluate(
+        "() => [...document.querySelectorAll('#tape li')].map(i => i.dataset.id)"
+    )
+    # Uma atualizacao inteira do resumo nao pode repetir nenhuma linha.
+    page.evaluate("() => load()")
+    page.wait_for_timeout(600)
+    again = page.evaluate(
+        "() => [...document.querySelectorAll('#tape li')].map(i => i.dataset.id)"
+    )
+    page.close()
+    assert problems == []
+    assert ids, "a fita nasceu vazia"
+    assert len(again) == len(set(again)), "a fita repetiu uma requisicao"
+    assert set(ids) <= set(again)
+
+
+def test_the_tape_keeps_the_newest_request_on_top(browser, server):
+    page, _ = open_panel(browser, server, 1400, 900)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    httpx.get(f"{server}/v1/models", timeout=10)
+    page.wait_for_timeout(800)
+    page.evaluate("() => load()")
+    page.wait_for_timeout(600)
+    order = page.evaluate(
+        """() => [...document.querySelectorAll('#tape li')]
+            .map(i => Date.parse(i.dataset.when) || 0)"""
+    )
+    page.close()
+    assert order == sorted(order, reverse=True), "a fita saiu fora de ordem"

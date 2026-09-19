@@ -78,3 +78,63 @@ def test_the_default_port_is_used_when_the_url_names_none():
     assert _target("sqlite+pysqlite://") is None
     # Host com dialeto de arquivo continua sendo arquivo, e nao destino de rede.
     assert _target("sqlite+pysqlite://maquina/x.db") is None
+
+
+def test_a_file_database_is_put_in_wal_with_a_lock_deadline(tmp_path):
+    """`make prod` sobe um processo por nucleo; oito gravando no mesmo arquivo.
+
+    Sem WAL o painel nao consegue ler enquanto um worker grava, e sem prazo de
+    trava o lote morre com `database is locked` em vez de esperar sua vez.
+    """
+    from sqlalchemy import text
+
+    engine = build_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
+    assert engine is not None
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("PRAGMA journal_mode")).scalar() == "wal"
+            assert connection.execute(text("PRAGMA busy_timeout")).scalar() == 5000
+    finally:
+        engine.dispose()
+
+
+def test_two_writers_on_the_same_file_do_not_collide(tmp_path):
+    """Dois processos e o caso de `make prod`; duas conexoes bastam para medir."""
+    from sqlalchemy.orm import Session
+
+    from tests.stats.test_queries import row
+
+    path = tmp_path / "stats.db"
+    first = build_engine(f"sqlite+pysqlite:///{path}")
+    second = build_engine(f"sqlite+pysqlite:///{path}")
+    assert first is not None and second is not None
+    try:
+        with Session(first) as one, Session(second) as two:
+            one.add(row(request_id="a"))
+            one.commit()
+            two.add(row(request_id="b"))
+            two.commit()
+        with Session(first) as reader:
+            from sqlalchemy import func, select
+
+            from app.stats.models import RequestEvent
+
+            assert reader.scalar(select(func.count()).select_from(RequestEvent)) == 2
+    finally:
+        first.dispose()
+        second.dispose()
+
+
+def test_a_destination_that_refuses_the_pragmas_is_not_a_failure(caplog):
+    """Turso nao e SQLite em arquivo: PRAGMA recusado e outro destino, nao falha."""
+    import logging
+
+    from app.stats.engine import apply_pragmas
+
+    class Recusa:
+        def cursor(self):
+            raise RuntimeError("PRAGMA nao suportado")
+
+    with caplog.at_level(logging.DEBUG, logger="shunt"):
+        apply_pragmas(Recusa())
+    assert "PRAGMA recusado" in caplog.text
