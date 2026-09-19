@@ -15,10 +15,12 @@ em Python: sao poucas por requisicao, e um `json_each` amarraria a consulta ao
 dialeto do SQLite.
 """
 
+import json
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, case, delete, func, select
+from sqlalchemy import Engine, String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.stats.models import RequestEvent
@@ -284,6 +286,242 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
         }
         for row in rows
     ]
+
+
+SEARCH_LIMIT = 50
+MAX_SEARCH_LIMIT = 500
+
+
+def encode_cursor(row: RequestEvent) -> str:
+    """A marca da ultima linha entregue, opaca para quem chama.
+
+    Carrega os tres campos que as duas ordenacoes usam, para que trocar de
+    ordem no meio da paginacao nao devolva lixo -- devolve outra pagina.
+    """
+    mark = {
+        "id": row.id,
+        "started_at": _utc(row.started_at),
+        "duration_ms": row.duration_ms,
+    }
+    return urlsafe_b64encode(json.dumps(mark).encode()).decode().rstrip("=")
+
+
+def decode_cursor(cursor: str | None) -> dict | None:
+    """O cursor de volta, ou None quando ele nao serve.
+
+    Cursor quebrado -- copiado pela metade de uma URL, de outra versao -- e
+    "comece do inicio", e nao um erro na cara de quem esta investigando.
+    """
+    if not cursor:
+        return None
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        mark = json.loads(urlsafe_b64decode(padded.encode()).decode())
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(mark, dict) or "id" not in mark:
+        return None
+    return mark
+
+
+def _parse_moment(raw: str | None) -> datetime:
+    if not raw:
+        return datetime.now(UTC)
+    return datetime.fromisoformat(raw)
+
+
+def _as_event(row: RequestEvent) -> dict:
+    """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo."""
+    return {
+        "id": row.id,
+        "request_id": row.request_id,
+        "started_at": _utc(row.started_at),
+        "route": row.route,
+        "dialect": row.dialect,
+        "stream": row.stream,
+        "requested_model": row.requested_model,
+        "rule": row.rule,
+        "matched": row.matched,
+        "provider": row.provider,
+        "candidate_model": row.candidate_model,
+        "status": row.status,
+        "error_type": row.error_type,
+        "input_tokens": row.input_tokens,
+        "output_tokens": row.output_tokens,
+        "ttft_ms": row.ttft_ms,
+        "duration_ms": row.duration_ms,
+        "attempts": list(row.attempts or []),
+        "fell_back": row.fell_back,
+        "tools_offered": list(row.tools_offered or []),
+        "tools_called": list(row.tools_called or []),
+        "thinking_blocks": row.thinking_blocks,
+    }
+
+
+def _text_clause(text: str):
+    """Trecho livre onde um humano procura: id, modelos, ferramentas, cadeia.
+
+    As listas ficam em JSON dentro da linha, e um `LIKE` sobre o texto do JSON
+    acha o nome da ferramenta e o motivo do pulo sem prender a consulta a uma
+    funcao de JSON que so o SQLite tem.
+    """
+    needle = f"%{text.strip()}%"
+    columns = (
+        RequestEvent.request_id,
+        RequestEvent.requested_model,
+        RequestEvent.candidate_model,
+        RequestEvent.provider,
+        RequestEvent.route,
+        RequestEvent.error_type,
+        RequestEvent.matched,
+        cast(RequestEvent.tools_offered, String),
+        cast(RequestEvent.tools_called, String),
+        cast(RequestEvent.attempts, String),
+    )
+    return or_(*[column.like(needle) for column in columns])
+
+
+def _search_clauses(
+    since: datetime | None,
+    until: datetime | None,
+    text: str | None,
+    route: str | None,
+    dialect: str | None,
+    provider: str | None,
+    candidate_model: str | None,
+    requested_model: str | None,
+    error_type: str | None,
+    status_min: int | None,
+    status_max: int | None,
+    stream: bool | None,
+    fell_back: bool | None,
+    has_tools: bool | None,
+    min_duration_ms: int | None,
+    min_tokens: int | None,
+) -> list:
+    clauses = []
+    if since is not None:
+        clauses.append(RequestEvent.started_at >= since)
+    if until is not None:
+        clauses.append(RequestEvent.started_at <= until)
+    if text:
+        clauses.append(_text_clause(text))
+    for column, value in (
+        (RequestEvent.route, route),
+        (RequestEvent.dialect, dialect),
+        (RequestEvent.provider, provider),
+        (RequestEvent.candidate_model, candidate_model),
+        (RequestEvent.requested_model, requested_model),
+        (RequestEvent.error_type, error_type),
+    ):
+        if value:
+            clauses.append(column == value)
+    if status_min is not None:
+        clauses.append(RequestEvent.status >= status_min)
+    if status_max is not None:
+        clauses.append(RequestEvent.status <= status_max)
+    if stream is not None:
+        clauses.append(RequestEvent.stream.is_(stream))
+    if fell_back is not None:
+        clauses.append(RequestEvent.fell_back.is_(fell_back))
+    if has_tools is not None:
+        # Lista vazia em JSON e "[]": quem chamou ferramenta tem mais que isso.
+        empty = cast(RequestEvent.tools_called, String).in_(("[]", "null"))
+        clauses.append(~empty if has_tools else empty)
+    if min_duration_ms is not None:
+        clauses.append(RequestEvent.duration_ms >= min_duration_ms)
+    if min_tokens is not None:
+        clauses.append(RequestEvent.input_tokens + RequestEvent.output_tokens >= min_tokens)
+    return clauses
+
+
+def search_events(
+    engine: Engine,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    text: str | None = None,
+    route: str | None = None,
+    dialect: str | None = None,
+    provider: str | None = None,
+    candidate_model: str | None = None,
+    requested_model: str | None = None,
+    error_type: str | None = None,
+    status_min: int | None = None,
+    status_max: int | None = None,
+    stream: bool | None = None,
+    fell_back: bool | None = None,
+    has_tools: bool | None = None,
+    min_duration_ms: int | None = None,
+    min_tokens: int | None = None,
+    order_by: str = "time",
+    limit: int = SEARCH_LIMIT,
+    cursor: str | None = None,
+) -> dict:
+    """Uma pagina de requisicoes, o total da busca inteira, e o proximo cursor.
+
+    O total conta a busca, e nao a pagina: um `LIMIT` sozinho mente sobre o
+    tamanho do resultado assim que a tabela cresce, e a tela precisa dizer
+    "1 a 50 de 3.412".
+
+    O cursor e o `id` da ultima linha entregue, e nao um deslocamento: linha
+    nova chegando durante a paginacao empurraria um `OFFSET` e faria a proxima
+    pagina repetir o que ja foi visto.
+    """
+    limit = max(1, min(limit, MAX_SEARCH_LIMIT))
+    by_duration = order_by == "duration"
+    clauses = _search_clauses(
+        since, until, text, route, dialect, provider, candidate_model, requested_model,
+        error_type, status_min, status_max, stream, fell_back, has_tools,
+        min_duration_ms, min_tokens,
+    )
+    # Ordenar por `id` NAO e ordenar por tempo: o id cresce com a INSERCAO, e o
+    # gravador entrega em lote, entao duas requisicoes da mesma rajada podem
+    # entrar fora da ordem em que aconteceram. O `id` entra so como desempate,
+    # que e o que torna o cursor estavel.
+    ordering = (
+        (RequestEvent.duration_ms.desc(), RequestEvent.id.desc())
+        if by_duration
+        else (RequestEvent.started_at.desc(), RequestEvent.id.desc())
+    )
+    with Session(engine) as session:
+        total = session.scalar(select(func.count()).select_from(RequestEvent).where(*clauses)) or 0
+        paged = list(clauses)
+        mark = decode_cursor(cursor)
+        if mark is not None:
+            key = RequestEvent.duration_ms if by_duration else RequestEvent.started_at
+            value = (
+                mark.get("duration_ms")
+                if by_duration
+                else _parse_moment(mark.get("started_at"))
+            )
+            # Cursor de uma versao anterior pode nao trazer o campo desta
+            # ordenacao; faltando, a busca comeca do inicio em vez de estourar.
+            if value is not None:
+                paged.append(
+                    or_(key < value, and_(key == value, RequestEvent.id < mark["id"]))
+                )
+        rows = list(
+            session.scalars(
+                select(RequestEvent).where(*paged).order_by(*ordering).limit(limit + 1)
+            )
+        )
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return {
+        "events": [_as_event(row) for row in rows],
+        "total": int(total),
+        "next_cursor": encode_cursor(rows[-1]) if has_more and rows else None,
+    }
+
+
+def event_detail(engine: Engine, request_id: str) -> dict | None:
+    """Uma requisicao inteira pelo id, ou None. A tela abre o detalhe por aqui."""
+    with Session(engine) as session:
+        row = session.scalars(
+            select(RequestEvent).where(RequestEvent.request_id == request_id).limit(1)
+        ).first()
+        return _as_event(row) if row is not None else None
 
 
 def delete_events(engine: Engine, older_than_hours: float | None = None) -> int:
