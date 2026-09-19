@@ -1,6 +1,7 @@
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
 from app.core.dispatcher import ShuntRequest, _exception_text, dispatch, outbound_headers
@@ -1419,3 +1420,121 @@ def test_exception_text_names_a_transport_failure_with_no_exception_object():
     assert _exception_text(None) == "transport failure"
     assert _exception_text(httpx.ReadTimeout("")) == "ReadTimeout"
     assert _exception_text(httpx.ConnectError("recusou")) == "ConnectError: recusou"
+
+
+# -- Historia E: a escada quando nenhum candidato cabe -------------------------
+
+TINY = Settings(
+    providers={
+        "openrouter": ProviderConfig(
+            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+        ),
+        "anthropic": ProviderConfig(
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+        ),
+    },
+    models={
+        "curto": ModelConfig(
+            provider="openrouter",
+            model="vendor/curto",
+            context_window=50,
+            max_output_tokens=16,
+        ),
+        "grande": ModelConfig(
+            provider="openrouter",
+            model="vendor/grande",
+            context_window=200000,
+            max_output_tokens=8192,
+        ),
+    },
+    routes=[("opus", ["curto"])],
+    default_model=None,
+)
+
+BIG_BODY = {
+    "model": "claude-opus-4-5",
+    "max_tokens": 64,
+    "messages": [{"role": "user", "content": "x" * 8000}],
+}
+
+
+@respx.mock
+async def test_the_default_model_is_called_even_when_it_does_not_fit_either():
+    """`default_model` e a escolha do operador para "quando nada serve", e por
+    isso ele e chamado mesmo sem caber -- a alternativa seria um 400 onde o
+    operador ja disse o que fazer."""
+    settings = TINY.model_copy(update={"default_model": "curto"})
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/curto"))
+    )
+    pool = UpstreamPool(settings)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BIG_BODY, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert result.status == 200
+    assert result.real_model == "vendor/curto"
+    assert any("nothing in the chain fits" in line for line in result.trace)
+
+
+@respx.mock
+async def test_a_chain_emptied_by_size_goes_transparent_without_a_default():
+    """Ninguem no catalogo dando conta, quem pediu resolve com o proprio
+    provedor -- e o proxy nao inventa um candidato."""
+    route = respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "msg_1",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-5",
+                "content": [{"type": "text", "text": "ok"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+    )
+    pool = UpstreamPool(TINY)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BIG_BODY, {}), TINY, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert result.status == 200
+    assert result.real_model == "claude-opus-4-5"
+    assert any("nothing in the chain fits" in line for line in result.trace)
+
+
+@respx.mock
+async def test_a_chain_emptied_by_a_missing_capability_still_returns_400():
+    """A escada e so para tamanho. Cair no default por falta de ferramenta
+    mandaria o pedido a um modelo que tambem nao sabe chamar ferramenta."""
+    settings = NO_TOOLS.model_copy(update={"default_model": "free"})
+    route = respx.post("https://api.test/v1/chat/completions")
+    pool = UpstreamPool(settings)
+    body = {**BODY, "tools": [{"name": "grep", "input_schema": {"type": "object"}}]}
+    try:
+        result = await dispatch(ShuntRequest("anthropic", body, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 0
+    assert result.status == 400
+
+
+@respx.mock
+async def test_a_route_with_no_candidates_is_refused_by_the_configuration():
+    """A escada so e alcancavel porque a cadeia nunca chega vazia.
+
+    Quem garante isso e a validacao do catalogo, e nao o despachante: sem esta
+    recusa, uma rota sem candidato viraria uma chamada ao `default_model` por
+    baixo dos panos em vez de um erro de configuracao.
+    """
+    with pytest.raises(ValidationError):
+        Settings(
+            providers=TINY.providers,
+            models=TINY.models,
+            routes=[("opus", [])],
+            default_model="grande",
+        )

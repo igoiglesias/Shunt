@@ -43,7 +43,7 @@ from app.core.attempt import (
 )
 from app.core.capabilities import filter_chain, requirements_of
 from app.core.observability import RequestLog, log_request
-from app.core.resolver import Candidate, Resolution, resolve
+from app.core.resolver import Candidate, Resolution, last_resort, resolve
 from app.core.upstream import UpstreamPool
 from app.schemas.openai import OpenAIErrorResponse
 from app.stats import bodies
@@ -363,6 +363,35 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     return result
 
 
+# O prefixo do descarte por tamanho. A escada de ultimo recurso vale SO para
+# ele: cair no `default_model` por falta de ferramenta mandaria o pedido a um
+# modelo que tambem nao sabe chamar ferramenta, e o erro seria pior e mais
+# tarde. Tamanho e diferente -- o operador declarou o que fazer quando nada
+# cabe, e o pedido tem para onde ir.
+SIZE_DROP = "context window too small"
+
+
+def _chain_for(
+    req: ShuntRequest, settings: Settings, resolution: Resolution, probe: dict
+) -> tuple[list[Candidate], list[str]]:
+    """A cadeia que sobra depois do filtro, ou o degrau de baixo.
+
+    Devolve tambem as linhas de rastro do que foi descartado, com o motivo.
+    """
+    chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
+    trace = [f"{alias}: {reason}" for alias, reason in dropped]
+    # `resolution.chain` nunca chega vazia aqui -- `Settings` recusa rota com
+    # lista de candidatos vazia -- entao cadeia vazia significa que o filtro
+    # descartou todo mundo, e `dropped` tem pelo menos uma linha.
+    if chain or not all(reason.startswith(SIZE_DROP) for _, reason in dropped):
+        return chain, trace
+    ladder = last_resort(str(req.body.get("model", "")), settings)
+    if ladder:
+        alvo = ladder[0]
+        trace.append(f"{alvo.alias or alvo.model}: taken anyway, nothing in the chain fits")
+    return ladder, trace
+
+
 async def _dispatch(
     req: ShuntRequest, settings: Settings, pool: UpstreamPool, resolution: Resolution
 ) -> ShuntResult:
@@ -377,8 +406,8 @@ async def _dispatch(
         # capability filter, this is the only evidence the probe ever failed.
         probe = req.body
         probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
-    chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
-    trace = probe_note + [f"{alias}: {reason}" for alias, reason in dropped]
+    chain, motivos = _chain_for(req, settings, resolution, probe)
+    trace = probe_note + motivos
 
     if not chain:
         return ShuntResult(
@@ -756,10 +785,10 @@ async def _stream_chain(
         # probe we cannot render is a worse estimate, not a dead request.
         probe = req.body
         probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
-    chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
+    chain, motivos = _chain_for(req, settings, resolution, probe)
     trace = tally.trace
     trace.extend(probe_note)
-    trace.extend(f"{alias}: {reason}" for alias, reason in dropped)
+    trace.extend(motivos)
 
     if not chain:
         yield _stream_error(req, "no candidate can serve this request: " + "; ".join(trace))

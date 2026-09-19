@@ -504,6 +504,46 @@ def test_the_flow_links_each_request_to_what_answered_it(browser, server):
         assert apagadas >= 1, "o destaque nao apagou as outras fitas"
 
 
+def test_the_token_line_returns_to_zero_where_no_request_landed(browser, server):
+    """O banco so devolve o balde que teve trafego.
+
+    Sem os baldes vazios, a linha de tokens liga dois picos por cima de uma
+    hora parada e le como "o consumo continuou". Pedido do usuario.
+    """
+    page, problems = open_panel(browser, server, 1400, 900)
+    preenchida = page.evaluate(
+        """() => preencherVazios([
+            {at: '2026-01-01T00:00', requests: 2, input_tokens: 10, output_tokens: 1, errors: 0},
+            {at: '2026-01-01T00:03', requests: 1, input_tokens: 20, output_tokens: 2, errors: 0},
+        ], 60000)"""
+    )
+    page.close()
+    assert problems == []
+    assert [p["at"] for p in preenchida] == [
+        "2026-01-01T00:00",
+        "2026-01-01T00:01",
+        "2026-01-01T00:02",
+        "2026-01-01T00:03",
+    ]
+    assert [p["requests"] for p in preenchida] == [2, 0, 0, 1]
+    assert [p["input_tokens"] + p["output_tokens"] for p in preenchida] == [11, 0, 0, 22]
+
+
+def test_a_gap_too_long_to_draw_keeps_the_series_as_it_came(browser, server):
+    """Sete dias em baldes de um minuto sao dez mil pontos, e nenhum olho le
+    isso: acima do teto a serie fica como veio, sem preenchimento."""
+    page, problems = open_panel(browser, server, 1400, 900)
+    preenchida = page.evaluate(
+        """() => preencherVazios([
+            {at: '2026-01-01T00:00', requests: 1, input_tokens: 1, output_tokens: 0, errors: 0},
+            {at: '2026-01-08T00:00', requests: 1, input_tokens: 1, output_tokens: 0, errors: 0},
+        ], 60000)"""
+    )
+    page.close()
+    assert problems == []
+    assert len(preenchida) == 2
+
+
 def test_an_empty_window_offers_the_way_out(browser, server):
     """Sete paineis dizendo "nada aqui" nao sao um estado vazio util.
 

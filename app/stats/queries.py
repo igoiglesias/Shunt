@@ -311,6 +311,34 @@ def errors_by_type(
     ]
 
 
+# "Pulado por nao caber" e "pulado por estar fora do ar" pedem decisoes opostas
+# do operador -- um mexe no catalogo, o outro no provedor -- entao o painel nao
+# pode juntar os dois numa contagem so.
+NAO_COUBE = "não coube"
+SEM_CREDENCIAL = "sem credencial"
+SEM_SUPORTE = "sem suporte"
+FALHOU = "falhou na chamada"
+
+
+def _skip_reason(motivo: str) -> str | None:
+    """A classe do descarte, ou None quando a linha nao e um descarte.
+
+    A nota de ultimo recurso ("fui chamado assim mesmo") vive no mesmo rastro e
+    e o CONTRARIO de um pulo: conta-la inflaria justamente a coluna que o
+    operador usa para decidir.
+    """
+    texto = motivo.strip()
+    if "taken anyway" in texto:
+        return None
+    if texto.startswith("context window too small"):
+        return NAO_COUBE
+    if texto.startswith("credential"):
+        return SEM_CREDENCIAL
+    if "not supported" in texto or texto.startswith("no "):
+        return SEM_SUPORTE
+    return FALHOU
+
+
 def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     """Quantas vezes o primeiro candidato bastou, e quem foi pulado quando nao."""
     since = _since(hours)
@@ -322,7 +350,7 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 )
             ).all()
         )
-    skipped: Counter[str] = Counter()
+    skipped: Counter[tuple[str, str]] = Counter()
     first_try = 0
     for attempts, candidate in rows:
         if not attempts:
@@ -330,13 +358,20 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 first_try += 1
             continue
         for attempt in attempts:
-            skipped[str(attempt).split(":", 1)[0]] += 1
+            nome, _, motivo = str(attempt).partition(":")
+            classe = _skip_reason(motivo)
+            if classe is None:
+                continue
+            skipped[(nome.strip(), classe)] += 1
     total = len(rows)
     return {
         "requests": total,
         "first_candidate_answered": first_try,
         "first_candidate_rate": round(first_try / total, 4) if total else 0.0,
-        "skips": [{"candidate": name, "count": count} for name, count in skipped.most_common(10)],
+        "skips": [
+            {"candidate": name, "reason": reason, "count": count}
+            for (name, reason), count in skipped.most_common(10)
+        ],
     }
 
 

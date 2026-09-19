@@ -11,6 +11,11 @@ class Requirements:
     vision: bool
     streaming: bool
     input_tokens: int
+    # A resposta ocupa a MESMA janela do prompt. Medido no trafego real: um
+    # candidato declarado com 131.072 de contexto recusava com 413 pedidos que
+    # a conta so-do-prompt dizia caber, porque o `max_tokens` do cliente
+    # entrava no orcamento do provedor e nao no nosso.
+    output_tokens: int = 0
 
 
 def estimate_tokens(payload: dict) -> int:
@@ -47,12 +52,23 @@ def _has_image(payload: dict) -> bool:
     return False
 
 
+def _requested_output(payload: dict) -> int:
+    """O `max_tokens` do cliente, ou zero.
+
+    Ausente ou nao numerico conta como zero de proposito: inventar um teto
+    derrubaria candidato que cabe por causa de um palpite nosso.
+    """
+    raw = payload.get("max_tokens")
+    return int(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else 0
+
+
 def requirements_of(payload: dict) -> Requirements:
     return Requirements(
         tools=bool(payload.get("tools")),
         vision=_has_image(payload),
         streaming=bool(payload.get("stream")),
         input_tokens=estimate_tokens(payload),
+        output_tokens=_requested_output(payload),
     )
 
 
@@ -72,8 +88,16 @@ def filter_chain(
             dropped.append((candidate.alias, "no vision support"))
         elif req.streaming and not model.supports.streaming:
             dropped.append((candidate.alias, "no streaming support"))
-        elif req.input_tokens > model.context_window:
-            dropped.append((candidate.alias, "context window too small"))
+        elif req.input_tokens + req.output_tokens > model.context_window:
+            # Com os dois numeros no rastro, o operador ve por quanto o pedido
+            # passou do teto -- e decide se mexe no catalogo ou no cliente.
+            needed = req.input_tokens + req.output_tokens
+            dropped.append(
+                (
+                    candidate.alias,
+                    f"context window too small ({needed} > {model.context_window})",
+                )
+            )
         else:
             kept.append(candidate)
     return kept, dropped

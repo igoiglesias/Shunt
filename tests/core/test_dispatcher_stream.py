@@ -1444,3 +1444,48 @@ async def test_a_client_that_walks_away_is_logged_as_such(caplog):
     assert linha["status"] == 499
     assert linha["error_type"] == "client_disconnected"
     await pool.aclose()
+
+
+@respx.mock
+async def test_a_stream_whose_chain_does_not_fit_takes_the_default_model():
+    """O caminho de streaming segue a mesma escada do caminho bufferizado."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={
+            "curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/curto",
+                context_window=50,
+                max_output_tokens=16,
+            )
+        },
+        routes=[("opus", ["curto"])],
+        default_model="curto",
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=b'data: {"choices":[{"delta":{"content":"oi"}}]}\n\ndata: [DONE]\n\n',
+        )
+    )
+    body = {
+        "model": "claude-opus-4-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+    }
+    pool = UpstreamPool(settings)
+    try:
+        chunks = [
+            chunk
+            async for chunk in dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+        ]
+    finally:
+        await pool.aclose()
+    texto = b"".join(chunks).decode()
+    assert "content_block_delta" in texto

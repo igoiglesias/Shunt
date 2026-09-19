@@ -221,7 +221,7 @@ def test_chain_health_separates_a_clean_answer_from_a_fallback(seeded):
     assert chain["requests"] == 4
     assert chain["first_candidate_answered"] == 3
     assert chain["first_candidate_rate"] == 0.75
-    assert chain["skips"] == [{"candidate": "free", "count": 1}]
+    assert chain["skips"] == [{"candidate": "free", "reason": "falhou na chamada", "count": 1}]
 
 
 def test_tools_are_listed_by_what_was_actually_called(make_engine, tmp_path):
@@ -470,3 +470,49 @@ def test_traffic_spread_over_days_still_gets_a_coarse_bucket(make_engine, tmp_pa
     largo = queries.series(engine, hours=24 * 14)
     assert largo["bucket_minutes"] >= 60
     assert len(largo["points"]) <= 14
+
+
+# -- Historia E: o painel separa o descarte por motivo -------------------------
+
+
+def test_skips_are_grouped_by_reason(make_engine, tmp_path):
+    """"Pulado por nao caber" e "pulado por estar fora do ar" pedem decisoes
+    opostas do operador: um mexe no catalogo, o outro no provedor."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'motivos.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", attempts=["groq-free: context window too small (175k > 131k)"]),
+                row(request_id="b", attempts=["groq-free: context window too small (180k > 131k)"]),
+                row(request_id="c", attempts=["qwen-local: ConnectError"]),
+                row(request_id="d", attempts=["free: credential OPENROUTER_API_KEY is not set"]),
+                row(request_id="e", attempts=["free: no tool support"]),
+            ]
+        )
+        session.commit()
+    chain = queries.chain_health(engine, hours=1)
+    por_motivo = {(s["candidate"], s["reason"]): s["count"] for s in chain["skips"]}
+    assert por_motivo[("groq-free", "não coube")] == 2
+    assert por_motivo[("qwen-local", "falhou na chamada")] == 1
+    assert por_motivo[("free", "sem credencial")] == 1
+    assert por_motivo[("free", "sem suporte")] == 1
+
+
+def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine, tmp_path):
+    """A linha que diz "fui chamado assim mesmo" e o contrario de um pulo."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ultimo-recurso.db'}")
+    with Session(engine) as session:
+        session.add(
+            row(
+                request_id="a",
+                attempts=[
+                    "curto: context window too small (2000 > 50)",
+                    "curto: taken anyway, nothing in the chain fits",
+                ],
+            )
+        )
+        session.commit()
+    chain = queries.chain_health(engine, hours=1)
+    assert [(s["candidate"], s["reason"], s["count"]) for s in chain["skips"]] == [
+        ("curto", "não coube", 1)
+    ]

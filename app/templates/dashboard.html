@@ -301,6 +301,7 @@
   .ribbon.on { opacity: 0.5; }
   .ribbon.off { opacity: 0.05; }
   .flow-node { cursor: default; }
+  #chain .why { color: var(--muted); }
   .key.fell::before { background: var(--fallback); }
   .flow-label { fill: var(--ink); font-size: 12px; }
   .flow-sub { fill: var(--muted); font-size: 10.5px; font-family: var(--mono); }
@@ -763,21 +764,51 @@ function drawSeries() {
   }
 
   const at = (p) => new Date(`${p.at}Z`).getTime();
-  const from = at(points[0]) - bucket / 2;
-  const to = at(points[points.length - 1]) + bucket / 2;
+  const cheios = preencherVazios(points, bucket);
+  const from = at(cheios[0]) - bucket / 2;
+  const to = at(cheios[cheios.length - 1]) + bucket / 2;
   const span = Math.max(to - from, bucket);
 
   el("series").innerHTML = `
     <div class="plotwrap">
-      ${plot({ points, from, span, bucket })}
+      ${plot({ points: cheios, from, span, bucket })}
       <div class="tip" id="tip" hidden></div>
     </div>
     <p class="legend">
       <span class="key req">requisições (barra, eixo esquerdo)</span>
       <span class="key tok">tokens (linha, eixo direito)</span>
-      ${points.some((p) => p.errors) ? `<span class="key err">balde com erro</span>` : ""}
+      ${cheios.some((p) => p.errors) ? `<span class="key err">balde com erro</span>` : ""}
     </p>`;
-  wireSeries(points);
+  wireSeries(cheios);
+}
+
+// O banco so devolve o balde que teve trafego. Sem os baldes vazios, a linha
+// de tokens liga dois picos por cima de uma hora parada e le como "o consumo
+// continuou" -- ela tem de descer a zero onde nao houve requisicao.
+const BALDES_MAX = 600;
+
+function preencherVazios(points, bucket) {
+  const at = (p) => new Date(`${p.at}Z`).getTime();
+  const primeiro = at(points[0]);
+  const ultimo = at(points[points.length - 1]);
+  // Teto de seguranca: uma janela de 7 dias em baldes de um minuto sao dez mil
+  // pontos, e nenhum olho le isso -- nesse caso a serie fica como veio.
+  if ((ultimo - primeiro) / bucket > BALDES_MAX) return points;
+  const porInstante = new Map(points.map((p) => [at(p), p]));
+  const cheios = [];
+  for (let t = primeiro; t <= ultimo; t += bucket) {
+    cheios.push(
+      porInstante.get(t) || {
+        at: new Date(t).toISOString().slice(0, 16),
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        errors: 0,
+        vazio: true,
+      }
+    );
+  }
+  return cheios;
 }
 
 // Geometria compartilhada entre o desenho e o cursor: o balão precisa saber
@@ -841,6 +872,7 @@ function plot({ points, from, span, bucket }) {
     <text class="axis" x="${W - padR + 10}" y="${g.base + 4}" text-anchor="start">0</text>`;
 
   const barras = points
+    .filter((p) => p.requests > 0)
     .map((p) => {
       const top = g.yReq(p.requests);
       return `<rect class="bar-mark" data-i="${points.indexOf(p)}"
@@ -1022,9 +1054,20 @@ function drawTable(id, rows, key, heading) {
 
 function drawChain() {
   const chain = snapshot.chain;
+  // O MOTIVO do pulo ao lado do nome: "não coube" pede mexer no catálogo,
+  // "fora do ar" pede mexer no provedor. Juntos numa contagem só, os dois
+  // levavam à decisão errada.
   const skips = chain.skips.length
-    ? `<table><thead><tr><th>Pulou</th><th class="n">vezes</th></tr></thead><tbody>
-       ${chain.skips.map((s) => `<tr><td>${esc(s.candidate)}</td><td class="n">${s.count}</td></tr>`).join("")}
+    ? `<table><thead><tr><th>Pulou</th><th>por quê</th><th class="n">vezes</th></tr></thead><tbody>
+       ${chain.skips
+         .map(
+           (s) => `<tr>
+             <td>${esc(s.candidate)}</td>
+             <td class="why">${esc(s.reason || "")}</td>
+             <td class="n">${s.count}</td>
+           </tr>`
+         )
+         .join("")}
        </tbody></table>`
     : `<p class="empty">Nenhum candidato foi pulado.</p>`;
   el("chain").innerHTML = `

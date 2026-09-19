@@ -1,7 +1,7 @@
 import pytest
 
 from app.config.settings import ModelConfig, ProviderConfig, Settings
-from app.core.resolver import UnknownProviderError, resolve
+from app.core.resolver import UnknownProviderError, last_resort, resolve
 
 
 def build(routes, default_model=None):
@@ -131,3 +131,31 @@ def test_transparent_rejects_name_with_no_declared_provider():
     )
     with pytest.raises(UnknownProviderError, match="claude-fable-5-1"):
         resolve("claude-fable-5-1", settings)
+
+
+# -- Historia E: quem atende quando nada na cadeia cabe ------------------------
+
+
+def test_last_resort_is_the_declared_default_model():
+    """O `default_model` e a escolha do operador para "quando nada serve", e
+    por isso ele e chamado mesmo sem caber."""
+    settings = build([("opus", ["free"])], default_model="qwen")
+    chain = last_resort("claude-opus-5", settings)
+    assert [c.alias for c in chain] == ["qwen"]
+    assert chain[0].transparent is False
+
+
+def test_last_resort_without_a_default_is_the_model_the_harness_asked_for():
+    """Sem default declarado, quem pediu resolve com o proprio provedor."""
+    settings = build([("opus", ["free"])], default_model=None)
+    chain = last_resort("claude-opus-5", settings)
+    assert chain[0].transparent is True
+    assert chain[0].model == "claude-opus-5"
+    assert chain[0].provider == "anthropic"
+
+
+def test_last_resort_is_empty_when_no_provider_can_be_guessed():
+    """Sem default e sem provedor deduzivel nao ha degrau nenhum: o chamador
+    devolve o 400 que ja devolvia."""
+    settings = build([("opus", ["free"])], default_model=None)
+    assert last_resort("um-modelo-qualquer", settings) == []

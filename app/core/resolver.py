@@ -80,6 +80,28 @@ def _chain(aliases: list[str], settings: Settings) -> list[Candidate]:
     return result
 
 
+def last_resort(requested: str, settings: Settings) -> list[Candidate]:
+    """O degrau de baixo: quem atende quando nenhum candidato da cadeia cabe.
+
+    A ordem e a que o operador declarou:
+
+    1. o `default_model`, mesmo que ele tambem nao caiba -- e a escolha escrita
+       para "quando nada serve";
+    2. sem `default_model`, o modelo que o harness pediu, em modo transparente:
+       se ninguem no catalogo da conta, quem pediu resolve com o proprio
+       provedor.
+
+    Lista vazia quando nao ha nem um nem outro: ai o chamador devolve o erro
+    que ja devolvia, e nao uma chamada a esmo.
+    """
+    if settings.default_model:
+        return [_candidate(settings.default_model, settings)]
+    try:
+        return [_transparent(requested, settings)]
+    except UnknownProviderError:
+        return []
+
+
 def resolve(requested: str, settings: Settings) -> Resolution:
     for pattern, aliases in settings.routes:
         if pattern == requested:

@@ -87,7 +87,7 @@ def test_candidate_with_smaller_context_window_is_dropped():
     req = requirements_of({"messages": [{"role": "user", "content": "x" * 40000}]})
     kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_tools"]
-    assert dropped[0][1] == "context window too small"
+    assert dropped[0][1].startswith("context window too small")
 
 
 def test_transparent_candidate_is_never_filtered():
@@ -163,7 +163,8 @@ def test_estimate_tokens_counts_tools_not_just_messages():
     req = requirements_of(payload)
     kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_tools"]
-    assert dropped == [("curto", "context window too small")]
+    assert dropped[0][0] == "curto"
+    assert dropped[0][1].startswith("context window too small")
 
 
 def test_kept_is_empty_when_the_only_candidate_is_unfit():
@@ -187,7 +188,8 @@ def test_context_window_boundary_one_over_is_dropped():
     req = Requirements(tools=False, vision=False, streaming=False, input_tokens=1001)
     kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
     assert kept == []
-    assert dropped == [("curto", "context window too small")]
+    assert dropped[0][0] == "curto"
+    assert dropped[0][1].startswith("context window too small")
 
 
 def test_transparent_flag_bypasses_filter_even_with_an_unfit_real_alias():
@@ -249,3 +251,40 @@ def test_candidate_without_vision_is_dropped_for_an_anthropic_image_block():
     kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_vision"]
     assert dropped == [("sem_vision", "no vision support")]
+
+
+# -- Historia E: o tamanho do pedido escolhe o candidato -----------------------
+
+
+def test_the_requested_max_tokens_counts_against_the_window():
+    """A resposta ocupa a mesma janela do prompt.
+
+    Medido no trafego real: `groq-free` recusava com 413 pedidos que a conta
+    so-do-prompt dizia caber. A saida pedida faz parte do orcamento.
+    """
+    req = Requirements(
+        tools=False, vision=False, streaming=False, input_tokens=900, output_tokens=200
+    )
+    kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
+    assert kept == []
+    assert dropped[0][0] == "curto"
+
+
+def test_the_drop_reason_carries_the_two_numbers():
+    """Sem os numeros, o rastro nao diz por quanto o pedido passou do teto."""
+    req = Requirements(
+        tools=False, vision=False, streaming=False, input_tokens=1200, output_tokens=300
+    )
+    _, dropped = filter_chain([cand("curto")], req, SETTINGS)
+    assert dropped == [("curto", "context window too small (1500 > 1000)")]
+
+
+def test_requirements_reads_the_max_tokens_of_the_payload():
+    req = requirements_of({"messages": [], "max_tokens": 4096})
+    assert req.output_tokens == 4096
+
+
+def test_a_payload_without_max_tokens_budgets_nothing_for_the_answer():
+    """Ausente ou nao numerico nao pode virar um teto inventado."""
+    assert requirements_of({"messages": []}).output_tokens == 0
+    assert requirements_of({"messages": [], "max_tokens": "muitos"}).output_tokens == 0
