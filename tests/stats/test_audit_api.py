@@ -169,3 +169,51 @@ async def test_an_instant_with_no_offset_is_read_as_utc(store):
     zulu = audit._moment({"since": "2026-09-19T08:00:00Z"}, "since")
     assert naive == aware == zulu
     assert naive.tzinfo is not None
+
+
+async def test_the_facets_only_offer_what_exists(store):
+    """Oferecer um provedor que nunca respondeu e um filtro que devolve vazio."""
+    answer = await audit.facets(with_params(store))
+    facets = body_of(answer)
+    assert [f["value"] for f in facets["providers"]] == ["groq", "openrouter"]
+    assert {f["value"] for f in facets["candidate_models"]} == {
+        "openai/gpt-oss-120b",
+        "openrouter/free",
+    }
+    assert [f["value"] for f in facets["error_types"]] == ["rate_limit_error"]
+    assert facets["providers"][0]["count"] == 1
+
+
+async def test_the_body_comes_back_when_it_was_stored(store, make_engine, tmp_path):
+    from sqlalchemy.orm import Session
+
+    from app.stats.models import RequestBody
+
+    with Session(store.engine) as session:
+        session.add(
+            RequestBody(
+                request_id="ok",
+                prompt="user: leia a.txt",
+                answer="pronto",
+                prompt_bytes=16,
+                answer_bytes=6,
+                truncated=False,
+            )
+        )
+        session.commit()
+    answer = await audit.request_body(with_params(store), "ok")
+    body = body_of(answer)
+    assert body["prompt"] == "user: leia a.txt"
+    assert body["answer"] == "pronto"
+    assert body["truncated"] is False
+
+
+async def test_a_request_without_a_stored_body_says_so(store):
+    answer = await audit.request_body(with_params(store), "falhou")
+    assert answer.status_code == 404
+    assert b"nao gravada" in answer.body
+
+
+async def test_without_a_database_the_body_and_the_facets_say_so():
+    assert (await audit.request_body(with_params(Recorder(None)), "x")).status_code == 409
+    assert (await audit.facets(with_params(Recorder(None)))).status_code == 409

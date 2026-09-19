@@ -176,6 +176,34 @@ async def export_requests(request: Request):
     )
 
 
+@router.get("/api/requests/facets")
+async def facets(request: Request):
+    """Os valores que existem, para os seletores da tela."""
+    engine = _engine(request)
+    if engine is None:
+        return _no_database()
+    return JSONResponse(await asyncio.to_thread(queries.facets, engine))
+
+
+@router.get("/api/requests/{request_id}/body")
+async def request_body(request: Request, request_id: str):
+    """O texto da conversa daquela requisicao.
+
+    404 quando nao ha: pode ser que a gravacao de conversa estivesse desligada
+    quando ela passou, e a tela diz isso em vez de mostrar vazio.
+    """
+    engine = _engine(request)
+    if engine is None:
+        return _no_database()
+    body = await asyncio.to_thread(queries.body_of, engine, request_id)
+    if body is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": "conversa nao gravada para esta requisicao"},
+        )
+    return JSONResponse(body)
+
+
 @router.get("/api/requests/{request_id}")
 async def one_request(request: Request, request_id: str):
     engine = _engine(request)

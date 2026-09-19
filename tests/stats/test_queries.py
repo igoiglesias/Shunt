@@ -298,3 +298,31 @@ def test_clearing_only_the_past_keeps_what_is_recent(seeded):
     removed = queries.delete_events(seeded, older_than_hours=1)
     assert removed == 1, "so a linha de cinco horas atras era antiga"
     assert queries.totals(seeded, hours=24)["requests"] == 4
+
+
+def test_clearing_takes_the_conversation_with_it(make_engine, tmp_path):
+    """Texto sem o evento dele fica invisivel para sempre na tela de auditoria."""
+    from sqlalchemy import func, select
+
+    from app.stats.models import RequestBody
+
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'com-corpo.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="velha", started_at=NOW - timedelta(hours=5)),
+                row(request_id="nova"),
+                RequestBody(request_id="velha", prompt="antiga", answer="ok"),
+                RequestBody(request_id="nova", prompt="recente", answer="ok"),
+            ]
+        )
+        session.commit()
+
+    queries.delete_events(engine, older_than_hours=1)
+    with Session(engine) as session:
+        restantes = session.scalars(select(RequestBody.request_id)).all()
+    assert restantes == ["nova"]
+
+    queries.delete_events(engine)
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(RequestBody)) == 0

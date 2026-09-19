@@ -406,7 +406,32 @@ that answered, with tokens, latency and time to first token.
 The search lives in the URL, so an investigation is a link you can send to
 someone. **Exportar CSV** hands the same result to a spreadsheet.
 
-What the screen never shows is the prompt or the answer. They are not stored.
+### Reading the conversation
+
+Off by default, because the text of a conversation is the most sensitive thing
+that passes through this proxy. Turn it on and the **Conversa** tab of any
+request shows what went up and what came back:
+
+```bash
+SHUNT_STORE_BODIES=1
+SHUNT_BODY_LIMIT=64000   # characters per side; 64000 is the default
+```
+
+The text is split back into turns, coloured by who spoke, with tool calls and
+tool results in place — reading an agentic turn means following who said what.
+There is a search box that highlights hits inside the conversation, a copy
+button, and long turns collapse until you ask for the rest.
+
+Three things happen to the text before it is stored. It goes in a **separate
+table**, so the search reads hundreds of rows without dragging megabytes behind
+it. Each side is **cut** at the limit, and the original size is kept so the
+screen can say how much is missing rather than pretend the conversation ended
+there. And anything that **looks like a credential** — an `sk-`/`ghp_`/`xoxb-`
+token, an AWS key, a JWT, a `FOO_API_KEY=` line — is replaced with `[redigido]`
+before it reaches the database, because an agent that pastes a `.env` into a
+prompt would otherwise store the key forever.
+
+Clearing the history takes the stored conversations with it.
 
 ### Clearing the history
 
@@ -464,10 +489,11 @@ Stated plainly so none of it reads as an oversight:
 - **It does not make a small model behave like a large one.** Routing
   `claude-opus-4-5` to a 27B model gives you that 27B model, under a name Claude
   Code recognises.
-- **It does not cache, log or store your conversations.** The usage panel keeps
-  one row per request — which model, which provider, how many tokens, how long —
-  and never the prompt or the answer. Tool-call ids are still encoded rather than
-  remembered.
+- **It does not store your conversations unless you ask it to.** The usage panel
+  keeps one row per request — which model, which provider, how many tokens, how
+  long — and nothing of what was said. `SHUNT_STORE_BODIES=1` adds the text, in
+  its own table, cut at a limit and with anything that looks like a credential
+  redacted. Tool-call ids are still encoded rather than remembered.
 - **It does not filter a provider's response.** Whatever the provider answers is
   translated and handed on. A field Shunt has never heard of reaches you intact,
   and so does a field you would rather it dropped.

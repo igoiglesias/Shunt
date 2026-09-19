@@ -16,7 +16,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.stats.models import Base, RequestEvent
+from app.stats.models import Base, RequestBody, RequestEvent
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import sync_playwright
@@ -61,8 +61,25 @@ def seed(path) -> None:
                 thinking_blocks=1,
             )
         )
+    conversas = [
+        RequestBody(
+            request_id=f"req-{index:02d}",
+            prompt=(
+                "system: seja breve\n\n"
+                f"user: leia o arquivo {index}.txt e resuma\n\n"
+                "assistant: [ferramenta Read] {\"path\": \"a.txt\"}\n\n"
+                "user: [resultado de ferramenta] " + ("conteudo " * 200)
+            ),
+            answer=f"resumo da requisicao {index}",
+            prompt_bytes=4000 if index else 90_000,
+            answer_bytes=30,
+            truncated=index == 0,
+        )
+        for index in range(0, 24, 2)
+    ]
     with Session(engine) as session:
         session.add_all(rows)
+        session.add_all(conversas)
         session.commit()
     engine.dispose()
 
@@ -296,3 +313,159 @@ def test_the_active_ordering_is_visible_and_not_only_in_aria(browser, server):
     page.close()
     assert problems == []
     assert marker and marker not in ("none", '""'), f"nenhuma marca visivel: {marker!r}"
+
+
+def test_the_requested_model_has_its_own_selector(browser, server):
+    """O backend ja filtrava por modelo pedido; faltava o seletor na tela."""
+    page, problems = open_audit(browser, server)
+    page.wait_for_function(
+        "() => document.querySelectorAll('#requested_model option').length > 1"
+    )
+    page.select_option("#requested_model", "claude-opus-5")
+    page.wait_for_function(
+        """() => {
+            const rows = [...document.querySelectorAll('#rows tr')];
+            return rows.length > 0 && rows.every(r => r.children[2].textContent.includes('claude-opus-5'));
+        }"""
+    )
+    url = page.url
+    page.close()
+    assert problems == []
+    assert "requested_model=claude-opus-5" in url
+
+
+def test_the_columns_say_which_model_each_one_is(browser, server):
+    page, _ = open_audit(browser, server)
+    heads = page.evaluate("() => [...document.querySelectorAll('thead th')].map(h => h.textContent.trim())")
+    page.close()
+    assert "Modelo pedido" in heads
+    assert "Modelo que respondeu" in heads
+
+
+def test_the_selectors_offer_only_what_exists_with_counts(browser, server):
+    """Oferecer um provedor que nunca respondeu e um filtro que devolve vazio."""
+    page, problems = open_audit(browser, server)
+    page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
+    options = page.evaluate(
+        """() => ({
+            provider: [...document.querySelectorAll('#provider option')].map(o => o.textContent),
+            served: [...document.querySelectorAll('#candidate_model option')].map(o => o.value),
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert options["provider"][0].startswith("provedor: todos")
+    assert any("groq (" in text for text in options["provider"]), options["provider"]
+    assert "openai/gpt-oss-120b" in options["served"]
+    assert "" in options["served"], "faltou a opcao de nao filtrar"
+
+
+def test_choosing_a_provider_filters_and_lands_in_the_url(browser, server):
+    page, problems = open_audit(browser, server)
+    page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
+    page.select_option("#provider", "groq")
+    page.wait_for_function("() => new URLSearchParams(location.search).get('provider') === 'groq'")
+    page.wait_for_timeout(400)
+    served = page.evaluate(
+        "() => [...document.querySelectorAll('#rows tr')].map(r => r.children[3].textContent)"
+    )
+    page.close()
+    assert problems == []
+    assert served
+    assert all("gpt-oss-120b" in text for text in served), served
+
+
+def test_a_value_from_an_old_link_stays_selectable(browser, server):
+    """Link antigo com um modelo que sumiu do banco nao pode mudar a busca sozinho.
+
+    A lista vem vazia de proposito aqui, entao a pagina abre sem esperar linha.
+    """
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda error: problems.append(str(error)))
+    page.goto(f"{server}/requests?provider=um-provedor-que-sumiu", wait_until="networkidle")
+    page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
+    chosen = page.input_value("#provider")
+    page.close()
+    assert problems == []
+    assert chosen == "um-provedor-que-sumiu"
+
+
+def test_the_conversation_tab_shows_the_turns_with_who_said_what(browser, server):
+    """O pedido principal: ler o que subiu e o que voltou."""
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-02"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .turn")
+    turns = page.evaluate(
+        """() => [...document.querySelectorAll('#talk .turn')].map(t => ({
+            who: t.querySelector('.who b').textContent,
+            kind: t.className.replace('turn', '').trim(),
+            text: t.querySelector('pre').textContent.slice(0, 40),
+        }))"""
+    )
+    page.close()
+    assert problems == []
+    papeis = [turn["who"] for turn in turns]
+    assert papeis[:3] == ["system", "user", "assistant"]
+    assert papeis[-1] == "resposta"
+    assert turns[1]["kind"] == "user"
+    assert "leia o arquivo" in turns[1]["text"]
+    assert "resumo da requisicao" in turns[-1]["text"]
+
+
+def test_searching_inside_the_conversation_highlights_the_hits(browser, server):
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-02"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .turn")
+    page.fill("#in-talk", "ferramenta")
+    page.wait_for_selector("#talk mark")
+    marks = page.locator("#talk mark").count()
+    page.close()
+    assert problems == []
+    assert marks >= 1
+
+
+def test_a_cut_conversation_says_how_much_is_missing(browser, server):
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-00"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .cut")
+    said = page.inner_text("#talk .cut")
+    page.close()
+    assert problems == []
+    assert "cortado" in said
+    assert "90.0k" in said or "90k" in said
+
+
+def test_a_request_with_no_stored_conversation_says_how_to_turn_it_on(browser, server):
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-01"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .empty")
+    said = page.inner_text("#talk")
+    page.close()
+    # O 404 desta rota e a propria resposta, e o navegador o registra no
+    # console: o que nao pode aparecer e erro de JavaScript.
+    assert [p for p in problems if "Failed to load resource" not in p] == []
+    assert "nao gravada" in said
+    assert "SHUNT_STORE_BODIES=1" in said
+
+
+def test_the_summary_comes_back_when_the_tab_switches_back(browser, server):
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-02"]')
+    page.wait_for_selector("#detail .tabs")
+    page.get_by_role("tab", name="Conversa").click()
+    page.wait_for_selector("#talk .turn")
+    page.get_by_role("tab", name="Resumo").click()
+    page.wait_for_selector("#summary .chain")
+    hidden = page.evaluate("() => document.getElementById('talk').hidden")
+    page.close()
+    assert problems == []
+    assert hidden is True

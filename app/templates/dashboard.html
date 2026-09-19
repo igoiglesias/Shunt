@@ -213,7 +213,7 @@
 <main>
   <div class="flow-band">
     <section>
-      <h2>Para onde cada pedido foi <em>largura = requisições</em></h2>
+      <h2>Modelo pedido e quem respondeu <em>largura = requisições</em></h2>
       <div id="flow"></div>
     </section>
     <section class="tape">
@@ -396,9 +396,9 @@ function drawFlow() {
     el("flow").innerHTML = `
       <svg viewBox="0 0 ${width} ${height}" role="img"
            aria-label="Modelos pedidos e modelos que responderam">
-        <text class="axis" x="2" y="${head - 8}" style="font-size:${11 * scale}px">pedido</text>
+        <text class="axis" x="2" y="${head - 8}" style="font-size:${11 * scale}px">modelo pedido</text>
         ${side(asked, 2, "start", head, "var(--requests)")}
-        <text class="axis" x="2" y="${servedTop - 8}" style="font-size:${11 * scale}px">respondeu</text>
+        <text class="axis" x="2" y="${servedTop - 8}" style="font-size:${11 * scale}px">modelo que respondeu</text>
         ${side(served, 2, "start", servedTop, "var(--tokens)")}
       </svg>`;
     return;
@@ -409,8 +409,8 @@ function drawFlow() {
   el("flow").innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" role="img"
          aria-label="Modelos pedidos à esquerda, modelos que responderam à direita">
-      <text class="axis" x="2" y="12">pedido</text>
-      <text class="axis" x="638" y="12" text-anchor="end">respondeu</text>
+      <text class="axis" x="2" y="12">modelo pedido</text>
+      <text class="axis" x="638" y="12" text-anchor="end">modelo que respondeu</text>
       ${side(asked, 2, "start", 24, "var(--requests)")}
       ${side(served, 638, "end", 24, "var(--tokens)")}
       <line x1="320" y1="20" x2="320" y2="${height - 8}" stroke="var(--panel-edge)" />

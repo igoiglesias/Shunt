@@ -14,7 +14,7 @@ coluna seria perder a linha ou inventar um valor.
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -72,3 +72,30 @@ class RequestEvent(Base):
         Index("ix_request_events_provider_started_at", "provider", "started_at"),
         Index("ix_request_events_candidate_started_at", "candidate_model", "started_at"),
     )
+
+
+class RequestBody(Base):
+    """O texto que entrou e o texto que saiu, numa tabela SEPARADA.
+
+    Separada de proposito: a listagem e a busca da tela de auditoria leem
+    `request_events` centenas de linhas por vez, e um `SELECT *` que arrastasse
+    megabytes de conversa junto tornaria a busca lenta para responder uma
+    pergunta que ela nem faz. O texto so e lido quando alguem abre UMA
+    requisicao.
+
+    Guardar conversa e escolha do operador, e vem desligada por variavel de
+    ambiente: e o dado mais sensivel que passa por este proxy.
+    """
+
+    __tablename__ = "request_bodies"
+
+    request_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("request_events.request_id"), primary_key=True
+    )
+    prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Tamanho ANTES do corte, para que a tela possa dizer "mostrando 64 KB de
+    # 380 KB" em vez de fingir que a conversa acabou ali.
+    prompt_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    answer_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    truncated: Mapped[bool] = mapped_column(default=False)

@@ -46,6 +46,7 @@ from app.core.observability import RequestLog, log_request
 from app.core.resolver import Candidate, Resolution, resolve
 from app.core.upstream import UpstreamPool
 from app.schemas.openai import OpenAIErrorResponse
+from app.stats import bodies
 from app.translate.sse_parse import SSEDecoder, SSEEvent
 from app.translate.sse_to_anthropic import OpenAIStreamToAnthropic
 from app.translate.sse_to_openai import AnthropicStreamToOpenAI
@@ -354,6 +355,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             tools_offered=tools_offered(req),
             tools_called=called,
             thinking_blocks=thinking,
+            body=bodies.capture(bodies.prompt_text(req.body), bodies.answer_text(result.body)),
         )
     )
     return result
@@ -625,6 +627,7 @@ class _Tally:
     first_byte_at: float | None = None
     usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
     provider: str | None = None
+    answer_text: str = ""
     tools_called: list[str] = field(default_factory=list)
     thinking_blocks: int = 0
     status: int = 200
@@ -725,10 +728,13 @@ def _absorb(tally: _Tally, translator: object, candidate: Candidate) -> None:
     tally.provider = candidate.provider
     tools = getattr(translator, "tools_called", None)
     thinking = getattr(translator, "thinking_blocks", None)
+    text = getattr(translator, "answer_text", None)
     if callable(tools):
         tally.tools_called = tools()
     if callable(thinking):
         tally.thinking_blocks = thinking()
+    if callable(text):
+        tally.answer_text = text()
 
 
 async def _stream_chain(
@@ -959,5 +965,6 @@ async def dispatch_stream(
                 tools_offered=tools_offered(req),
                 tools_called=tally.tools_called,
                 thinking_blocks=tally.thinking_blocks,
+                body=bodies.capture(bodies.prompt_text(req.body), tally.answer_text),
             )
         )

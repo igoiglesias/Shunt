@@ -33,10 +33,18 @@ Deliberate leniency, matching `app.translate.to_anthropic`:
 
 from typing import Any
 
+from app.stats import bodies
 from app.translate.ids import to_anthropic_id
 from app.translate.to_anthropic import STOP_REASONS, reasoning_of
 
 Event = tuple[str, dict[str, Any]]
+
+
+# Quantos pedacos de texto a resposta guarda em streaming. Um teto em NUMERO de
+# pedacos, e nao em bytes, porque cada um chega solto e contar bytes a cada
+# chegada custaria mais do que o proprio teto economiza. O corte final em
+# tamanho acontece no `bodies.capture`.
+ANSWER_PIECES = 20_000
 
 
 class OpenAIStreamToAnthropic:
@@ -61,6 +69,17 @@ class OpenAIStreamToAnthropic:
         # So para o painel: nao muda um byte do que sai para o cliente.
         self._tools_called: list[str] = []
         self._thinking_blocks = 0
+        # O texto da resposta so existe enquanto passa: em streaming nao ha
+        # corpo final para ler depois. Acumula aqui, com teto, e so quando a
+        # gravacao de conversa esta ligada.
+        self._answer: list[str] = []
+
+    def answer_text(self) -> str:
+        return "".join(self._answer)
+
+    def _remember(self, piece: str) -> None:
+        if piece and bodies.enabled() and len(self._answer) < ANSWER_PIECES:
+            self._answer.append(piece)
 
     def tools_called(self) -> list[str]:
         return list(self._tools_called)
@@ -206,6 +225,7 @@ class OpenAIStreamToAnthropic:
 
         text = delta.get("content")
         if text:
+            self._remember(text)
             if self._open_kind != "text":
                 events.extend(self._open_text())
             events.append(

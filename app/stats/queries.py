@@ -23,7 +23,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import Engine, String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.stats.models import RequestEvent
+from app.stats.models import RequestBody, RequestEvent
 
 DEFAULT_HOURS = 24
 DEFAULT_LIMIT = 10
@@ -524,6 +524,51 @@ def event_detail(engine: Engine, request_id: str) -> dict | None:
         return _as_event(row) if row is not None else None
 
 
+def body_of(engine: Engine, request_id: str) -> dict | None:
+    """O texto da conversa de UMA requisicao, ou None quando nao foi gravada."""
+    with Session(engine) as session:
+        row = session.get(RequestBody, request_id)
+        if row is None:
+            return None
+        return {
+            "request_id": row.request_id,
+            "prompt": row.prompt or "",
+            "answer": row.answer or "",
+            "prompt_bytes": row.prompt_bytes,
+            "answer_bytes": row.answer_bytes,
+            "truncated": row.truncated,
+        }
+
+
+def facets(engine: Engine, hours: float = 24 * 30, limit: int = 60) -> dict:
+    """Os valores que existem de verdade, para a tela montar os seletores.
+
+    Oferecer um provedor que nunca respondeu nada e um filtro que so devolve
+    lista vazia. Cada lista vem com a contagem, porque saber que um modelo
+    aparece tres vezes muda a decisao de clicar nele.
+    """
+    since = _since(hours)
+
+    def distinct(column) -> list[dict]:
+        with Session(engine) as session:
+            rows = session.execute(
+                select(column, func.count(RequestEvent.id))
+                .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
+                .group_by(column)
+                .order_by(func.count(RequestEvent.id).desc())
+                .limit(limit)
+            ).all()
+        return [{"value": value, "count": count} for value, count in rows]
+
+    return {
+        "providers": distinct(RequestEvent.provider),
+        "candidate_models": distinct(RequestEvent.candidate_model),
+        "requested_models": distinct(RequestEvent.requested_model),
+        "routes": distinct(RequestEvent.route),
+        "error_types": distinct(RequestEvent.error_type),
+    }
+
+
 def delete_events(engine: Engine, older_than_hours: float | None = None) -> int:
     """Apaga o historico e devolve quantas linhas sairam.
 
@@ -533,9 +578,19 @@ def delete_events(engine: Engine, older_than_hours: float | None = None) -> int:
     insere, e a fila dele nao e consultada aqui.
     """
     statement = delete(RequestEvent)
+    bodies_statement = delete(RequestBody)
     if older_than_hours is not None:
-        statement = statement.where(RequestEvent.started_at < _since(older_than_hours))
+        cut = _since(older_than_hours)
+        statement = statement.where(RequestEvent.started_at < cut)
+        # O texto vai junto: conversa sem o evento dela nao serve a ninguem, e
+        # ficaria invisivel para sempre na tela de auditoria.
+        bodies_statement = bodies_statement.where(
+            RequestBody.request_id.in_(
+                select(RequestEvent.request_id).where(RequestEvent.started_at < cut)
+            )
+        )
     with Session(engine) as session:
+        session.execute(bodies_statement)
         result = session.execute(statement)
         # `rowcount` existe no resultado de um DELETE, mas nao na assinatura
         # generica de `execute`; o `getattr` e para o verificador de tipos, e

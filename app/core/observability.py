@@ -65,6 +65,10 @@ class RequestLog:
     tools_offered: list[str] = field(default_factory=list)
     tools_called: list[str] = field(default_factory=list)
     thinking_blocks: int = 0
+    # O texto da conversa, quando `SHUNT_STORE_BODIES` esta ligado. Fica FORA
+    # do que vai para o log: uma conversa inteira no stdout do proxy seria
+    # outra coisa, e o log e lido por quem so quer a linha estruturada.
+    body: dict | None = None
 
 
 def redact(headers: dict[str, str]) -> dict[str, str]:
@@ -100,7 +104,8 @@ def log_request(entry: RequestLog) -> None:
     A ordem importa: o log sai primeiro. `record()` nao levanta e nao espera,
     mas se um dia levantar, a linha de log ja foi.
     """
-    logger.info(json.dumps(asdict(entry), ensure_ascii=False))
+    printable = {k: v for k, v in asdict(entry).items() if k != "body"}
+    logger.info(json.dumps(printable, ensure_ascii=False))
     _recorder.record(as_event(entry))
 
 
@@ -132,6 +137,7 @@ def as_event(entry: RequestLog) -> dict:
         "tools_offered": list(entry.tools_offered),
         "tools_called": list(entry.tools_called),
         "thinking_blocks": entry.thinking_blocks,
+        **({"body": entry.body} if entry.body else {}),
     }
 
 

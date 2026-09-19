@@ -42,8 +42,12 @@ Deliberate leniency, matching the rest of `app.translate`:
 import time
 from typing import Any
 
+from app.stats import bodies
 from app.translate.ids import to_openai_id
 from app.translate.to_openai import FINISH_REASONS
+
+# Mesmo teto do outro tradutor: contar pedacos, nao bytes.
+ANSWER_PIECES = 20_000
 
 
 class AnthropicStreamToOpenAI:
@@ -68,6 +72,17 @@ class AnthropicStreamToOpenAI:
         # So para o painel: nao muda um byte do que sai para o cliente.
         self._tools_called: list[str] = []
         self._thinking_blocks = 0
+        # O texto da resposta so existe enquanto passa: em streaming nao ha
+        # corpo final para ler depois. Acumula aqui, com teto, e so quando a
+        # gravacao de conversa esta ligada.
+        self._answer: list[str] = []
+
+    def answer_text(self) -> str:
+        return "".join(self._answer)
+
+    def _remember(self, piece: str) -> None:
+        if piece and bodies.enabled() and len(self._answer) < ANSWER_PIECES:
+            self._answer.append(piece)
 
     def _chunk(self, delta: dict, finish: str | None = None, usage: dict | None = None) -> dict:
         payload: dict[str, Any] = {
@@ -119,7 +134,9 @@ class AnthropicStreamToOpenAI:
     def _content_block_delta(self, data: dict) -> list[dict]:
         delta = data.get("delta") or {}
         if delta.get("type") == "text_delta":
-            return [self._chunk({"content": delta.get("text", "")})]
+            texto = delta.get("text", "")
+            self._remember(texto)
+            return [self._chunk({"content": texto})]
         if delta.get("type") == "input_json_delta":
             block_index = data.get("index", 0)
             if block_index not in self._tool_index_of_block:

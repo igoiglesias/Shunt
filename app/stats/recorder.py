@@ -25,7 +25,7 @@ from collections.abc import Callable
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from app.stats.models import RequestEvent
+from app.stats.models import RequestBody, RequestEvent
 
 logger = logging.getLogger("shunt")
 
@@ -193,7 +193,14 @@ class Recorder:
             return
         try:
             with Session(self._engine) as session:
-                session.add_all([RequestEvent(**event) for event in batch])
+                for event in batch:
+                    # O texto da conversa viaja junto do evento e vai para a
+                    # OUTRA tabela: a busca da auditoria le centenas de linhas
+                    # por vez e nao pode arrastar megabytes atras.
+                    body = event.pop("body", None)
+                    session.add(RequestEvent(**event))
+                    if body:
+                        session.add(RequestBody(request_id=event["request_id"], **body))
                 session.commit()
             self.commits += 1
         except Exception as err:  # noqa: BLE001 - um lote perdido nao pode
