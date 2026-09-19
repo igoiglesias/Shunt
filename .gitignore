@@ -20,3 +20,6 @@ wheels/
 stats.db
 stats.db-*
 stats-antes-da-limpeza.db*
+
+# Guia compartilhado, fora do repositorio
+ARQUITETURA.md
