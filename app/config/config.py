@@ -57,10 +57,10 @@ models = {
     },
     "groq-free": {
         "provider": "groq",
-        "model": "openai/gpt-oss-120b",
+        "model": "groq/compound",
         "supports": {"tools": True, "streaming": True, "vision": False},
         "context_window": 131072,
-        "max_output_tokens": 65536,
+        "max_output_tokens": 8192,
     },
 }
 
