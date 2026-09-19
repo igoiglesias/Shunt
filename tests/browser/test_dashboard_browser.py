@@ -143,7 +143,7 @@ def test_the_numbers_on_screen_are_the_numbers_the_api_answered(browser, server)
     page, _ = open_panel(browser, server, 1440, 1000)
     shown = page.evaluate(
         """() => ({
-            requests: document.querySelector('#figures .figure.requests .value').textContent,
+            requests: document.querySelector('#figures .figure .value').textContent,
             models: [...document.querySelectorAll('#models tbody tr')].map(
                 r => [...r.children].slice(0, 2).map(c => c.textContent.trim())),
             errors: [...document.querySelectorAll('#errors tbody tr td:last-child')].map(
@@ -236,7 +236,7 @@ def test_the_api_answers_the_same_json_the_panel_parses(server):
     """Contrato entre as duas metades, preso sem navegador nenhum."""
     body = httpx.get(f"{server}/api/stats", timeout=10).json()
     assert json.loads(json.dumps(body)) == body
-    assert set(body) >= {"totals", "per_hour", "by_model", "chain", "tools", "recent", "health"}
+    assert set(body) >= {"totals", "series", "by_model", "chain", "tools", "recent", "health"}
 
 
 def test_a_single_hour_of_traffic_draws_bars_instead_of_a_flat_line(browser, server):
@@ -372,7 +372,7 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
                         "p50_ttft_ms": None,
                         "p95_ttft_ms": None,
                     },
-                    "per_hour": [],
+                    "series": {"bucket_minutes": 60, "points": []},
                     "by_model": [],
                     "by_provider": [],
                     "by_route": [],
@@ -420,8 +420,9 @@ def test_the_summary_is_grouped_instead_of_a_row_of_loose_numbers(browser, serve
     assert problems == []
     assert grupos == ["Volume", "Latência", "Saúde"]
 
-def test_the_series_has_two_axes_a_legend_and_no_overlapping_labels(browser, server):
-    """Requisicoes e tokens sao grandezas incomparaveis: cada uma no seu eixo."""
+def test_the_series_is_two_plots_and_never_two_scales_in_one(browser, server):
+    """Duas escalas num plot so inventam uma correlacao que o dado nao tem --
+    e o erro mais comum de painel. Dois plots, um eixo cada, tempo em comum."""
     page, problems = open_panel(browser, server, 1500, 1000)
     medido = page.evaluate(
         """() => {
@@ -438,19 +439,23 @@ def test_the_series_has_two_axes_a_legend_and_no_overlapping_labels(browser, ser
             }
             return {
                 colisoes,
-                legenda: [...document.querySelectorAll('#series + .legend .key, .legend .key')]
-                    .map(k => k.textContent.trim()),
+                plots: document.querySelectorAll('#series svg').length,
                 barras: document.querySelectorAll('#series rect').length,
+                linhas: document.querySelectorAll('#series path').length,
                 linhasDeGrade: document.querySelectorAll('#series line').length,
+                tracejado: [...document.querySelectorAll('#series line')]
+                    .some(l => l.getAttribute('stroke-dasharray')),
             };
         }"""
     )
     page.close()
     assert problems == []
     assert medido["colisoes"] == 0, f"{medido['colisoes']} rotulos sobrepostos no grafico"
-    assert medido["legenda"] == ["requisições", "tokens", "horas com erro"]
+    assert medido["plots"] == 2, "as duas grandezas voltaram para o mesmo plot"
     assert medido["barras"] > 0
-    assert medido["linhasDeGrade"] >= 3, "faltou a grade que da escala ao grafico"
+    assert medido["linhas"] >= 1
+    assert medido["linhasDeGrade"] >= 4, "faltou a grade que da escala aos dois plots"
+    assert medido["tracejado"] is False, "grade tracejada le como limite, e aqui e so escala"
 
 
 def test_the_flow_links_each_request_to_what_answered_it(browser, server):

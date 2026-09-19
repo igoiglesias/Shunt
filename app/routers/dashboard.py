@@ -107,7 +107,7 @@ def empty_snapshot(hours: float) -> dict:
             "p50_ttft_ms": None,
             "p95_ttft_ms": None,
         },
-        "per_hour": [],
+        "series": {"bucket_minutes": 60, "points": []},
         "by_model": [],
         "by_provider": [],
         "by_route": [],

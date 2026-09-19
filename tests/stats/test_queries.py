@@ -105,11 +105,76 @@ def test_an_empty_window_answers_zeros_and_no_percentile(make_engine, tmp_path):
     assert totals["p50_duration_ms"] is None
 
 
-def test_the_series_has_one_bucket_per_hour_that_saw_traffic(seeded):
-    series = queries.per_hour(seeded, hours=24)
-    assert len(series) == 2
-    assert sum(point["requests"] for point in series) == 5
-    assert series[0]["hour"] < series[1]["hour"]
+def test_the_series_buckets_follow_the_window(seeded):
+    """Cinco minutos agrupados por HORA sao um balde so: foi o que o painel
+    mostrou, uma barra solitaria no meio do nada."""
+    assert queries.bucket_minutes(0.0833) == 1
+    assert queries.bucket_minutes(1) == 1
+    assert queries.bucket_minutes(6) == 5
+    assert queries.bucket_minutes(24) == 60
+    assert queries.bucket_minutes(24 * 30) == 60 * 24
+
+    # A janela e o teto; o balde segue o intervalo que o trafego ocupa. As
+    # linhas semeadas cabem em cinco horas, entao 24 h nao vira balde de hora.
+    dia = queries.series(seeded, hours=24)
+    assert dia["bucket_minutes"] == 5
+    assert sum(point["requests"] for point in dia["points"]) == 5
+    assert dia["points"][0]["at"] < dia["points"][-1]["at"]
+
+
+def test_a_short_window_gets_a_bucket_per_minute(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'minuto.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", started_at=NOW - timedelta(minutes=1)),
+                row(request_id="b", started_at=NOW - timedelta(minutes=1)),
+                row(request_id="c", started_at=NOW - timedelta(minutes=4)),
+                row(request_id="d", started_at=NOW - timedelta(minutes=9)),
+            ]
+        )
+        session.commit()
+    curta = queries.series(engine, hours=0.25)
+    assert curta["bucket_minutes"] == 1
+    assert [p["requests"] for p in curta["points"]] == [1, 1, 2]
+    assert all(len(p["at"]) == len("2026-09-19T12:34") for p in curta["points"])
+
+
+def test_a_medium_window_groups_by_five_minutes(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cinco.db'}")
+    base = (NOW - timedelta(hours=3)).replace(minute=32, second=0, microsecond=0)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", started_at=base),
+                row(request_id="b", started_at=base + timedelta(minutes=1)),
+                row(request_id="c", started_at=base + timedelta(minutes=6)),
+                # Estica o intervalo para tres horas, que e o que escolhe o balde.
+                row(request_id="d", started_at=NOW - timedelta(minutes=2)),
+            ]
+        )
+        session.commit()
+    media = queries.series(engine, hours=6)
+    assert media["bucket_minutes"] == 5
+    assert [p["requests"] for p in media["points"]] == [2, 1, 1]
+    assert media["points"][0]["at"].endswith(":30")
+    assert media["points"][1]["at"].endswith(":35")
+
+
+def test_a_long_window_groups_in_blocks_of_hours(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'longa.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", started_at=NOW - timedelta(days=1)),
+                row(request_id="b", started_at=NOW - timedelta(days=9)),
+            ]
+        )
+        session.commit()
+    longa = queries.series(engine, hours=24 * 14)
+    assert longa["bucket_minutes"] == 60 * 6
+    assert len(longa["points"]) == 2
+    assert all(p["at"].endswith(":00") for p in longa["points"])
 
 
 def test_grouping_by_provider_splits_requests_and_errors(seeded):
@@ -210,7 +275,7 @@ def test_the_snapshot_carries_every_section_the_panel_draws(seeded):
     assert set(snapshot) == {
         "window_hours",
         "totals",
-        "per_hour",
+        "series",
         "by_model",
         "by_provider",
         "by_route",
@@ -372,3 +437,36 @@ def test_the_pair_says_which_request_landed_on_which_model(make_engine, tmp_path
     }
     assert len(pares) == 3
     assert all(par["served"] for par in pares)
+
+
+def test_the_bucket_follows_the_traffic_and_not_only_the_window(make_engine, tmp_path):
+    """Medido no painel real: 72 requisicoes em 44 minutos dentro de uma janela
+    de 24 horas davam DUAS barras."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'concentrado.db'}")
+    base = NOW - timedelta(minutes=44)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id=f"r{i}", started_at=base + timedelta(minutes=i * 2))
+                for i in range(22)
+            ]
+        )
+        session.commit()
+    largo = queries.series(engine, hours=24)
+    assert largo["bucket_minutes"] == 1, "o balde ignorou o intervalo real do trafego"
+    assert len(largo["points"]) == 22
+
+
+def test_traffic_spread_over_days_still_gets_a_coarse_bucket(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'espalhado.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id=f"d{i}", started_at=NOW - timedelta(hours=i * 20))
+                for i in range(1, 8)
+            ]
+        )
+        session.commit()
+    largo = queries.series(engine, hours=24 * 14)
+    assert largo["bucket_minutes"] >= 60
+    assert len(largo["points"]) <= 14

@@ -20,7 +20,7 @@ from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, String, and_, case, cast, delete, func, or_, select
+from sqlalchemy import Engine, Integer, String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.stats.models import RequestBody, RequestEvent
@@ -104,10 +104,86 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     }
 
 
-def per_hour(engine: Engine, hours: float = DEFAULT_HOURS) -> list[dict]:
-    """A serie temporal: uma linha por hora, com requisicoes e tokens."""
+# Granularidade do balde, escolhida pela janela. Uma janela de cinco minutos
+# agrupada por HORA e um balde so -- foi o que o painel mostrou: uma barra
+# solitaria no meio do nada. O balde acompanha a pergunta.
+BUCKETS = (
+    # (janela em horas ate, minutos por balde)
+    (2, 1),
+    (12, 5),
+    (72, 60),
+    (24 * 14, 60 * 6),
+)
+DAY_MINUTES = 60 * 24
+
+
+def bucket_minutes(hours: float) -> int:
+    for limit, minutes in BUCKETS:
+        if hours <= limit:
+            return minutes
+    return DAY_MINUTES
+
+
+def _bucket_expression(minutes: int):
+    """A expressao que trunca o instante ao balde, em SQLite.
+
+    `strftime` sozinho so corta em unidades inteiras -- minuto, hora, dia. Para
+    um balde de cinco minutos e preciso dividir o minuto e multiplicar de volta,
+    que e o que este `printf` faz.
+    """
+    if minutes >= DAY_MINUTES:
+        return func.strftime("%Y-%m-%dT00:00", RequestEvent.started_at)
+    if minutes >= 60:
+        horas = minutes // 60
+        if horas == 1:
+            return func.strftime("%Y-%m-%dT%H:00", RequestEvent.started_at)
+        return func.strftime("%Y-%m-%dT", RequestEvent.started_at).concat(
+            func.printf(
+                "%02d:00",
+                cast(
+                    cast(func.strftime("%H", RequestEvent.started_at), Integer) / horas, Integer
+                )
+                * horas,
+            )
+        )
+    if minutes == 1:
+        return func.strftime("%Y-%m-%dT%H:%M", RequestEvent.started_at)
+    return func.strftime("%Y-%m-%dT%H:", RequestEvent.started_at).concat(
+        func.printf(
+            "%02d",
+            cast(
+                cast(func.strftime("%M", RequestEvent.started_at), Integer) / minutes, Integer
+            )
+            * minutes,
+        )
+    )
+
+
+def series(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
+    """A serie temporal, com o balde que os DADOS pedem.
+
+    A janela e o teto, e nao a regra: medido no painel real, 72 requisicoes
+    concentradas em 44 minutos dentro de uma janela de 24 horas davam duas
+    barras. O balde acompanha o intervalo que o trafego realmente ocupa,
+    limitado pela janela -- assim uma janela larga com trafego curto continua
+    legivel, e uma janela larga com trafego espalhado nao vira mil barras.
+
+    Devolve o tamanho do balde junto, porque o painel precisa dele para a
+    largura da barra, e porque "por hora" deixou de ser verdade.
+    """
     since = _since(hours)
-    bucket = func.strftime("%Y-%m-%dT%H:00", RequestEvent.started_at)
+    with Session(engine) as session:
+        extremos = session.execute(
+            select(func.min(RequestEvent.started_at), func.max(RequestEvent.started_at)).where(
+                RequestEvent.started_at >= since
+            )
+        ).one()
+    span_hours = hours
+    if extremos[0] is not None and extremos[1] is not None:
+        vivido = (extremos[1] - extremos[0]).total_seconds() / 3600
+        span_hours = min(hours, max(vivido, 1 / 60))
+    minutes = bucket_minutes(span_hours)
+    bucket = _bucket_expression(minutes)
     with Session(engine) as session:
         rows = session.execute(
             select(
@@ -121,16 +197,19 @@ def per_hour(engine: Engine, hours: float = DEFAULT_HOURS) -> list[dict]:
             .group_by(bucket)
             .order_by(bucket)
         ).all()
-    return [
-        {
-            "hour": hour,
-            "requests": requests,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "errors": errors,
-        }
-        for hour, requests, input_tokens, output_tokens, errors in rows
-    ]
+    return {
+        "bucket_minutes": minutes,
+        "points": [
+            {
+                "at": at,
+                "requests": requests,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "errors": errors,
+            }
+            for at, requests, input_tokens, output_tokens, errors in rows
+        ],
+    }
 
 
 def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> list[dict]:
@@ -642,7 +721,7 @@ def snapshot(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     return {
         "window_hours": hours,
         "totals": totals(engine, hours),
-        "per_hour": per_hour(engine, hours),
+        "series": series(engine, hours),
         "by_model": by_model(engine, hours),
         "by_provider": by_provider(engine, hours),
         "by_route": by_route(engine, hours),
