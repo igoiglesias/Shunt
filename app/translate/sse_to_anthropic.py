@@ -58,6 +58,15 @@ class OpenAIStreamToAnthropic:
         self._stop_reason = "end_turn"
         self._usage = {"input_tokens": 0, "output_tokens": 0}
         self._finished = False
+        # So para o painel: nao muda um byte do que sai para o cliente.
+        self._tools_called: list[str] = []
+        self._thinking_blocks = 0
+
+    def tools_called(self) -> list[str]:
+        return list(self._tools_called)
+
+    def thinking_blocks(self) -> int:
+        return self._thinking_blocks
 
     def usage(self) -> dict[str, int]:
         """Os tokens que este stream consumiu, para a linha de log.
@@ -120,6 +129,7 @@ class OpenAIStreamToAnthropic:
         return events
 
     def _open_thinking(self) -> list[Event]:
+        self._thinking_blocks += 1
         events = self._close_block()
         self._block_index += 1
         self._open_kind = "thinking"
@@ -141,6 +151,8 @@ class OpenAIStreamToAnthropic:
         self._open_kind = "tool"
         self._open_tool_index = index
         function = call.get("function") or {}
+        if isinstance(function.get("name"), str):
+            self._tools_called.append(function["name"])
         events.append(
             (
                 "content_block_start",

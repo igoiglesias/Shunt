@@ -19,6 +19,9 @@ import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
+
+from app.stats.recorder import Recorder
 
 logger = logging.getLogger("shunt")
 
@@ -50,6 +53,18 @@ class RequestLog:
     ttft_ms: int | None = None
     duration_ms: int = 0
     translated: bool = False
+    # O que o painel precisa e a linha de log nao precisava. Tudo com valor
+    # padrao: uma rota que nao sabe responder um destes campos -- a listagem de
+    # modelos nao tem candidato, uma recusa nao tem provedor -- omite e segue.
+    route: str = ""
+    dialect: str = ""
+    stream: bool = False
+    status: int = 0
+    error_type: str | None = None
+    provider: str | None = None
+    tools_offered: list[str] = field(default_factory=list)
+    tools_called: list[str] = field(default_factory=list)
+    thinking_blocks: int = 0
 
 
 def redact(headers: dict[str, str]) -> dict[str, str]:
@@ -61,8 +76,63 @@ def redact(headers: dict[str, str]) -> dict[str, str]:
     return {k: (REDACTED if k.lower() in SECRET_HEADERS else v) for k, v in headers.items()}
 
 
+_recorder = Recorder(None)
+
+
+def set_recorder(recorder: Recorder) -> None:
+    """Liga o armazem. Chamado pelo `lifespan`, uma vez.
+
+    O padrao e um gravador sem engine, que e um no-op: quem importa este modulo
+    fora de um processo com banco -- um teste de unidade, um script -- nao
+    precisa saber que existe persistencia.
+    """
+    global _recorder
+    _recorder = recorder
+
+
+def recorder() -> Recorder:
+    return _recorder
+
+
 def log_request(entry: RequestLog) -> None:
+    """A linha de log, e o mesmo evento empilhado para o painel.
+
+    A ordem importa: o log sai primeiro. `record()` nao levanta e nao espera,
+    mas se um dia levantar, a linha de log ja foi.
+    """
     logger.info(json.dumps(asdict(entry), ensure_ascii=False))
+    _recorder.record(as_event(entry))
+
+
+def as_event(entry: RequestLog) -> dict:
+    """O registro do jeito que a tabela guarda.
+
+    `fell_back` e derivado em vez de guardado: houve fallback quando alguem
+    respondeu DEPOIS de alguma tentativa ter entrado no rastro.
+    """
+    return {
+        "request_id": entry.request_id,
+        "started_at": datetime.now(UTC),
+        "route": entry.route,
+        "dialect": entry.dialect,
+        "stream": entry.stream,
+        "requested_model": entry.requested_model,
+        "rule": entry.rule,
+        "matched": entry.matched,
+        "provider": entry.provider,
+        "candidate_model": entry.candidate,
+        "status": entry.status,
+        "error_type": entry.error_type,
+        "input_tokens": entry.input_tokens,
+        "output_tokens": entry.output_tokens,
+        "ttft_ms": entry.ttft_ms,
+        "duration_ms": entry.duration_ms,
+        "attempts": list(entry.attempts),
+        "fell_back": bool(entry.attempts) and entry.candidate is not None,
+        "tools_offered": list(entry.tools_offered),
+        "tools_called": list(entry.tools_called),
+        "thinking_blocks": entry.thinking_blocks,
+    }
 
 
 def configure_logging() -> None:

@@ -20,6 +20,8 @@ Streaming so existe em `/v1/messages` e `/v1/chat/completions`. `/v1/completions
 e `/v1/embeddings` respondem um unico documento JSON neste proxy.
 """
 
+import time
+import uuid
 from collections.abc import Mapping
 from json import JSONDecodeError
 
@@ -30,12 +32,14 @@ from pydantic import BaseModel, ValidationError
 
 from app.config.settings import Settings
 from app.core.dispatcher import (
+    ROUTES,
     ShuntRequest,
     dispatch,
     dispatch_stream,
     error_body,
     outbound_headers,
 )
+from app.core.observability import RequestLog, log_request
 from app.core.resolver import UnknownProviderError, resolve
 from app.core.tokens import estimate_input_tokens
 from app.schemas.anthropic import (
@@ -133,16 +137,66 @@ REQUEST_SCHEMAS: dict[tuple[str, str], type[BaseModel]] = {
 }
 
 
+def _record(
+    route: str,
+    dialect: str,
+    status: int,
+    started: float,
+    *,
+    requested_model: str = "",
+    rule: str = "none",
+    matched: str | None = None,
+    candidate: str | None = None,
+    provider: str | None = None,
+    error_type: str | None = None,
+    input_tokens: int = 0,
+) -> None:
+    """A linha de log e o evento do painel para o que o dispatcher nao ve.
+
+    Tres casos caem aqui: `count_tokens`, a listagem de modelos, e toda recusa
+    que acontece ANTES de existir candidato -- corpo malformado, modelo sem
+    provedor. Requisicao recusada e justamente a que se quer contar: sem ela o
+    painel mostraria um proxy que nunca erra.
+    """
+    log_request(
+        RequestLog(
+            request_id=uuid.uuid4().hex,
+            requested_model=requested_model,
+            rule=rule,
+            matched=matched,
+            candidate=candidate,
+            input_tokens=input_tokens,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            route=route,
+            dialect=dialect,
+            status=status,
+            error_type=error_type,
+            provider=provider,
+        )
+    )
+
+
 async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool):
+    started = time.monotonic()
+    route = ROUTES.get(endpoint, endpoint)
     try:
         body = _validated(await _json_object(request), REQUEST_SCHEMAS[(protocol, endpoint)])
     except BadBody as err:
+        _record(route, protocol, 400, started, error_type="invalid_request_error")
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
     shunt_request = ShuntRequest(protocol, body, dict(request.headers), endpoint=endpoint)
     try:
         resolve(body.get("model", ""), settings)
     except UnknownProviderError as err:
+        _record(
+            route,
+            protocol,
+            400,
+            started,
+            requested_model=body.get("model", ""),
+            error_type="invalid_request_error",
+        )
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     if streaming and body.get("stream"):
         return StreamingResponse(
@@ -187,14 +241,26 @@ async def count_tokens(request: Request):
     200, como um gateway que se declara Anthropic mas nao implementa a rota --
     a estimativa local e uma resposta util, e um erro nao seria.
     """
+    started = time.monotonic()
+    route = "/v1/messages/count_tokens"
     try:
         body = _validated(await _json_object(request), CountTokensRequest)
     except BadBody as err:
+        _record(route, "anthropic", 400, started, error_type="invalid_request_error")
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
     try:
-        candidate = resolve(body.get("model", ""), settings).chain[0]
+        resolution = resolve(body.get("model", ""), settings)
+        candidate = resolution.chain[0]
     except UnknownProviderError as err:
+        _record(
+            route,
+            "anthropic",
+            400,
+            started,
+            requested_model=body.get("model", ""),
+            error_type="invalid_request_error",
+        )
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     if candidate.protocol == "anthropic":
         shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
@@ -213,8 +279,34 @@ async def count_tokens(request: Request):
             pass
         else:
             if upstream.status_code == 200:
-                return upstream.json()
-    return {"input_tokens": estimate_input_tokens(body)}
+                counted = upstream.json()
+                _record(
+                    route,
+                    "anthropic",
+                    200,
+                    started,
+                    requested_model=body.get("model", ""),
+                    rule=resolution.rule,
+                    matched=resolution.matched,
+                    candidate=candidate.model,
+                    provider=candidate.provider,
+                    input_tokens=counted.get("input_tokens", 0),
+                )
+                return counted
+    estimated = {"input_tokens": estimate_input_tokens(body)}
+    # Estimativa local conta como resposta desta rota, e nao como falha: o
+    # candidato fica registrado como nulo porque nenhum provedor respondeu.
+    _record(
+        route,
+        "anthropic",
+        200,
+        started,
+        requested_model=body.get("model", ""),
+        rule=resolution.rule,
+        matched=resolution.matched,
+        input_tokens=estimated["input_tokens"],
+    )
+    return estimated
 
 
 def _model_entries(settings: Settings) -> list[dict]:
@@ -241,6 +333,7 @@ async def list_models(request: Request):
     dois formatos no mesmo documento. Cada parser le as suas e ignora as
     outras, o que e melhor do que apostar no dialeto errado.
     """
+    started = time.monotonic()
     entries = _model_entries(request.app.state.settings)
     # Uma instalacao sem nenhum modelo configurado: `entries[0]` estouraria, e
     # `first_id: null` e o que os dois parsers leem como "nao ha nada aqui".
@@ -248,6 +341,7 @@ async def list_models(request: Request):
     # e uniao de formatos e nao tem schema, entao calcula aqui.
     first = entries[0]["id"] if entries else None
     protocol = detect_protocol(request.headers)
+    _record("/v1/models", protocol, 200, started)
     if protocol == "anthropic":
         return AnthropicModelList.of(entries).model_dump()
     if protocol == "openai":

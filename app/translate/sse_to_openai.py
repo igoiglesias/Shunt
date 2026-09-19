@@ -65,6 +65,9 @@ class AnthropicStreamToOpenAI:
         self._next_tool_index = 0
         self._finished = False
         self._usage = {"input_tokens": 0, "output_tokens": 0}
+        # So para o painel: nao muda um byte do que sai para o cliente.
+        self._tools_called: list[str] = []
+        self._thinking_blocks = 0
 
     def _chunk(self, delta: dict, finish: str | None = None, usage: dict | None = None) -> dict:
         payload: dict[str, Any] = {
@@ -78,10 +81,20 @@ class AnthropicStreamToOpenAI:
             payload["usage"] = usage
         return payload
 
+    def tools_called(self) -> list[str]:
+        return list(self._tools_called)
+
+    def thinking_blocks(self) -> int:
+        return self._thinking_blocks
+
     def _content_block_start(self, data: dict) -> list[dict]:
         block = data.get("content_block") or {}
+        if block.get("type") == "thinking":
+            self._thinking_blocks += 1
         if block.get("type") != "tool_use":
             return []
+        if isinstance(block.get("name"), str):
+            self._tools_called.append(block["name"])
         index = self._next_tool_index
         self._next_tool_index += 1
         self._tool_index_of_block[data.get("index", 0)] = index

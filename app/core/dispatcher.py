@@ -91,6 +91,17 @@ OPENAI_ERROR_TYPES = {
 }
 
 
+# O path que o CLIENTE usou. `PATHS` responde o do provedor, que e outro
+# sempre que o proxy traduz -- uma requisicao Anthropic servida por um provedor
+# OpenAI entra em `/v1/messages` e sai em `/v1/chat/completions`.
+ROUTES: dict[str, str] = {
+    "messages": "/v1/messages",
+    "chat": "/v1/chat/completions",
+    "completions": "/v1/completions",
+    "embeddings": "/v1/embeddings",
+}
+
+
 def error_body(protocol: str, status: int, message: str) -> dict:
     """O envelope de erro segue o protocolo de QUEM PERGUNTOU, nunca o do
     provedor que falhou.
@@ -132,6 +143,7 @@ class ShuntResult:
     body: dict
     real_model: str | None = None
     trace: list[str] = field(default_factory=list)
+    real_provider: str | None = None
 
 
 def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
@@ -258,6 +270,54 @@ def _error_message(response: httpx.Response) -> str:
     return response.text
 
 
+def tools_offered(req: ShuntRequest) -> list[str]:
+    """Nomes das ferramentas que o CLIENTE ofereceu, nos dois dialetos."""
+    names = []
+    for tool in req.body.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name") or (tool.get("function") or {}).get("name")
+        if isinstance(name, str):
+            names.append(name)
+    return names
+
+
+def _tools_called(body: dict) -> tuple[list[str], int]:
+    """Ferramentas chamadas e blocos de raciocinio na resposta ja traduzida.
+
+    Le a forma de quem perguntou: o corpo aqui e o que o cliente vai receber,
+    entao Anthropic tem blocos em `content` e OpenAI tem `tool_calls` dentro de
+    cada `choice`.
+    """
+    called: list[str] = []
+    thinking = 0
+    for block in body.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and isinstance(block.get("name"), str):
+            called.append(block["name"])
+        elif block.get("type") == "thinking":
+            thinking += 1
+    for choice in body.get("choices") or []:
+        message = choice.get("message") if isinstance(choice, dict) else None
+        if not isinstance(message, dict):
+            continue
+        if message.get("reasoning_content"):
+            thinking += 1
+        for call in message.get("tool_calls") or []:
+            name = (call.get("function") or {}).get("name") if isinstance(call, dict) else None
+            if isinstance(name, str):
+                called.append(name)
+    return called, thinking
+
+
+def _error_type_of(body: dict) -> str | None:
+    error = body.get("error")
+    if isinstance(error, dict) and isinstance(error.get("type"), str):
+        return error["type"]
+    return None
+
+
 async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) -> ShuntResult:
     """Uma casca fina em volta de `_dispatch`, para que TODO caminho de saida
     registre a linha de log.
@@ -271,6 +331,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     resolution = resolve(req.body.get("model", ""), settings)
     result = await _dispatch(req, settings, pool, resolution)
     usage = result.body.get("usage") or {}
+    called, thinking = _tools_called(result.body)
     log_request(
         RequestLog(
             request_id=uuid.uuid4().hex,
@@ -284,6 +345,15 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             ttft_ms=None,  # so existe onde ha um primeiro evento a cronometrar
             duration_ms=int((time.monotonic() - started) * 1000),
             translated=result.real_model is not None,
+            route=ROUTES.get(req.endpoint, req.endpoint),
+            dialect=req.protocol,
+            stream=False,
+            status=result.status,
+            error_type=_error_type_of(result.body),
+            provider=result.real_provider,
+            tools_offered=tools_offered(req),
+            tools_called=called,
+            thinking_blocks=thinking,
         )
     )
     return result
@@ -366,7 +436,9 @@ async def _dispatch(
                     last_message = "upstream 2xx body is not a usable JSON object"
                     trace.append(f"{label}: unreadable body (attempt {attempt})")
                     break
-                return ShuntResult(response.status_code, data, candidate.model, trace)
+                return ShuntResult(
+                    response.status_code, data, candidate.model, trace, candidate.provider
+                )
             if response is not None:
                 last_status, last_message = response.status_code, _error_message(response)
             else:
@@ -552,6 +624,11 @@ class _Tally:
     trace: list[str] = field(default_factory=list)
     first_byte_at: float | None = None
     usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+    provider: str | None = None
+    tools_called: list[str] = field(default_factory=list)
+    thinking_blocks: int = 0
+    status: int = 200
+    error_type: str | None = None
 
 
 @dataclass
@@ -636,6 +713,22 @@ def _drain(
         if handled.failed is not None:
             state.failed = handled.failed
             return
+
+
+def _absorb(tally: _Tally, translator: object, candidate: Candidate) -> None:
+    """Passa para a linha de log o que so o tradutor viu.
+
+    Um repasse cru nao tem tradutor, entao ferramenta e raciocinio ficam
+    vazios: o proxy nao leu aqueles bytes e inventar contagem seria pior do
+    que nao ter.
+    """
+    tally.provider = candidate.provider
+    tools = getattr(translator, "tools_called", None)
+    thinking = getattr(translator, "thinking_blocks", None)
+    if callable(tools):
+        tally.tools_called = tools()
+    if callable(thinking):
+        tally.thinking_blocks = thinking()
 
 
 async def _stream_chain(
@@ -730,6 +823,7 @@ async def _stream_chain(
         if candidate.protocol == req.protocol:
             passthrough.happened = True
             tally.candidate = candidate.model
+            tally.provider = candidate.provider
             try:
                 async for raw in response.aiter_bytes():
                     yield raw
@@ -788,6 +882,7 @@ async def _stream_chain(
         if state.committed:
             tally.candidate = candidate.model
             tally.usage = translator.usage()
+            _absorb(tally, translator, candidate)
             return
         if state.failed is None and not state.started:
             state.failed = "stream ended before the first valid event"
@@ -800,8 +895,11 @@ async def _stream_chain(
         for chunk_bytes in _finish(req, translator):
             yield chunk_bytes
         tally.usage = translator.usage()
+        _absorb(tally, translator, candidate)
         return
 
+    tally.status = 502
+    tally.error_type = "api_error"
     yield _stream_error(req, f"{last_message} - tried: " + "; ".join(trace))
 
 
@@ -852,5 +950,14 @@ async def dispatch_stream(
                 ttft_ms=int((ttft - started) * 1000) if ttft is not None else None,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 translated=tally.candidate is not None,
+                route=ROUTES.get(req.endpoint, req.endpoint),
+                dialect=req.protocol,
+                stream=True,
+                status=tally.status,
+                error_type=tally.error_type,
+                provider=tally.provider,
+                tools_offered=tools_offered(req),
+                tools_called=tally.tools_called,
+                thinking_blocks=tally.thinking_blocks,
             )
         )
