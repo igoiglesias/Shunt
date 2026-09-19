@@ -447,7 +447,7 @@ def test_a_request_with_no_stored_conversation_says_how_to_turn_it_on(browser, s
     page.click('#rows tr[data-id="req-01"]')
     page.wait_for_selector("#detail .tabs")
     page.get_by_role("tab", name="Conversa").click()
-    page.wait_for_selector("#talk .empty")
+    page.wait_for_selector("#talk .empty:not(.loading)")
     said = page.inner_text("#talk")
     page.close()
     # O 404 desta rota e a propria resposta, e o navegador o registra no

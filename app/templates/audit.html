@@ -450,7 +450,7 @@ async function openDetail(requestId) {
   for (const row of document.querySelectorAll("#rows tr")) {
     row.setAttribute("aria-selected", String(row.dataset.id === requestId));
   }
-  el("detail").innerHTML = `<p class="empty">Carregando…</p>`;
+  el("detail").innerHTML = `<p class="empty loading" role="status">Carregando…</p>`;
   const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}`);
   const event = await response.json();
   if (!response.ok) {
@@ -472,7 +472,7 @@ async function loadTalk(requestId) {
     renderTalk(talkCache.get(requestId));
     return;
   }
-  target.innerHTML = `<p class="empty">Carregando…</p>`;
+  target.innerHTML = `<p class="empty loading" role="status">Carregando…</p>`;
   const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/body`);
   const body = await response.json();
   if (!response.ok) {
