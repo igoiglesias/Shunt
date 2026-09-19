@@ -22,7 +22,7 @@ AUDITORIA = r"""() => {
   const nome = (el) => {
     const id = el.id ? `#${el.id}` : '';
     const cls = (el.className && typeof el.className === 'string')
-      ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+      ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
     return `${el.tagName.toLowerCase()}${id}${cls}`;
   };
   const texto = (el) => (el.textContent || '').trim().slice(0, 40);
@@ -73,7 +73,11 @@ AUDITORIA = r"""() => {
 
   // 5. Contraste de texto.
   const lum = (cor) => {
-    const [r, g, b] = cor.match(/\\d+(\\.\\d+)?/g).slice(0, 3).map(Number).map(v => {
+    // Cor num formato inesperado -- `color-mix`, `oklch`, palavra-chave -- nao
+    // pode derrubar a varredura inteira.
+    const partes = (cor || '').match(/\d+(\.\d+)?/g);
+    if (!partes || partes.length < 3) return 0;
+    const [r, g, b] = partes.slice(0, 3).map(Number).map(v => {
       const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
     });
     return 0.2126 * r + 0.7152 * g + 0.0722 * b;

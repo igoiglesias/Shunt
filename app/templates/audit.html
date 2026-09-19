@@ -4,71 +4,24 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Shunt — requisições</title>
+<link rel="stylesheet" href="/shunt.css">
 <style>
-  :root {
-    --ground: #0e1620;
-    --panel: #16202c;
-    --panel-edge: #23303f;
-    --ink: #e6eaf0;
-    --muted: #8a99ac;
-    --dim: #7d8ea3;
-    --requests: #3987e5;
-    --tokens: #d95926;
-    --fallback: #9085e9;
-    --error: #d03b3b;
-    --error-text: #e05a5a;
-    --good: #0ca30c;
-    --warning: #fab219;
-    --num: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
-    --text: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--ground);
-    color: var(--ink);
-    font: 14px/1.5 var(--text);
-    -webkit-font-smoothing: antialiased;
-  }
+  
+  
+  
   a { color: var(--requests); }
 
-  header {
-    display: flex;
-    align-items: baseline;
-    gap: 8px 22px;
-    flex-wrap: wrap;
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--panel-edge);
-    background: linear-gradient(180deg, #16202c, #111a24);
-  }
-  header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.14em; }
-  header h1 span { color: var(--requests); }
-  header nav { display: flex; gap: 16px; font-size: 13px; }
-  header nav a {
-    color: var(--muted);
-    text-decoration: none;
-    padding: 4px 2px;
-    display: inline-block;
-  }
-  header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
-  #count { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--num); }
+  #count { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--mono); }
 
   form {
     display: grid;
     gap: 10px;
     padding: 12px 20px;
-    border-bottom: 1px solid var(--panel-edge);
+    border-bottom: 1px solid var(--edge);
   }
   .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
   .spacer { flex: 1 1 auto; }
-  input[type="search"], input[type="text"], input[type="number"], select {
-    font: inherit;
-    color: var(--ink);
-    background: var(--panel);
-    border: 1px solid var(--panel-edge);
-    border-radius: 3px;
-    padding: 5px 9px;
-  }
+
   input[type="search"] { flex: 1 1 320px; min-width: 200px; }
   input[type="datetime-local"] { color-scheme: dark; font-size: 12.5px; }
   #range { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -77,54 +30,33 @@
   #range[hidden] { display: none; }
   #range input { min-width: 0; flex: 1 1 150px; }
   input[type="number"] { width: 10ch; }
-  input:focus-visible, select:focus-visible, button:focus-visible {
-    outline: 2px solid var(--tokens);
-    outline-offset: 1px;
-  }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
-  .chip {
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--panel-edge);
-    border-radius: 999px;
-    padding: 3px 12px;
-    cursor: pointer;
-  }
-  .chip[aria-pressed="true"] { color: var(--ground); background: var(--requests); border-color: var(--requests); }
-  .chip.bad[aria-pressed="true"] { background: var(--error); border-color: var(--error); }
-  .chip.slow[aria-pressed="true"] { background: var(--tokens); border-color: var(--tokens); }
-  .chip.chain[aria-pressed="true"] { background: var(--fallback); border-color: var(--fallback); }
-  .ghost {
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--panel-edge);
-    border-radius: 3px;
-    padding: 4px 11px;
-    cursor: pointer;
-    text-decoration: none;
-  }
 
-  main { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 0; }
-  .list { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 620px; }
-  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #1d2835; white-space: nowrap; }
-  th { color: var(--dim); font-weight: 500; font-size: 12px; position: sticky; top: 0; background: var(--ground); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+
+  /* A tabela ocupa a tela inteira enquanto ninguem escolheu nada: um painel
+     de detalhe vazio roubava um terco da largura para dizer "escolha algo". */
+  main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; }
+  main.with-detail { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); }
+  aside[hidden] { display: none; }
+  .list { overflow-x: auto; padding: 4px 20px 0 20px; scrollbar-gutter: stable; }
+  /* Sem teto, a tabela em tela cheia estica e abre um vao morto entre o nome
+     do modelo e os numeros. O teto mantem a linha legivel de ponta a ponta. */
+  .list table { max-width: 1120px; }
+  main.with-detail .list { padding-right: 0; }
+  main.with-detail .list table { max-width: none; }
+
   th[role="button"] { cursor: pointer; }
   th[aria-sort] { color: var(--ink); }
   th[aria-sort]::after { content: " ↓"; color: var(--requests); }
-  td.n, th.n { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
+
   tbody tr { cursor: pointer; }
-  tbody tr:hover { background: #1a2532; }
-  tbody tr[aria-selected="true"] { background: #1d2a39; box-shadow: inset 3px 0 0 var(--requests); }
-  .when { font-family: var(--num); color: var(--dim); }
-  .status { font-family: var(--num); }
+  tbody tr:hover { background: var(--panel-2); }
+  tbody tr[aria-selected="true"] { background: #2b2924; box-shadow: inset 3px 0 0 var(--requests); }
+  .when { font-family: var(--mono); color: var(--dim); }
+  .status { font-family: var(--mono); }
   .status.bad { color: var(--error-text); }
   .tag { color: var(--muted); font-size: 12px; }
-  .tag.fell { color: var(--fallback); }
+  .tag.fell { color: var(--fallback-text); }
   .tag.bad { color: var(--error-text); }
   .mark {
     display: inline-block;
@@ -133,37 +65,51 @@
     border-radius: 3px;
     font-size: 11px;
     color: var(--muted);
-    background: #1d2835;
+    background: #262420;
   }
-  .mark.fell { color: var(--fallback); }
-  .mark.tool { color: var(--ink); background: #1f2b3a; }
+  .mark.fell { color: var(--fallback-text); }
+  .mark.tool { color: var(--ink); background: #2f2b23; }
   .signals .mark:first-child { margin-left: 0; }
   .signals .none { color: var(--dim); }
   /* Linha que falhou se anuncia pela borda, e não só pelo número no fim. */
   tbody tr.failed { box-shadow: inset 3px 0 0 var(--error); }
-  tbody tr.failed[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--error), inset 0 0 0 1px #2a3a4c; }
+  tbody tr.failed[aria-selected="true"] { box-shadow: inset 3px 0 0 var(--error), inset 0 0 0 1px var(--edge-strong); }
 
   aside {
-    border-left: 1px solid var(--panel-edge);
-    padding: 16px 18px;
+    border-left: 1px solid var(--edge);
+    padding: 18px 20px 20px;
     background: var(--panel);
     position: sticky;
     top: 0;
     align-self: start;
     max-height: 100vh;
     overflow-y: auto;
+    scrollbar-gutter: stable;
   }
-  aside h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
-  aside .id { font-family: var(--num); font-size: 12px; color: var(--muted); word-break: break-all; }
+
+  .detail-head {
+    display: flex;
+    gap: 12px;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  aside h2 {
+    margin: 0 0 5px;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+  aside .id { font-family: var(--mono); font-size: 12px; color: var(--muted); word-break: break-all; }
   aside dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 16px 0; font-size: 13px; }
   aside dt { color: var(--dim); }
-  aside dd { margin: 0; font-family: var(--num); font-variant-numeric: tabular-nums; }
+  aside dd { margin: 0; font-family: var(--mono); font-variant-numeric: tabular-nums; }
   aside h3 { margin: 18px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
   .chain { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
   .chain li {
     position: relative;
     padding: 4px 0 4px 18px;
-    border-left: 1px solid var(--panel-edge);
+    border-left: 1px solid var(--edge);
     margin-left: 4px;
   }
   .chain li::before {
@@ -182,7 +128,7 @@
   .pills { display: flex; flex-wrap: wrap; gap: 5px; }
   .pill {
     font-size: 11.5px;
-    border: 1px solid var(--panel-edge);
+    border: 1px solid var(--edge);
     border-radius: 999px;
     padding: 1px 9px;
     color: var(--muted);
@@ -191,14 +137,13 @@
   .rest { margin-top: 8px; font-size: 12px; color: var(--muted); }
   .rest summary { cursor: pointer; color: var(--dim); }
   .rest .pills { margin-top: 8px; max-height: 180px; overflow: auto; }
-  .empty { color: var(--dim); padding: 18px 20px; }
 
   /* A conversa: cada turno é um bloco, e o papel de quem falou manda na cor
      da margem. Ler um turno agêntico é seguir quem disse o quê, e não decorar
      uma legenda. */
   .talk { display: grid; gap: 10px; }
   .turn {
-    border-left: 3px solid var(--panel-edge);
+    border-left: 3px solid var(--edge);
     padding: 2px 0 2px 12px;
   }
   .turn.user { border-color: var(--requests); }
@@ -214,7 +159,7 @@
   }
   .turn pre {
     margin: 3px 0 0;
-    font-family: var(--num);
+    font-family: var(--mono);
     font-size: 12.5px;
     line-height: 1.55;
     white-space: pre-wrap;
@@ -232,7 +177,7 @@
     padding: 2px 0;
     cursor: pointer;
   }
-  .talk mark { background: rgba(232, 163, 61, 0.35); color: inherit; }
+  .talk mark { background: rgba(196, 122, 28, 0.40); color: inherit; }
   .body-bar {
     display: flex;
     gap: 8px;
@@ -248,12 +193,17 @@
     font-size: 12.5px;
     color: var(--muted);
     background: transparent;
-    border: 1px solid var(--panel-edge);
+    border: 1px solid var(--edge);
     border-radius: 3px;
     padding: 3px 12px;
     cursor: pointer;
   }
-  .tabs button[aria-selected="true"] { color: var(--ground); background: var(--requests); border-color: var(--requests); }
+  .tabs button[aria-selected="true"] {
+    color: var(--ground);
+    background: var(--ink);
+    border-color: var(--ink);
+    font-weight: 600;
+  }
   footer {
     display: flex;
     gap: 12px;
@@ -264,14 +214,13 @@
     font-size: 12.5px;
   }
 
-
   /* Entre 900 e 1280 a tabela divide a tela com o detalhe e não cabe inteira.
      A rota é quase sempre a mesma e cede o lugar para duração e status, que é
      o que alguém está procurando. */
   @media (max-width: 1280px) and (min-width: 721px) {
     th.route, td.route { display: none; }
     .scroll table, table { min-width: 0; }
-    th, td { padding: 6px 8px; }
+  
   }
 
   @media (max-width: 900px) {
@@ -280,7 +229,7 @@
     main { grid-template-columns: 1fr; }
     aside {
       border-left: 0;
-      border-top: 1px solid var(--panel-edge);
+      border-top: 1px solid var(--edge);
       position: static;
       max-height: none;
     }
@@ -299,7 +248,7 @@
       grid-template-columns: auto 1fr;
       gap: 2px 10px;
       padding: 10px 14px;
-      border-bottom: 1px solid #1d2835;
+      border-bottom: 1px solid var(--edge);
     }
     tbody td { border: 0; padding: 0; white-space: normal; }
     tbody td::before {
@@ -390,9 +339,7 @@
     </table>
     <p class="empty" id="empty" hidden>Nenhuma requisição com esses filtros.</p>
   </div>
-  <aside id="detail" aria-live="polite">
-    <p class="empty">Escolha uma requisição para ver a cadeia inteira.</p>
-  </aside>
+  <aside id="detail" aria-live="polite" hidden></aside>
 </main>
 
 <footer>
@@ -583,7 +530,9 @@ function rowOf(event) {
     <td data-label="Pedido">${esc(event.requested_model || "—")}</td>
     <td data-label="Respondeu">${bad && event.error_type
       ? `<span class="tag bad" data-label="Respondeu">${esc(event.error_type)}</span>`
-      : esc(event.candidate_model || servedLabel(event))}</td>
+      : event.candidate_model
+        ? esc(event.candidate_model)
+        : `<span class="tag">${esc(servedLabel(event))}</span>`}</td>
     <td class="signals" data-label="Sinais">${marks || '<span class="none">—</span>'}</td>
     <td class="n" data-label="Tokens">${compact(tokens)}</td>
     <td class="n" data-label="Duração">${ms(event.duration_ms)}</td>
@@ -591,8 +540,22 @@ function rowOf(event) {
   </tr>`;
 }
 
+function showDetail() {
+  el("detail").hidden = false;
+  document.querySelector("main").classList.add("with-detail");
+}
+
+function closeDetail() {
+  selected = null;
+  el("detail").hidden = true;
+  el("detail").innerHTML = "";
+  document.querySelector("main").classList.remove("with-detail");
+  for (const row of document.querySelectorAll("#rows tr")) row.setAttribute("aria-selected", "false");
+}
+
 async function openDetail(requestId) {
   selected = requestId;
+  showDetail();
   for (const row of document.querySelectorAll("#rows tr")) {
     row.setAttribute("aria-selected", String(row.dataset.id === requestId));
   }
@@ -756,7 +719,15 @@ function wireTabs(requestId) {
   }
 }
 
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && selected) closeDetail();
+});
+
 el("detail").addEventListener("click", (event) => {
+  if (event.target.closest("#close-detail")) {
+    closeDetail();
+    return;
+  }
   const button = event.target.closest(".more");
   if (!button) return;
   const turn = button.closest(".turn");
@@ -789,7 +760,10 @@ function detailOf(event) {
        </details>`
     : "";
   return `
-    <h2>${esc(event.candidate_model || servedLabel(event))}</h2>
+    <div class="detail-head">
+      <h2>${esc(event.candidate_model || servedLabel(event))}</h2>
+      <button type="button" class="ghost" id="close-detail">Fechar</button>
+    </div>
     <p class="id">${esc(event.request_id)}</p>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="summary" aria-selected="true">Resumo</button>

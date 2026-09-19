@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from fastapi.responses import HTMLResponse
 
 from app.config.settings import load_settings
@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
 TEMPLATES = Path(__file__).parent / "templates"
 DASHBOARD = TEMPLATES / "dashboard.html"
 AUDIT = TEMPLATES / "audit.html"
+ESTILO = TEMPLATES / "shunt.css"
 
 # Prazo para o banco responder no boot. Medido: com a URL apontada para uma
 # porta morta, `create_all` nao levanta -- ele PENDURA, e o proxy nunca chega a
@@ -107,6 +108,19 @@ async def dashboard() -> HTMLResponse:
     checagem de vida; ela mudou para `/health`, e o README registra a troca.
     """
     return HTMLResponse(DASHBOARD.read_text(encoding="utf-8"), headers=NO_STORE)
+
+
+@app.get("/shunt.css")
+async def estilo() -> Response:
+    """A identidade visual das duas telas, num arquivo só.
+
+    Servida com `no-store` como as paginas: ela muda junto com elas, e um CSS
+    velho em cache deixaria a tela nova com a cara antiga -- o mesmo defeito
+    que ja aconteceu com o HTML.
+    """
+    return Response(
+        ESTILO.read_text(encoding="utf-8"), media_type="text/css", headers=NO_STORE
+    )
 
 
 @app.get("/requests", response_class=HTMLResponse)

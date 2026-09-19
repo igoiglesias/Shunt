@@ -130,7 +130,7 @@ def open_panel(browser, base, width, height):
 def test_the_panel_draws_without_a_single_console_error(browser, server):
     page, problems = open_panel(browser, server, 1440, 1000)
     assert problems == []
-    assert page.locator("#flow .routes li").count() > 0
+    assert page.locator("#flow .ribbon").count() > 0
     # A serie desenha linha com tres ou mais horas e barras com menos; as duas
     # formas contam como desenhada.
     assert page.locator("#series path").count() + page.locator("#series rect").count() > 0
@@ -164,7 +164,7 @@ def test_the_panel_never_scrolls_sideways_on_a_phone(browser, server):
         """() => ({
             scrollWidth: document.documentElement.scrollWidth,
             innerWidth: window.innerWidth,
-            rotaLegivel: document.querySelector('#flow .routes .asked')?.getBoundingClientRect(),
+            rotaLegivel: document.querySelector('#flow .flow-label')?.getBoundingClientRect(),
         })"""
     )
     page.close()
@@ -260,9 +260,9 @@ def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, serve
     page, _ = open_panel(browser, server, 1400, 900)
     httpx.get(f"{server}/v1/models", timeout=10)
     page.reload(wait_until="networkidle")
-    page.wait_for_selector("#flow .routes .asked")
+    page.wait_for_selector("#flow .flow-label")
     labels = page.evaluate(
-        "() => [...document.querySelectorAll('#flow .routes .asked')].map(t => t.textContent.trim())"
+        "() => [...document.querySelectorAll('#flow .flow-label')].map(t => t.textContent.trim())"
     )
     page.close()
     assert labels
@@ -421,9 +421,14 @@ def test_the_summary_is_grouped_instead_of_a_row_of_loose_numbers(browser, serve
     assert problems == []
     assert grupos == ["Volume", "Latência", "Saúde"]
 
-def test_the_series_is_two_plots_and_never_two_scales_in_one(browser, server):
-    """Duas escalas num plot so inventam uma correlacao que o dado nao tem --
-    e o erro mais comum de painel. Dois plots, um eixo cada, tempo em comum."""
+def test_the_series_is_one_plot_with_both_axes_named_by_colour(browser, server):
+    """Um grafico so, pedido pelo usuario depois de ver a versao empilhada.
+
+    Duas escalas no mesmo plot sugerem uma correlacao que o dado nao prova, e
+    o que segura a leitura e o rotulo de cada eixo pintado na cor da sua
+    serie, mais o balao que entrega os dois numeros exatos. Este teste guarda
+    essas tres coisas.
+    """
     page, problems = open_panel(browser, server, 1500, 1000)
     medido = page.evaluate(
         """() => {
@@ -441,6 +446,12 @@ def test_the_series_is_two_plots_and_never_two_scales_in_one(browser, server):
             return {
                 colisoes,
                 plots: document.querySelectorAll('#series svg').length,
+                eixoEsquerdo: [...document.querySelectorAll('#series text.axis')]
+                    .some(t => t.getAttribute('fill') === 'var(--requests)'),
+                eixoDireito: [...document.querySelectorAll('#series text.axis')]
+                    .some(t => t.getAttribute('fill') === 'var(--tokens)'),
+                faixasDeCursor: document.querySelectorAll('#series .hit').length,
+                balao: Boolean(document.querySelector('#series .tip')),
                 barras: document.querySelectorAll('#series rect').length,
                 linhas: document.querySelectorAll('#series path').length,
                 linhasDeGrade: document.querySelectorAll('#series line').length,
@@ -452,36 +463,45 @@ def test_the_series_is_two_plots_and_never_two_scales_in_one(browser, server):
     page.close()
     assert problems == []
     assert medido["colisoes"] == 0, f"{medido['colisoes']} rotulos sobrepostos no grafico"
-    assert medido["plots"] == 2, "as duas grandezas voltaram para o mesmo plot"
+    assert medido["plots"] == 1, "o grafico unificado virou dois plots de novo"
+    assert medido["eixoEsquerdo"], "o eixo das requisicoes perdeu a cor da sua serie"
+    assert medido["eixoDireito"], "o eixo dos tokens perdeu a cor da sua serie"
+    assert medido["faixasDeCursor"] > 0, "sem faixa de captura, nao ha balao por balde"
+    assert medido["balao"], "o balao que da os dois numeros exatos sumiu"
     assert medido["barras"] > 0
     assert medido["linhas"] >= 1
-    assert medido["linhasDeGrade"] >= 4, "faltou a grade que da escala aos dois plots"
+    assert medido["linhasDeGrade"] >= 3, "faltou a grade que da escala ao plot"
     assert medido["tracejado"] is False, "grade tracejada le como limite, e aqui e so escala"
 
 
 def test_the_flow_links_each_request_to_what_answered_it(browser, server):
-    """Uma linha por rota: quem pediu, quem atendeu, quanto.
+    """Uma fita por par: quem pediu de um lado, quem respondeu do outro.
 
-    O diagrama de fitas saiu: tres modelos de cada lado nao justificavam
-    trezentos pixels para dizer o que cabe numa lista.
+    A lista que estava aqui dizia os mesmos numeros, mas nao mostrava um
+    pedido se dividindo entre dois provedores -- o usuario pediu o diagrama de
+    volta. Este teste guarda o par de cada fita e o destaque do cursor.
     """
     page, problems = open_panel(browser, server, 1500, 1000)
     medido = page.evaluate(
-        """() => [...document.querySelectorAll('#flow .routes li')].map(li => ({
-            pedido: li.querySelector('.asked').textContent,
-            servido: li.querySelector('.served').textContent,
-            req: li.querySelector('.count').textContent,
-            barra: li.querySelector('.route-bar').style.width,
+        """() => [...document.querySelectorAll('#flow .ribbon')].map(fita => ({
+            pedido: fita.dataset.pedido,
+            servido: fita.dataset.servido,
+            titulo: fita.querySelector('title').textContent,
         }))"""
     )
+    # Passar o cursor por um no acende so as fitas que passam por ele.
+    page.eval_on_selector("#flow .flow-node", "n => n.dispatchEvent(new MouseEvent('mouseenter'))")
+    acesas = page.locator("#flow .ribbon.on").count()
+    apagadas = page.locator("#flow .ribbon.off").count()
     page.close()
     assert problems == []
-    assert medido, "nenhuma rota na lista"
-    assert all(linha["pedido"] and linha["servido"] for linha in medido)
-    assert all(linha["barra"].endswith("%") for linha in medido)
-    # A lista vem da maior para a menor: a rota dominante é a primeira leitura.
-    partes = [float(linha["barra"].rstrip("%")) for linha in medido]
-    assert partes == sorted(partes, reverse=True)
+    assert medido, "nenhuma fita no diagrama"
+    assert all(fita["pedido"] and fita["servido"] for fita in medido)
+    assert all("req" in fita["titulo"] for fita in medido)
+    assert acesas >= 1, "o no nao acendeu nenhuma fita"
+    # So ha o que apagar quando o no nao e dono de todas as fitas da janela.
+    if acesas < len(medido):
+        assert apagadas >= 1, "o destaque nao apagou as outras fitas"
 
 
 def test_an_empty_window_offers_the_way_out(browser, server):

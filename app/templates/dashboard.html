@@ -4,81 +4,36 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Shunt</title>
+<link rel="stylesheet" href="/shunt.css">
 <style>
-  :root {
-    --ground: #0e1620;
-    --panel: #16202c;
-    --panel-edge: #23303f;
-    --ink: #e6eaf0;
-    --muted: #8a99ac;
-    --dim: #7d8ea3;
-    --requests: #3987e5;
-    --tokens: #d95926;
-    --fallback: #9085e9;
-    --error: #d03b3b;
-    --error-text: #e05a5a;
-    --good: #0ca30c;
-    --warning: #fab219;
-    --num: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
-    --text: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--ground);
-    color: var(--ink);
-    font: 14px/1.5 var(--text);
-    -webkit-font-smoothing: antialiased;
-  }
-  .num { font-family: var(--num); font-variant-numeric: tabular-nums; }
+  
+  
+  
 
   /* Barra de estado: uma linha, como o mostrador de um instrumento. */
-  header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 8px 22px;
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--panel-edge);
-    background: linear-gradient(180deg, #16202c, #111a24);
-  }
-  header h1 {
-    margin: 0;
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: 0.14em;
-  }
-  header h1 span { color: var(--requests); }
-  header nav { display: flex; gap: 16px; font-size: 13px; }
-  header nav a {
-    color: var(--muted);
-    text-decoration: none;
-    padding: 4px 2px;
-    display: inline-block;
-  }
-  header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
+
   .state { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 12px; }
   .state div:first-child { color: var(--muted); }
   .state b { color: var(--ink); font-weight: 500; }
-  .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
-  .lamp.on { background: var(--requests); box-shadow: 0 0 8px var(--requests); }
-  .lamp.off { background: var(--dim); }
-  .lamp.warn { background: var(--tokens); box-shadow: 0 0 8px var(--tokens); }
-  .windows { margin-left: auto; display: flex; gap: 2px; }
-  .windows button {
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    padding: 3px 10px;
-    cursor: pointer;
-  }
-  .windows button[aria-pressed="true"] { color: var(--ground); background: var(--requests); }
-  .windows button:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
 
-  main { padding: 20px; display: grid; gap: 20px; }
+  .windows { margin-left: auto; display: flex; gap: 2px; }
+
+  main { padding: 12px 20px 20px; display: grid; gap: 20px; }
+
+  /* O mostrador não é um bloco a mais: ele encosta no cabeçalho, não tem
+     moldura, e o trilho embaixo marca onde a leitura de estado termina e a
+     análise começa. */
+  .readout {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 22px 0 20px;
+    margin: 0 -20px;
+    padding-left: 20px;
+    padding-right: 20px;
+    border-bottom: 1px solid var(--edge);
+    box-shadow: inset 0 -4px 0 -3px var(--edge-strong);
+  }
   /* Uma linha por rota: a barra é o fundo da linha, e não um enfeite ao lado.
      O nome fica legível por cima dela porque a barra é de baixa intensidade. */
   .routes { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
@@ -95,7 +50,7 @@
     position: absolute;
     inset: 0 auto 0 0;
     min-width: 6px;
-    background: rgba(57, 135, 229, 0.16);
+    background: rgba(74, 144, 217, 0.16);
     border-radius: 3px;
   }
   .routes .asked,
@@ -107,30 +62,36 @@
   .routes .arrow { color: var(--dim); }
   .routes .served { color: var(--muted); }
   .routes .served.swapped { color: var(--ink); }
-  .routes .count { font-family: var(--num); text-align: right; color: var(--ink); }
+  .routes .count { font-family: var(--mono); text-align: right; color: var(--ink); }
   .routes .count small { color: var(--muted); }
-  .routes .share { font-family: var(--num); text-align: right; color: var(--muted); }
+  .routes .share { font-family: var(--mono); text-align: right; color: var(--muted); }
 
+  /* Os dois blocos terminam na mesma linha: `start` deixava o da esquerda
+     parar 70px acima do outro, e a faixa lia como recorte torto. A fita tem
+     teto proprio e rolagem interna, entao esticar nao a deixa crescer. */
+  /* ALTURA FIXA para os dois blocos da faixa, e nao `stretch` sobre conteudo
+     de tamanhos diferentes: o diagrama desenha o que couber e a fita rola por
+     dentro. Foi assim que as duas secoes passaram a terminar na mesma linha
+     sem que uma delas ficasse com um terco de espaco morto. */
   .flow-band {
     display: grid;
     grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
     gap: 20px;
-    align-items: start;
   }
-  section {
-    background: var(--panel);
-    border: 1px solid var(--panel-edge);
-    border-radius: 4px;
-    padding: 14px 16px 16px;
-    min-width: 0;
+  .flow-band > section {
+    height: 380px;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
-  h2 {
-    margin: 0 0 12px;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: var(--muted);
+  #flow {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }
-  h2 em { font-style: normal; color: var(--dim); font-weight: 400; }
+  #flow svg { max-height: 100%; }
 
   /* As três colunas dividem a faixa na proporção do que carregam: volume tem
      três métricas, latência e saúde têm duas. Larguras iguais deixariam um
@@ -144,7 +105,7 @@
   .group { padding: 0 30px; min-width: 0; }
   .group:first-child { padding-left: 0; }
   .group:last-child { padding-right: 0; }
-  .group + .group { border-left: 1px solid var(--panel-edge); }
+  .group + .group { border-left: 1px solid var(--edge); }
   .group h3 {
     margin: 0 0 12px;
     font-size: 12px;
@@ -184,26 +145,23 @@
   .figure .value { color: var(--ink); }
   .figure.errors .value { color: var(--error); }
 
-  .scroll { overflow-x: auto; }
   .scroll table { min-width: 380px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 5px 8px 5px 0; text-align: left; border-bottom: 1px solid #1d2835; }
-  th { color: var(--dim); font-weight: 500; font-size: 12px; }
-  td.n, th.n { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
-  tbody tr:last-child td { border-bottom: 0; }
+
   .bar { position: relative; padding-left: 9px; }
   .bar span {
     position: absolute;
     inset: 2px auto 2px 0;
-    background: rgba(91, 200, 196, 0.14);
+    background: rgba(74, 144, 217, 0.14);
     border-left: 3px solid var(--requests);
     border-radius: 0 2px 2px 0;
     z-index: 0;
   }
   .bar b { position: relative; font-weight: 400; }
 
-  .tape { display: flex; flex-direction: column; min-height: 0; max-height: 330px; }
-  .tape ul { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  .tape { display: flex; flex-direction: column; min-height: 0; }
+  /* `scrollbar-gutter: stable` reserva a calha: sem ela, a barra cobria a
+     duracao no fim de cada linha da fita. */
+  .tape ul { flex: 1 1 auto; overflow-y: auto; min-height: 0; scrollbar-gutter: stable; }
   h2 .toggle {
     float: right;
     font: inherit;
@@ -211,50 +169,60 @@
     min-height: 24px;
     color: var(--muted);
     background: transparent;
-    border: 1px solid var(--panel-edge);
+    border: 1px solid var(--edge);
     border-radius: 3px;
     padding: 1px 8px;
     cursor: pointer;
   }
-  h2 .toggle[aria-pressed="true"] { color: var(--ground); background: var(--error); border-color: var(--error); }
+  h2 .toggle[aria-pressed="true"] {
+    color: #fff;
+    background: var(--error);
+    border-color: var(--error);
+  }
   h2 .toggle:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
-  .tape li.bad { background: rgba(228, 87, 76, 0.08); }
+  .tape li.bad { background: rgba(213, 70, 58, 0.10); }
   .tape li {
     display: grid;
     grid-template-columns: 9ch minmax(0, 1fr) 13ch;
     gap: 14px;
     padding: 5px 0;
-    border-bottom: 1px solid #1d2835;
+    border-bottom: 1px solid var(--edge);
     font-size: 12.5px;
     align-items: baseline;
   }
   .tape ul { list-style: none; margin: 0; padding: 0; }
   .tape li[hidden] { display: none; }
-  .tape .when { color: var(--dim); font-family: var(--num); }
+  .tape .when { color: var(--dim); font-family: var(--mono); }
   .tape .what b { font-weight: 500; margin-right: 6px; }
   .tape .what { min-width: 0; overflow-wrap: anywhere; }
   .tape .what small { color: var(--muted); }
   .tape li.bad .what small,
   .tape li.fell .what small { color: var(--muted); }
-  .tape .cost { font-family: var(--num); color: var(--muted); text-align: right; }
+  .tape .cost { font-family: var(--mono); color: var(--muted); text-align: right; }
   .tape li.bad .what b { color: var(--error); }
   .tape li.fell .what b { color: var(--fallback); }
   .tape li.fresh { animation: land 900ms ease-out; }
   @keyframes land {
-    from { background: rgba(91, 200, 196, 0.14); }
+    from { background: rgba(224, 160, 33, 0.16); }
     to { background: transparent; }
   }
   @media (prefers-reduced-motion: reduce) {
     .tape li.fresh { animation: none; }
   }
 
+  /* Duas faixas: tres blocos em cima, dois embaixo. Numa grade unica de cinco,
+     a quinta celula ficava vazia e a faixa de baixo parecia inacabada. */
+  .grid + .grid { margin-top: 20px; }
+
+  /* `stretch`, e nao `start`: blocos lado a lado com alturas diferentes
+     deixavam a faixa com recorte torto. */
   .grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
     gap: 20px;
-    align-items: start;
+    align-items: stretch;
   }
-  .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
+
   /* Janela sem tráfego: uma faixa que explica e oferece a saída vale mais do
      que sete painéis repetindo "nada aqui" em alturas de tela cheia. */
   #nothing {
@@ -265,24 +233,27 @@
   }
   #nothing[hidden] { display: none; }
   .nothing-said { margin: 0; color: var(--muted); }
-  .ghost {
-    font: inherit;
-    font-size: 12.5px;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--panel-edge);
-    border-radius: 3px;
-    padding: 4px 11px;
-    cursor: pointer;
-  }
+
   .ghost:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
   main.idle .flow-band,
   main.idle > section:not(#nothing),
   main.idle .grid { display: none; }
   svg { display: block; width: 100%; height: auto; }
-  .axis { fill: var(--dim); font-size: 10px; font-family: var(--num); }
+
   .axis.serie { font-size: 11px; font-family: var(--text); }
-  .legend { display: flex; gap: 16px; margin: 4px 0 0; font-size: 11.5px; color: var(--muted); }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 16px;
+    margin: 4px 0 0;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  /* Uma chave por linha em tela estreita: quebradas no meio, "balde / com
+     erro" lia como duas chaves diferentes. */
+  @media (max-width: 560px) {
+    .legend { flex-direction: column; }
+  }
   .key::before {
     content: "";
     display: inline-block;
@@ -292,9 +263,47 @@
     margin-right: 6px;
   }
   .key.err::before { background: var(--error); }
-  #series svg + svg { margin-top: 4px; }
+  .key.req::before { background: var(--requests); }
+  .key.tok::before { background: var(--tokens); }
+
+  .plotwrap { position: relative; }
+  .bar-mark { transition: fill 90ms linear; }
+  .bar-mark.on { fill: var(--ink); }
+  .tip {
+    position: absolute;
+    pointer-events: none;
+    display: grid;
+    gap: 2px;
+    padding: 7px 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--edge-strong);
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: var(--mono);
+    white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    z-index: 3;
+  }
+  .tip[hidden] { display: none; }
+  .tip b { font-weight: 600; letter-spacing: 0.04em; }
+  .tip .sw {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    margin-right: 7px;
+  }
+  .tip .sw.req { background: var(--requests); }
+  .tip .sw.tok { background: var(--tokens); }
+  .tip .sw.err { background: var(--error); }
+  .tip .bad { color: var(--error-text); }
+  .ribbon { opacity: 0.16; transition: opacity 110ms linear; }
+  .ribbon.on { opacity: 0.5; }
+  .ribbon.off { opacity: 0.05; }
+  .flow-node { cursor: default; }
+  .key.fell::before { background: var(--fallback); }
   .flow-label { fill: var(--ink); font-size: 12px; }
-  .flow-sub { fill: var(--muted); font-size: 10.5px; font-family: var(--num); }
+  .flow-sub { fill: var(--muted); font-size: 10.5px; font-family: var(--mono); }
   footer {
     padding: 0 20px 26px;
     color: var(--dim);
@@ -304,17 +313,9 @@
     gap: 14px;
     flex-wrap: wrap;
   }
-  .danger {
-    font: inherit;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--panel-edge);
-    border-radius: 3px;
-    padding: 3px 10px;
-    cursor: pointer;
-  }
+
   .danger[data-armed="true"] { color: var(--ground); background: var(--error); border-color: var(--error); }
-  .danger:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
+
   .danger[disabled] { opacity: 0.5; cursor: default; }
   #clear-said { color: var(--muted); }
 
@@ -323,48 +324,30 @@
     .group { padding: 0; }
     .group + .group {
       border-left: 0;
-      border-top: 1px solid var(--panel-edge);
+      border-top: 1px solid var(--edge);
       padding-top: 16px;
     }
-    /* Uma linha por rota: a barra é o fundo da linha, e não um enfeite ao lado.
-     O nome fica legível por cima dela porque a barra é de baixa intensidade. */
-  .routes { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
-  .routes li {
-    position: relative;
-    display: grid;
-    grid-template-columns: auto auto auto 1fr 5.5em 3em;
-    align-items: baseline;
-    gap: 0 10px;
-    padding: 7px 10px;
-    font-size: 13px;
-  }
-  .route-bar {
-    position: absolute;
-    inset: 0 auto 0 0;
-    min-width: 6px;
-    background: rgba(57, 135, 229, 0.16);
-    border-radius: 3px;
-  }
-  .routes .asked,
-  .routes .served,
-  .routes .arrow,
-  .routes .count,
-  .routes .share { position: relative; }
-  .routes .asked { color: var(--ink); }
-  .routes .arrow { color: var(--dim); }
-  .routes .served { color: var(--muted); }
-  .routes .served.swapped { color: var(--ink); }
-  .routes .count { font-family: var(--num); text-align: right; color: var(--ink); }
-  .routes .count small { color: var(--muted); }
-  .routes .share { font-family: var(--num); text-align: right; color: var(--muted); }
-
-  .flow-band { grid-template-columns: 1fr; }
+    .flow-band { grid-template-columns: 1fr; }
+    .flow-band > section { height: auto; }
+    .tape { max-height: 420px; }
+    /* Seis colunas nao cabem em 390px: o nome do modelo virava quatro linhas
+       de duas silabas. Pedido em cima, atendido embaixo, numeros a direita. */
+    .routes li {
+      grid-template-columns: minmax(0, 1fr) 5.5em 3em;
+      align-items: center;
+      row-gap: 2px;
+    }
+    .routes .asked { grid-column: 1; grid-row: 1; }
+    .routes .arrow { display: none; }
+    .routes .served { grid-column: 1; grid-row: 2; font-size: 12.5px; }
+    .routes .count { grid-column: 2; grid-row: 1 / span 2; }
+    .routes .share { grid-column: 3; grid-row: 1 / span 2; }
     .windows { margin-left: 0; width: 100%; }
-    /* O SVG encolhe junto com a tela, e com ele o texto dentro do viewBox.
-       Medido em 390 px: rotulo de 12 px virava 6 px, ilegivel. O diagrama
-       compensa no proprio desenho (ver `drawFlow`); a serie so precisa do
-       texto maior. */
-    #series .axis { font-size: 26px; }
+    /* O viewBox estreito ja e quase do tamanho da tela (ver `sizePlot`), entao
+       o texto quase nao encolhe. O ajuste aqui e pequeno: 26px, herdados de
+       quando o viewBox tinha 960 de largura, empilhavam os carimbos de hora
+       um sobre o outro. */
+    #series .axis { font-size: 12px; }
   }
 </style>
 </head>
@@ -391,7 +374,7 @@
   </section>
   <div class="flow-band">
     <section>
-      <h2>Para onde cada pedido foi <em>barra = participação na janela</em></h2>
+      <h2>Para onde cada pedido foi <em>espessura da fita = participação na janela</em></h2>
       <div id="flow"></div>
     </section>
     <section class="tape">
@@ -404,7 +387,7 @@
     </section>
   </div>
 
-  <section>
+  <section class="readout">
     <h2>Resumo da janela</h2>
     <div class="figures" id="figures"></div>
   </section>
@@ -418,6 +401,8 @@
     <section><h2>Quem respondeu</h2><div id="models"></div></section>
     <section><h2>Cadeia de fallback</h2><div id="chain"></div></section>
     <section><h2>Ferramentas</h2><div id="tools"></div></section>
+  </div>
+  <div class="grid">
     <section><h2>Rota <em>sob /v1</em></h2><div id="routes"></div></section>
     <section><h2>Erros</h2><div id="errors"></div></section>
   </div>
@@ -608,42 +593,169 @@ function windowName() {
 // lista diz isso numa linha por rota — pedido, quem atendeu, quanto — com a
 // barra carregando a proporção. Um Sankey de três por três gastava trezentos
 // pixels para dizer o mesmo.
+// O diagrama de fitas: cada fita sai do modelo PEDIDO e entra no modelo que
+// RESPONDEU, com espessura proporcional ao volume. Ele voltou a pedido do
+// usuário depois de eu o ter trocado por uma lista — a lista dizia os mesmos
+// números, mas não mostrava um pedido se dividindo entre dois provedores.
 function drawFlow() {
   const pairs = snapshot.pairs || [];
   if (!pairs.length) {
     el("flow").innerHTML = `<p class="empty">Nenhuma requisição atendida nesta janela.</p>`;
     return;
   }
-  const total = pairs.reduce((soma, par) => soma + par.requests, 0) || 1;
+
+  const narrow = window.innerWidth <= 860;
+  const scale = narrow ? 1.9 : 1;
+  const W = narrow ? 640 : 1000;
+  // O texto dentro do viewBox encolhe junto com o SVG; `type` é o fator que
+  // devolve o tamanho lido na tela.
+  const type = (W / 640) * scale;
+  const GAP = 10 * type;
+  const left = 4;
+  const right = W - 4;
+
+  // Um nó por modelo de cada lado, com altura proporcional ao volume.
+  const side = (key) => {
+    const totals = new Map();
+    for (const pair of pairs) totals.set(pair[key], (totals.get(pair[key]) || 0) + pair.requests);
+    return [...totals.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const asked = side("asked");
+  const served = side("served");
+  const total = pairs.reduce((sum, pair) => sum + pair.requests, 0) || 1;
+
+  const TOP = 40 * type;
+  const LABEL = 22 * type;
+  // A altura vem do conteúdo: uma barra mínima por modelo, o resto repartido
+  // pelo volume. Calcular antes é o que garante que o último nó caiba.
+  const rows = Math.max(asked.length, served.length);
+  const barSpace = Math.max(120 * type, rows * 26 * type);
+  const H = TOP + barSpace + rows * (GAP + LABEL) + 10;
+
+  const place = (list) => {
+    const map = new Map();
+    let y = TOP;
+    for (const [name, count] of list) {
+      const height = Math.max(8 * type, (count / total) * barSpace);
+      map.set(name, { y, height, count });
+      y += height + GAP + LABEL;
+    }
+    return map;
+  };
+  const leftNodes = place(asked);
+  const rightNodes = place(served);
+
+  const node = (map, x, anchor, color, lado) =>
+    [...map.entries()]
+      .map(([name, box]) => {
+        const tx = anchor === "end" ? x - 10 : x + 10;
+        return `
+          <g class="flow-node" data-lado="${lado}" data-nome="${esc(name)}">
+            <rect x="${anchor === "end" ? x - 5 : x + 1}" y="${box.y.toFixed(1)}" width="4"
+                  height="${box.height.toFixed(1)}" rx="2" fill="${color}" />
+            <text class="flow-label" x="${tx}" y="${(box.y - 7 * type).toFixed(1)}"
+                  text-anchor="${anchor}" style="font-size:${12 * type}px">${esc(name)}</text>
+            <text class="flow-sub" x="${tx}" y="${(box.y + 13 * type).toFixed(1)}"
+                  text-anchor="${anchor}" style="font-size:${10.5 * type}px">${box.count} req</text>
+          </g>`;
+      })
+      .join("");
+
+  // Cada fita sai do nó pedido e entra no nó que respondeu, empilhando-se
+  // dentro de ambos — é isso que deixa ver que um pedido se dividiu.
+  const usedLeft = new Map();
+  const usedRight = new Map();
+  const ribbons = pairs
+    .map((pair) => {
+      const from = leftNodes.get(pair.asked);
+      const to = rightNodes.get(pair.served);
+      if (!from || !to) return "";
+      const share = pair.requests / total;
+      const thickness = Math.max(2, share * barSpace);
+      const y1 = from.y + (usedLeft.get(pair.asked) || 0);
+      const y2 = to.y + (usedRight.get(pair.served) || 0);
+      usedLeft.set(pair.asked, (usedLeft.get(pair.asked) || 0) + thickness);
+      usedRight.set(pair.served, (usedRight.get(pair.served) || 0) + thickness);
+      const x1 = left + 6;
+      const x2 = right - 6;
+      const mid = (x1 + x2) / 2;
+      const path = [
+        `M${x1},${y1.toFixed(1)}`,
+        `C${mid},${y1.toFixed(1)} ${mid},${y2.toFixed(1)} ${x2},${y2.toFixed(1)}`,
+        `L${x2},${(y2 + thickness).toFixed(1)}`,
+        `C${mid},${(y2 + thickness).toFixed(1)} ${mid},${(y1 + thickness).toFixed(1)} ${x1},${(y1 + thickness).toFixed(1)}`,
+        "Z",
+      ].join(" ");
+      // Um pedido que foi para outro modelo é a informação que traz alguém a
+      // esta tela: ela ganha a cor do desvio, e o caminho direto fica azul.
+      const desvio = pair.asked !== pair.served;
+      const cor = desvio ? "var(--fallback)" : "var(--requests)";
+      const parte = Math.round(share * 100);
+      const title = `${pair.asked} → ${pair.served}: ${pair.requests} req · ${parte}% · ${compact(pair.tokens)} tok`;
+      return `<path class="ribbon" fill="${cor}"
+                    data-pedido="${esc(pair.asked)}" data-servido="${esc(pair.served)}"
+                    d="${path}"><title>${esc(title)}</title></path>`;
+    })
+    .join("");
+
   el("flow").innerHTML = `
-    <ul class="routes">
-      ${pairs
-        .map((par) => {
-          const parte = (par.requests / total) * 100;
-          const desvio = par.asked !== par.served;
-          return `<li>
-            <span class="route-bar" style="width:${parte.toFixed(1)}%"></span>
-            <span class="asked">${esc(par.asked)}</span>
-            <span class="arrow" aria-label="respondido por">→</span>
-            <span class="served ${desvio ? "swapped" : ""}">${esc(par.served)}</span>
-            <span></span>
-            <span class="count">${par.requests}<small> req</small></span>
-            <span class="share">${Math.round(parte)}%</span>
-          </li>`;
-        })
-        .join("")}
-    </ul>`;
+    <svg viewBox="0 0 ${W} ${H}" role="img"
+         aria-label="Fitas ligando o modelo pedido ao modelo que respondeu">
+      <text class="axis" x="${left}" y="${12 * type}" style="font-size:${10 * type}px">modelo pedido</text>
+      <text class="axis" x="${right}" y="${12 * type}" text-anchor="end"
+            style="font-size:${10 * type}px">modelo que respondeu</text>
+      ${ribbons}
+      ${node(leftNodes, left, "start", "var(--requests)", "pedido")}
+      ${node(rightNodes, right, "end", "var(--tokens)", "servido")}
+    </svg>
+    <p class="legend">
+      <span class="key req">atendido pelo modelo pedido</span>
+      <span class="key fell">respondido por outro modelo</span>
+    </p>`;
+  wireFlow();
 }
 
-// DOIS gráficos, e não dois eixos no mesmo. Duas escalas num plot só inventam
-// uma correlação que o dado não tem — é o erro mais comum de painel, e era o
-// que estava aqui: 28 requisições e 2.800.000 tokens desenhados como irmãos.
-// Agora são dois plots empilhados que dividem o MESMO eixo do tempo, que é o
-// que permite comparar sem mentir.
+// Passar o cursor por um nó acende só as fitas que passam por ele: com cinco
+// modelos de cada lado, as fitas se cruzam e o olho perde o fio.
+function wireFlow() {
+  const svg = el("flow").querySelector("svg");
+  if (!svg) return;
+  const fitas = [...svg.querySelectorAll(".ribbon")];
+  const acender = (lado, nome) => {
+    for (const fita of fitas) {
+      const chave = lado === "pedido" ? fita.dataset.pedido : fita.dataset.servido;
+      fita.classList.toggle("on", chave === nome);
+      fita.classList.toggle("off", chave !== nome);
+    }
+  };
+  const apagar = () => {
+    for (const fita of fitas) fita.classList.remove("on", "off");
+  };
+  for (const no of svg.querySelectorAll(".flow-node")) {
+    no.addEventListener("mouseenter", () => acender(no.dataset.lado, no.dataset.nome));
+    no.addEventListener("mouseleave", apagar);
+  }
+  for (const fita of fitas) {
+    fita.addEventListener("mouseenter", () => {
+      for (const outra of fitas) {
+        outra.classList.toggle("on", outra === fita);
+        outra.classList.toggle("off", outra !== fita);
+      }
+    });
+    fita.addEventListener("mouseleave", apagar);
+  }
+}
+
+// UM gráfico, duas grandezas, dois eixos — pedido do usuário depois de ver a
+// versão empilhada. Duas escalas no mesmo plot sugerem uma correlação que o
+// dado não prova, então a leitura é amarrada de três jeitos: cada eixo é
+// rotulado NA COR da sua série, a barra e a linha têm formas diferentes, e o
+// cursor entrega o número exato dos dois lados no mesmo balão.
 function drawSeries() {
   const serie = snapshot.series || { bucket_minutes: 60, points: [] };
   const points = serie.points || [];
   const bucket = (serie.bucket_minutes || 60) * 60 * 1000;
+  sizePlot();
   el("series-title").textContent = `Requisições e tokens ${bucketName(serie.bucket_minutes || 60)}`;
   if (!points.length) {
     el("series").innerHTML = `<p class="empty">Sem tráfego nesta janela.</p>`;
@@ -651,123 +763,202 @@ function drawSeries() {
   }
 
   const at = (p) => new Date(`${p.at}Z`).getTime();
-  const tokensOf = (p) => p.input_tokens + p.output_tokens;
   const from = at(points[0]) - bucket / 2;
   const to = at(points[points.length - 1]) + bucket / 2;
   const span = Math.max(to - from, bucket);
 
   el("series").innerHTML = `
-    ${plot({
-      points,
-      value: (p) => p.requests,
-      color: "var(--requests)",
-      label: "requisições",
-      unit: "req",
-      from,
-      span,
-      bucket,
-      kind: "bar",
-      ticks: false,
-    })}
-    ${plot({
-      points,
-      value: tokensOf,
-      color: "var(--tokens)",
-      label: "tokens",
-      unit: "tok",
-      from,
-      span,
-      bucket,
-      kind: "line",
-      ticks: true,
-    })}
-    ${points.some((p) => p.errors)
-      ? `<p class="legend"><span class="key err">baldes com pelo menos um erro</span></p>`
-      : ""}`;
+    <div class="plotwrap">
+      ${plot({ points, from, span, bucket })}
+      <div class="tip" id="tip" hidden></div>
+    </div>
+    <p class="legend">
+      <span class="key req">requisições (barra, eixo esquerdo)</span>
+      <span class="key tok">tokens (linha, eixo direito)</span>
+      ${points.some((p) => p.errors) ? `<span class="key err">balde com erro</span>` : ""}
+    </p>`;
+  wireSeries(points);
 }
 
-// Um plot, uma grandeza, um eixo. O tempo é o mesmo nos dois, então eles se
-// leem como um par sem disputar a mesma escala.
-function plot({ points, value, color, label, unit, from, span, bucket, kind, ticks }) {
-  const W = 960, H = 118;
-  const padL = 54, padR = 16, padT = 14, padB = ticks ? 30 : 10;
+// Geometria compartilhada entre o desenho e o cursor: o balão precisa saber
+// onde cada balde caiu, e recalcular isso do lado de fora daria divergência.
+// Em tela estreita o desenho e REDESENHADO mais alto, e nao encolhido: o SVG
+// guarda a proporcao do viewBox, entao 960x250 a 350px de largura virava uma
+// tira de 91px onde nao se enxerga barra nenhuma.
+let PLOT = { W: 960, H: 250, padL: 56, padR: 62, padT: 26, padB: 30 };
+
+function sizePlot() {
+  PLOT = window.innerWidth < 700
+    ? { W: 420, H: 300, padL: 44, padR: 50, padT: 26, padB: 34 }
+    : { W: 960, H: 250, padL: 56, padR: 62, padT: 26, padB: 30 };
+}
+
+// Redesenha quando a janela muda de faixa: a proporcao do plot depende dela.
+let larguraAnterior = window.innerWidth;
+window.addEventListener("resize", () => {
+  const antes = larguraAnterior < 700;
+  larguraAnterior = window.innerWidth;
+  if (antes !== (larguraAnterior < 700)) drawSeries();
+});
+
+function plotGeometry(points, from, span) {
+  const { W, H, padL, padR, padT, padB } = PLOT;
   const plotW = W - padL - padR;
   const plotH = H - padT - padB;
   const base = padT + plotH;
-  const at = (p) => new Date(`${p.at}Z`).getTime();
-  const x = (t) => padL + ((t - from) / span) * plotW;
-  const max = Math.max(...points.map(value), 1);
-  const y = (v) => base - (v / max) * plotH;
-  const barW = Math.max(3, Math.min(34, (bucket / span) * plotW - 2));
+  const tokensOf = (p) => p.input_tokens + p.output_tokens;
+  const maxReq = Math.max(...points.map((p) => p.requests), 1);
+  const maxTok = Math.max(...points.map(tokensOf), 1);
+  return {
+    plotW, plotH, base, tokensOf, maxReq, maxTok,
+    x: (t) => padL + ((t - from) / span) * plotW,
+    yReq: (v) => base - (v / maxReq) * plotH,
+    yTok: (v) => base - (v / maxTok) * plotH,
+  };
+}
 
-  // Grade sólida e recessiva: tracejado lê como limite ou projeção, e aqui é só
-  // escala.
-  const grid = [0, 1]
+function plot({ points, from, span, bucket }) {
+  const { W, H, padL, padR, padT, padB } = PLOT;
+  const g = plotGeometry(points, from, span);
+  const at = (p) => new Date(`${p.at}Z`).getTime();
+  const barW = Math.max(3, Math.min(34, (bucket / span) * g.plotW - 2));
+
+  // Grade sólida e recessiva: tracejado lê como limite ou projeção, e aqui é
+  // só escala. Ela pertence ao eixo esquerdo; o direito só ganha rótulo.
+  const grid = [0, 0.5, 1]
     .map(
-      (f) => `<line x1="${padL}" y1="${(base - f * plotH).toFixed(1)}" x2="${W - padR}"
-                    y2="${(base - f * plotH).toFixed(1)}" stroke="var(--panel-edge)" />`
+      (f) => `<line x1="${padL}" y1="${(g.base - f * g.plotH).toFixed(1)}" x2="${W - padR}"
+                    y2="${(g.base - f * g.plotH).toFixed(1)}" stroke="var(--edge)" />`
     )
     .join("");
-  const escala = `
-    <text class="axis" x="${padL - 10}" y="${padT + 4}" text-anchor="end">${compact(max)}</text>
-    <text class="axis" x="${padL - 10}" y="${base + 4}" text-anchor="end">0</text>
-    <text class="axis serie" x="${padL + 2}" y="${padT - 2}" fill="${color}">${esc(label)}</text>`;
 
-  const marks =
-    kind === "bar"
-      ? points
-          .map((p) => {
-            const top = y(value(p));
-            return `<rect x="${(x(at(p)) - barW / 2).toFixed(1)}" y="${top.toFixed(1)}"
-                          width="${barW.toFixed(1)}" height="${Math.max(1, base - top).toFixed(1)}"
-                          rx="2" fill="${color}"><title>${esc(
-                            `${clock(p.at, false)} · ${value(p)} ${unit}`
-                          )}</title></rect>`;
-          })
-          .join("")
-      : `<path d="${points
-          .map((p, i) => `${i ? "L" : "M"}${x(at(p)).toFixed(1)},${y(value(p)).toFixed(1)}`)
-          .join("")}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round" />` +
-        (points.length > 24 ? [points[0], points[points.length - 1]] : points)
-          .map(
-            (p) =>
-              `<circle cx="${x(at(p)).toFixed(1)}" cy="${y(value(p)).toFixed(1)}" r="4"
-                       fill="${color}" stroke="var(--panel)" stroke-width="2"><title>${esc(
-                         `${clock(p.at, false)} · ${compact(value(p))} ${unit}`
-                       )}</title></circle>`
-          )
-          .join("");
+  const escala = `
+    <text class="axis" x="${padL - 10}" y="${padT + 4}" text-anchor="end"
+          fill="var(--requests)">${g.maxReq}</text>
+    <text class="axis" x="${padL - 10}" y="${g.base + 4}" text-anchor="end">0</text>
+    <text class="axis" x="${W - padR + 10}" y="${padT + 4}" text-anchor="start"
+          fill="var(--tokens)">${compact(g.maxTok)}</text>
+    <text class="axis" x="${W - padR + 10}" y="${g.base + 4}" text-anchor="start">0</text>`;
+
+  const barras = points
+    .map((p) => {
+      const top = g.yReq(p.requests);
+      return `<rect class="bar-mark" data-i="${points.indexOf(p)}"
+                    x="${(g.x(at(p)) - barW / 2).toFixed(1)}" y="${top.toFixed(1)}"
+                    width="${barW.toFixed(1)}" height="${Math.max(1, g.base - top).toFixed(1)}"
+                    rx="2" fill="var(--requests)" />`;
+    })
+    .join("");
+
+  const linha = `<path d="${points
+    .map((p, i) => `${i ? "L" : "M"}${g.x(at(p)).toFixed(1)},${g.yTok(g.tokensOf(p)).toFixed(1)}`)
+    .join("")}" fill="none" stroke="var(--tokens)" stroke-width="2"
+    stroke-linejoin="round" stroke-linecap="round" />`;
 
   const erros = points
     .filter((p) => p.errors)
     .map(
       (p) =>
-        `<circle cx="${x(at(p)).toFixed(1)}" cy="${(y(value(p)) - 9).toFixed(1)}" r="3.5"
-                 fill="var(--error)" stroke="var(--panel)" stroke-width="2"><title>${esc(
-                   `${p.errors} com erro`
-                 )}</title></circle>`
+        `<circle cx="${g.x(at(p)).toFixed(1)}" cy="${(g.yReq(p.requests) - 9).toFixed(1)}" r="3.5"
+                 fill="var(--error)" stroke="var(--panel)" stroke-width="2" />`
     )
     .join("");
 
-  const step = Math.max(1, Math.ceil(points.length / 8));
-  const eixoX = ticks
-    ? points
-        .filter((_, i) => i % step === 0)
-        .map((p, i) => {
-          // O primeiro rótulo nasce ancorado à esquerda: centrado, ele recua
-          // para debaixo da escala e encosta no zero em telas estreitas.
-          const anchor = i === 0 ? "start" : "middle";
-          const cx = i === 0 ? Math.max(x(at(p)) - 10, padL) : x(at(p));
-          return `<text class="axis" x="${cx.toFixed(1)}" y="${H - 6}"
-                        text-anchor="${anchor}">${esc(clock(p.at, false))}</text>`;
-        })
-        .join("")
-    : "";
+  // Menos rotulos em tela estreita: o texto dentro do viewBox cresce quando o
+   // SVG encolhe, e oito carimbos de hora se sobrepunham a 390px (medido pela
+   // varredura de UI).
+  const quantos = window.innerWidth < 700 ? 4 : 8;
+  const step = Math.max(1, Math.ceil(points.length / quantos));
+  const eixoX = points
+    .filter((_, i) => i % step === 0)
+    .map((p, i) => {
+      // O primeiro rótulo nasce ancorado à esquerda: centrado, ele recua para
+      // debaixo da escala e encosta no zero em telas estreitas.
+      const anchor = i === 0 ? "start" : "middle";
+      const cx = i === 0 ? Math.max(g.x(at(p)) - 10, padL) : g.x(at(p));
+      return `<text class="axis" x="${cx.toFixed(1)}" y="${H - 6}"
+                    text-anchor="${anchor}">${esc(clock(p.at, false))}</text>`;
+    })
+    .join("");
 
-  return `<svg viewBox="0 0 ${W} ${H}" role="img"
-               aria-label="${esc(label)} ao longo do tempo">
-    ${grid}${escala}${marks}${erros}${eixoX}
+  // Faixa de captura por balde: o alvo do cursor é a coluna inteira, e não a
+  // barra de 3px que sobra num balde quase vazio.
+  const faixaW = g.plotW / points.length;
+  const faixas = points
+    .map(
+      (p, i) =>
+        `<rect class="hit" data-i="${i}" x="${(padL + i * faixaW).toFixed(1)}" y="${padT}"
+               width="${faixaW.toFixed(1)}" height="${g.plotH.toFixed(1)}" fill="transparent" />`
+    )
+    .join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" id="plot"
+               aria-label="requisições e tokens ao longo do tempo">
+    ${grid}${escala}
+    <line id="crosshair" y1="${padT}" y2="${g.base}" x1="0" x2="0"
+          stroke="var(--edge-strong)" stroke-width="1" visibility="hidden" />
+    ${barras}${linha}${erros}
+    <circle id="dot" r="4.5" fill="var(--tokens)" stroke="var(--panel)" stroke-width="2"
+            visibility="hidden" />
+    ${eixoX}${faixas}
   </svg>`;
+}
+
+// O balão segue o balde sob o cursor e mostra os DOIS números: é o que impede
+// alguém de ler altura de barra contra altura de linha como se fosse a mesma
+// escala.
+function wireSeries(points) {
+  const svg = el("plot");
+  const tip = el("tip");
+  const crosshair = svg.querySelector("#crosshair");
+  const dot = svg.querySelector("#dot");
+  const wrap = svg.parentElement;
+  const serie = snapshot.series || {};
+  const bucket = (serie.bucket_minutes || 60) * 60 * 1000;
+  const at = (p) => new Date(`${p.at}Z`).getTime();
+  const from = at(points[0]) - bucket / 2;
+  const span = Math.max(at(points[points.length - 1]) + bucket / 2 - from, bucket);
+  const g = plotGeometry(points, from, span);
+
+  const esconder = () => {
+    tip.hidden = true;
+    crosshair.setAttribute("visibility", "hidden");
+    dot.setAttribute("visibility", "hidden");
+    for (const bar of svg.querySelectorAll(".bar-mark")) bar.classList.remove("on");
+  };
+
+  const mostrar = (i) => {
+    const p = points[i];
+    if (!p) return;
+    const cx = g.x(at(p));
+    crosshair.setAttribute("x1", cx);
+    crosshair.setAttribute("x2", cx);
+    crosshair.setAttribute("visibility", "visible");
+    dot.setAttribute("cx", cx);
+    dot.setAttribute("cy", g.yTok(g.tokensOf(p)));
+    dot.setAttribute("visibility", "visible");
+    for (const bar of svg.querySelectorAll(".bar-mark")) {
+      bar.classList.toggle("on", Number(bar.dataset.i) === i);
+    }
+    tip.innerHTML = `
+      <b>${esc(clock(p.at, false))}</b>
+      <span><i class="sw req"></i>${p.requests} req</span>
+      <span><i class="sw tok"></i>${compact(g.tokensOf(p))} tokens</span>
+      ${p.errors ? `<span class="bad"><i class="sw err"></i>${p.errors} com erro</span>` : ""}`;
+    tip.hidden = false;
+    // A posição sai da caixa medida do SVG, e não do viewBox: o desenho
+    // encolhe com a tela e a conversão de coordenadas encolhe junto.
+    const caixa = svg.getBoundingClientRect();
+    const escala = caixa.width / PLOT.W;
+    const esquerda = cx * escala;
+    tip.style.left = `${Math.min(Math.max(esquerda, 8), caixa.width - tip.offsetWidth - 8)}px`;
+    tip.style.top = `${Math.max(g.yReq(p.requests) * escala - tip.offsetHeight - 12, 4)}px`;
+  };
+
+  for (const faixa of svg.querySelectorAll(".hit")) {
+    faixa.addEventListener("mouseenter", () => mostrar(Number(faixa.dataset.i)));
+  }
+  wrap.addEventListener("mouseleave", esconder);
 }
 
 function bucketName(minutes) {

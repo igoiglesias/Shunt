@@ -1,0 +1,383 @@
+/* A identidade das duas telas.
+ *
+ * Direção: "shunt" é desvio ferroviário, e isso é literalmente o que este proxy
+ * faz — pega um pedido endereçado a um modelo e o manda por outro trilho. As
+ * telas são um painel de despacho: grafite quente de aço pintado, tipografia
+ * condensada de placa de estação, faixa de sinalização listrada, trilhos
+ * separando os blocos, e três sinais (verde, âmbar, vermelho) que só aparecem
+ * quando há estado a comunicar.
+ *
+ * As cores dos gráficos não foram escolhidas no olho: passaram no validador da
+ * diretriz de visualização — banda de luminosidade, piso de croma, separação
+ * para daltonismo e contraste contra a superfície.
+ */
+
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@400;500;600;700&display=swap");
+
+:root {
+  /* Aço pintado, não o azul-ardósia de painel genérico. */
+  --ground: #141311;
+  --panel: #1c1b18;
+  --panel-2: #232220;
+  --edge: #35322c;
+  --edge-strong: #4a463d;
+
+  --ink: #f2efe6;
+  --muted: #a9a396;
+  --dim: #8a8478;
+
+  /* Séries: validadas em conjunto. */
+  --requests: #4a90d9;
+  --tokens: #c47a1c;
+  --fallback: #8b7fd4;
+  --fallback-text: #9a8fdc;
+
+  /* Sinais: estado, nunca identidade. */
+  --good: #3fa34d;
+  --warning: #e0a021;
+  --error: #d5463a;
+  --error-text: #e2695c;
+
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace;
+  --text: "IBM Plex Sans Condensed", "Avenir Next Condensed", "Roboto Condensed",
+    ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  color: var(--ink);
+  font: 14px/1.5 var(--text);
+  -webkit-font-smoothing: antialiased;
+  /* Grão de metal: duas tramas cruzadas quase invisíveis dão ao fundo a
+     textura de chapa pintada, em vez do preto liso de tela de terminal. */
+  background-color: var(--ground);
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.014) 0 1px,
+      transparent 1px 3px
+    ),
+    repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0.18) 0 1px,
+      transparent 1px 4px
+    );
+}
+
+.num,
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Cabeçalho: a faixa de sinalização ─────────────────────────────────────
+   A listra diagonal é a marca de "área de manobra" de pátio ferroviário. Ela
+   aparece uma vez, no alto, e não se repete em lugar nenhum — é o que dá à
+   tela um rosto que não se confunde com outro painel. */
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px 22px;
+  flex-wrap: wrap;
+  padding: 13px 20px 12px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border-bottom: 1px solid var(--edge-strong);
+  position: relative;
+  z-index: 2;
+}
+
+header::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 4px;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--warning) 0 8px,
+    #221f18 8px 16px
+  );
+  opacity: 0.8;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+header h1 span {
+  color: var(--warning);
+}
+
+header nav {
+  display: flex;
+  gap: 4px;
+  font-size: 13.5px;
+}
+
+header nav a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 5px 10px;
+  display: inline-block;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  letter-spacing: 0.02em;
+}
+
+header nav a:hover {
+  color: var(--ink);
+  border-color: var(--edge);
+}
+
+header nav a[aria-current="page"] {
+  color: var(--ground);
+  background: var(--ink);
+  font-weight: 600;
+}
+
+/* ── Blocos ────────────────────────────────────────────────────────────────
+   Cada bloco é uma placa parafusada: borda dura, canto quase reto, e um
+   trilho fino no topo que vira o acento de cor do bloco. */
+section {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 15px 17px 17px;
+  min-width: 0;
+  position: relative;
+}
+
+section > h2 {
+  margin: 0 0 13px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+section > h2 em {
+  font-style: normal;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--dim);
+}
+
+/* ── Controles ─────────────────────────────────────────────────────────── */
+button,
+select,
+input {
+  font-family: var(--text);
+}
+
+.ghost,
+.chip,
+.danger,
+.toggle,
+.windows button {
+  font: inherit;
+  font-size: 12.5px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 5px 11px;
+  min-height: 26px;
+  cursor: pointer;
+}
+
+.ghost:hover,
+.chip:hover,
+.windows button:hover {
+  color: var(--ink);
+  border-color: var(--edge-strong);
+}
+
+.ghost:focus-visible,
+.chip:focus-visible,
+.danger:focus-visible,
+.toggle:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--warning);
+  outline-offset: 2px;
+}
+
+/* O estado ligado é uma placa acesa: fundo claro, texto escuro. */
+.windows button[aria-pressed="true"],
+.chip[aria-pressed="true"] {
+  color: var(--ground);
+  background: var(--ink);
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+.chip.bad[aria-pressed="true"] {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+
+.chip.slow[aria-pressed="true"] {
+  background: var(--warning);
+  border-color: var(--warning);
+}
+
+.chip.chain[aria-pressed="true"] {
+  background: var(--fallback);
+  border-color: var(--fallback);
+}
+
+select {
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+}
+
+input[type="search"],
+input[type="text"],
+input[type="number"],
+input[type="datetime-local"] {
+  color: var(--ink);
+  background: var(--panel-2);
+  border: 1px solid var(--edge);
+  border-radius: 2px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+input::placeholder {
+  color: var(--dim);
+}
+
+/* ── Tabelas: quadro de horários ───────────────────────────────────────────
+   Números em mono tabular, cabeçalho em versalete, e a linha do trilho no pé
+   de cada faixa em vez de uma grade fechada. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 6px 10px 6px 0;
+  text-align: left;
+  border-bottom: 1px solid var(--edge);
+}
+
+th {
+  color: var(--dim);
+  font-weight: 600;
+  font-size: 10.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+td.n,
+th.n {
+  text-align: right;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.empty {
+  color: var(--dim);
+  font-size: 13px;
+  padding: 6px 0;
+}
+
+/* Barra de rolagem fina, com cor propria e ESPACO RESERVADO. Com a barra
+   larga do sistema por cima do conteudo, a ultima coluna da tabela e o numero
+   da direita ficavam escondidos atras dela. */
+.scroll {
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scrollbar-gutter: stable;
+}
+
+.scroll,
+.tape ul,
+aside,
+.rest .pills,
+.turn pre {
+  scrollbar-width: thin;
+  scrollbar-color: var(--edge-strong) transparent;
+}
+
+.scroll::-webkit-scrollbar,
+.tape ul::-webkit-scrollbar,
+aside::-webkit-scrollbar,
+.rest .pills::-webkit-scrollbar,
+.turn pre::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.scroll::-webkit-scrollbar-thumb,
+.tape ul::-webkit-scrollbar-thumb,
+aside::-webkit-scrollbar-thumb,
+.rest .pills::-webkit-scrollbar-thumb,
+.turn pre::-webkit-scrollbar-thumb {
+  background: var(--edge-strong);
+  border-radius: 5px;
+}
+
+.scroll::-webkit-scrollbar-track,
+.tape ul::-webkit-scrollbar-track,
+aside::-webkit-scrollbar-track,
+.rest .pills::-webkit-scrollbar-track,
+.turn pre::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── Sinais ───────────────────────────────────────────────────────────────
+   Lâmpada de sinal: um círculo com halo, do tamanho de um LED de painel. */
+.lamp {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 7px;
+}
+
+.lamp.on {
+  background: var(--good);
+  box-shadow: 0 0 0 2px rgba(63, 163, 77, 0.18), 0 0 9px rgba(63, 163, 77, 0.6);
+}
+
+.lamp.warn {
+  background: var(--warning);
+  box-shadow: 0 0 0 2px rgba(224, 160, 33, 0.18), 0 0 9px rgba(224, 160, 33, 0.6);
+}
+
+.lamp.off {
+  background: var(--dim);
+}
+
+.axis {
+  fill: var(--dim);
+  font-size: 10px;
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
