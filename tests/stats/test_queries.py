@@ -199,3 +199,23 @@ def test_the_snapshot_carries_every_section_the_panel_draws(seeded):
         "recent",
     }
     assert snapshot["window_hours"] == 1
+
+
+def test_the_percentile_sorts_before_it_picks(make_engine, tmp_path):
+    """Mutante M11: sem `sorted`, a suite passava.
+
+    As linhas semeadas estavam em ordem crescente de duracao por acidente, e o
+    percentil por indice acertava sem ordenar nada. Aqui a ordem de insercao e
+    embaralhada de proposito: a mediana de 10,20,...,90 e 50, venha na ordem
+    que vier.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ordem.db'}")
+    durations = [90, 10, 50, 70, 30, 80, 20, 60, 40]
+    with Session(engine) as session:
+        session.add_all(
+            [row(request_id=f"d{value}", duration_ms=value) for value in durations]
+        )
+        session.commit()
+    totals = queries.totals(engine, hours=1)
+    assert totals["p50_duration_ms"] == 50
+    assert totals["p95_duration_ms"] == 90
