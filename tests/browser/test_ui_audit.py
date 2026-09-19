@@ -7,13 +7,15 @@ minimo em toda tabela, texto sobreposto no diagrama, alvo de clique de 21 px.
 
 import pytest
 
-from tests.browser.test_audit_browser import browser, seed, server  # noqa: F401
+# As duas fixtures vem do modulo vizinho: o mesmo servidor semeado serve as duas
+# varreduras, e subir um segundo dobraria o tempo da suite.
+from tests.browser.test_audit_browser import browser, server  # noqa: F401
 from tests.browser.ui_audit import auditar, descrever
 
 LARGURAS = [(1500, 1000), (1180, 900), (390, 844)]
 
 
-def abrir(browser, base, caminho, largura, altura):
+def abrir(browser, base, caminho, largura, altura):  # noqa: F811
     page = browser.new_page(viewport={"width": largura, "height": altura})
     problemas = []
     page.on("pageerror", lambda erro: problemas.append(str(erro)))
@@ -24,7 +26,7 @@ def abrir(browser, base, caminho, largura, altura):
 
 
 @pytest.mark.parametrize(("largura", "altura"), LARGURAS)
-def test_the_panel_has_no_layout_or_contrast_defects(browser, server, largura, altura):
+def test_the_panel_has_no_layout_or_contrast_defects(browser, server, largura, altura):  # noqa: F811
     page, problemas = abrir(browser, server, "/", largura, altura)
     achados = auditar(page)
     page.close()
@@ -33,7 +35,12 @@ def test_the_panel_has_no_layout_or_contrast_defects(browser, server, largura, a
 
 
 @pytest.mark.parametrize(("largura", "altura"), LARGURAS)
-def test_the_requests_screen_has_no_layout_or_contrast_defects(browser, server, largura, altura):
+def test_the_requests_screen_has_no_layout_or_contrast_defects(
+    browser,  # noqa: F811
+    server,  # noqa: F811
+    largura,
+    altura,
+):
     page, problemas = abrir(browser, server, "/requests", largura, altura)
     if largura > 720:
         page.click("#rows tr:nth-child(2)")

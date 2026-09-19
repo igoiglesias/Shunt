@@ -10,9 +10,8 @@ Mede, em cada largura: texto truncado, transbordo horizontal, sobreposicao de
 texto, contraste abaixo do minimo, alvo de clique pequeno demais e elemento
 cortado pelo pai.
 """
-from playwright.sync_api import sync_playwright
 
-AUDITORIA = """() => {
+AUDITORIA = r"""() => {
   const problemas = [];
   const visivel = (el) => {
     const e = getComputedStyle(el);
