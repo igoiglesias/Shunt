@@ -26,7 +26,10 @@ def test_a_url_that_already_carries_the_token_is_left_alone(monkeypatch):
 def test_a_reachable_url_comes_back_with_the_table_already_created(tmp_path):
     engine = build_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
     assert engine is not None
-    assert "request_events" in inspect(engine).get_table_names()
+    try:
+        assert "request_events" in inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
 
 
 def test_a_broken_url_disables_persistence_instead_of_killing_the_boot(caplog):

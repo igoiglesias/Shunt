@@ -2,16 +2,14 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.stats.models import Base, RequestEvent
+from app.stats.models import RequestEvent
 
 
-def engine_for(tmp_path):
-    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
-    Base.metadata.create_all(engine)
-    return engine
+def engine_for(make_engine, tmp_path):
+    return make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
 
 
 def sample(**over):
@@ -42,8 +40,8 @@ def sample(**over):
     return RequestEvent(**row)
 
 
-def test_an_event_round_trips_with_every_column(tmp_path):
-    engine = engine_for(tmp_path)
+def test_an_event_round_trips_with_every_column(make_engine, tmp_path):
+    engine = engine_for(make_engine, tmp_path)
     with Session(engine) as session:
         session.add(sample())
         session.commit()
@@ -56,9 +54,9 @@ def test_an_event_round_trips_with_every_column(tmp_path):
     assert stored.id is not None
 
 
-def test_a_refused_request_stores_with_no_candidate(tmp_path):
+def test_a_refused_request_stores_with_no_candidate(make_engine, tmp_path):
     """Requisicao recusada e justamente a que se quer contar, entao nada de NOT NULL ali."""
-    engine = engine_for(tmp_path)
+    engine = engine_for(make_engine, tmp_path)
     with Session(engine) as session:
         session.add(
             sample(
@@ -77,8 +75,8 @@ def test_a_refused_request_stores_with_no_candidate(tmp_path):
     assert stored.attempts == ["free: credential OPENROUTER_API_KEY is not set"]
 
 
-def test_events_insert_in_one_batch(tmp_path):
-    engine = engine_for(tmp_path)
+def test_events_insert_in_one_batch(make_engine, tmp_path):
+    engine = engine_for(make_engine, tmp_path)
     with Session(engine) as session:
         session.add_all([sample(request_id=f"r{i}") for i in range(200)])
         session.commit()
@@ -86,7 +84,7 @@ def test_events_insert_in_one_batch(tmp_path):
         assert session.scalar(select(func.count()).select_from(RequestEvent)) == 200
 
 
-def test_the_time_axis_and_the_two_grouping_axes_are_indexed(tmp_path):
+def test_the_time_axis_and_the_two_grouping_axes_are_indexed(make_engine, tmp_path):
     """Toda consulta do painel filtra por tempo e agrupa por provedor ou modelo."""
     indexed = {tuple(index.expressions[0].name for _ in [0]) for index in RequestEvent.__table__.indexes}
     columns = {name for (name,) in indexed}
