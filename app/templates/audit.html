@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — requisições</title>
+<style>
+  :root {
+    --ground: #0e1620;
+    --panel: #16202c;
+    --panel-edge: #23303f;
+    --ink: #e6eaf0;
+    --muted: #8a99ac;
+    --dim: #5b6b7e;
+    --requests: #5bc8c4;
+    --tokens: #e8a33d;
+    --fallback: #9b8cf0;
+    --error: #e4574c;
+    --num: ui-monospace, "SF Mono", "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    --text: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 14px/1.5 var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--requests); }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px 22px;
+    flex-wrap: wrap;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--panel-edge);
+    background: linear-gradient(180deg, #16202c, #111a24);
+  }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: 0.14em; }
+  header h1 span { color: var(--requests); }
+  header nav { display: flex; gap: 16px; font-size: 13px; }
+  header nav a { color: var(--muted); text-decoration: none; }
+  header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
+  #count { margin-left: auto; color: var(--muted); font-size: 12.5px; font-family: var(--num); }
+
+  form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--panel-edge);
+  }
+  input[type="search"], input[type="text"], input[type="number"], select {
+    font: inherit;
+    color: var(--ink);
+    background: var(--panel);
+    border: 1px solid var(--panel-edge);
+    border-radius: 3px;
+    padding: 5px 9px;
+  }
+  input[type="search"] { flex: 1 1 320px; min-width: 200px; }
+  input[type="number"] { width: 10ch; }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--tokens);
+    outline-offset: 1px;
+  }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--panel-edge);
+    border-radius: 999px;
+    padding: 3px 12px;
+    cursor: pointer;
+  }
+  .chip[aria-pressed="true"] { color: var(--ground); background: var(--requests); border-color: var(--requests); }
+  .chip.bad[aria-pressed="true"] { background: var(--error); border-color: var(--error); }
+  .chip.slow[aria-pressed="true"] { background: var(--tokens); border-color: var(--tokens); }
+  .chip.chain[aria-pressed="true"] { background: var(--fallback); border-color: var(--fallback); }
+  .ghost {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--panel-edge);
+    border-radius: 3px;
+    padding: 4px 11px;
+    cursor: pointer;
+    text-decoration: none;
+  }
+
+  main { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 0; }
+  .list { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 620px; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #1d2835; white-space: nowrap; }
+  th { color: var(--dim); font-weight: 500; font-size: 12px; position: sticky; top: 0; background: var(--ground); }
+  th[role="button"] { cursor: pointer; }
+  th[aria-sort] { color: var(--ink); }
+  th[aria-sort]::after { content: " ↓"; color: var(--requests); }
+  td.n, th.n { text-align: right; font-family: var(--num); font-variant-numeric: tabular-nums; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: #1a2532; }
+  tbody tr[aria-selected="true"] { background: #1d2a39; box-shadow: inset 3px 0 0 var(--requests); }
+  .when { font-family: var(--num); color: var(--dim); }
+  .status { font-family: var(--num); }
+  .status.bad { color: var(--error); }
+  .tag { color: var(--muted); font-size: 12px; }
+  .tag.fell { color: var(--fallback); }
+  .tag.bad { color: var(--error); }
+
+  aside {
+    border-left: 1px solid var(--panel-edge);
+    padding: 16px 18px;
+    background: var(--panel);
+    min-height: calc(100vh - 118px);
+  }
+  aside h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+  aside .id { font-family: var(--num); font-size: 12px; color: var(--muted); word-break: break-all; }
+  aside dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 16px 0; font-size: 13px; }
+  aside dt { color: var(--dim); }
+  aside dd { margin: 0; font-family: var(--num); font-variant-numeric: tabular-nums; }
+  aside h3 { margin: 18px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  .chain { list-style: none; margin: 0; padding: 0; font-size: 12.5px; }
+  .chain li {
+    position: relative;
+    padding: 4px 0 4px 18px;
+    border-left: 1px solid var(--panel-edge);
+    margin-left: 4px;
+  }
+  .chain li::before {
+    content: "";
+    position: absolute;
+    left: -4px;
+    top: 11px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--error);
+  }
+  .chain li.won::before { background: var(--requests); }
+  .chain li b { font-weight: 500; }
+  .chain li small { color: var(--muted); }
+  .pills { display: flex; flex-wrap: wrap; gap: 5px; }
+  .pill {
+    font-size: 11.5px;
+    border: 1px solid var(--panel-edge);
+    border-radius: 999px;
+    padding: 1px 9px;
+    color: var(--muted);
+  }
+  .pill.used { color: var(--ground); background: var(--requests); border-color: var(--requests); }
+  .empty { color: var(--dim); padding: 18px 20px; }
+  footer { display: flex; gap: 12px; align-items: center; padding: 14px 20px; color: var(--dim); font-size: 12.5px; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; }
+    aside { border-left: 0; border-top: 1px solid var(--panel-edge); min-height: 0; }
+    #count { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>SHU<span>N</span>T</h1>
+  <nav>
+    <a href="/">Painel</a>
+    <a href="/requests" aria-current="page">Requisições</a>
+  </nav>
+  <span id="count"></span>
+</header>
+
+<form id="filters" autocomplete="off">
+  <input type="search" id="text" name="text" placeholder="id, modelo, provedor, ferramenta, motivo da falha">
+  <div class="chips">
+    <button type="button" class="chip bad" data-filter="status_min" data-value="400" aria-pressed="false">falhas</button>
+    <button type="button" class="chip" data-filter="stream" data-value="true" aria-pressed="false">stream</button>
+    <button type="button" class="chip chain" data-filter="fell_back" data-value="true" aria-pressed="false">com fallback</button>
+    <button type="button" class="chip" data-filter="has_tools" data-value="true" aria-pressed="false">usou ferramenta</button>
+    <button type="button" class="chip slow" data-filter="min_duration_ms" data-value="5000" aria-pressed="false">&gt; 5 s</button>
+  </div>
+  <input type="text" id="provider" name="provider" placeholder="provedor" size="10">
+  <input type="text" id="candidate_model" name="candidate_model" placeholder="modelo que respondeu" size="18">
+  <button type="button" class="ghost" id="reset">Limpar filtros</button>
+  <a class="ghost" id="export" href="/api/requests/export">Exportar CSV</a>
+</form>
+
+<main>
+  <div class="list">
+    <table>
+      <thead>
+        <tr>
+          <th role="button" data-order="time" aria-sort="descending">Quando</th>
+          <th>Rota</th>
+          <th>Pedido</th>
+          <th>Respondeu</th>
+          <th class="n">Tokens</th>
+          <th class="n" role="button" data-order="duration">Duração</th>
+          <th class="n">Status</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty" hidden>Nenhuma requisição com esses filtros.</p>
+  </div>
+  <aside id="detail" aria-live="polite">
+    <p class="empty">Escolha uma requisição para ver a cadeia inteira.</p>
+  </aside>
+</main>
+
+<footer>
+  <button type="button" class="ghost" id="more" hidden>Carregar mais</button>
+  <span id="status"></span>
+</footer>
+
+<script>
+const el = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? `${v}ms` : `${(v / 1000).toFixed(1)}s`);
+const compact = (n) => {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1000000) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+  return `${(n / 1000000).toFixed(1)}M`;
+};
+const clock = (iso, withSeconds) => {
+  const at = new Date(/[Z+]|-\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`);
+  if (Number.isNaN(at.getTime())) return "";
+  return at.toLocaleTimeString([], {
+    hourCycle: "h23",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(withSeconds ? { second: "2-digit" } : {}),
+  });
+};
+const day = (iso) => {
+  const at = new Date(/[Z+]|-\d\d:\d\d$/.test(iso) ? iso : `${iso}Z`);
+  return Number.isNaN(at.getTime()) ? "" : at.toLocaleDateString();
+};
+
+let state = { order_by: "time" };
+let cursor = null;
+let loading = false;
+let selected = null;
+
+// O estado da busca mora na URL: assim uma investigação é um link que alguém
+// manda para outra pessoa, e o botão voltar do navegador funciona.
+function readUrl() {
+  const params = new URLSearchParams(location.search);
+  state = {};
+  for (const [key, value] of params) state[key] = value;
+  if (!state.order_by) state.order_by = "time";
+  el("text").value = state.text || "";
+  el("provider").value = state.provider || "";
+  el("candidate_model").value = state.candidate_model || "";
+  for (const chip of document.querySelectorAll(".chip")) {
+    const on = state[chip.dataset.filter] === chip.dataset.value;
+    chip.setAttribute("aria-pressed", String(on));
+  }
+  for (const head of document.querySelectorAll("th[data-order]")) {
+    if (head.dataset.order === state.order_by) head.setAttribute("aria-sort", "descending");
+    else head.removeAttribute("aria-sort");
+  }
+}
+
+function writeUrl(push) {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(state)) {
+    if (value !== "" && value !== null && value !== undefined) params.set(key, value);
+  }
+  const url = `${location.pathname}?${params}`;
+  if (push) history.pushState(null, "", url);
+  else history.replaceState(null, "", url);
+  el("export").href = `/api/requests/export?${params}`;
+}
+
+async function search({ append } = {}) {
+  if (loading) return;
+  loading = true;
+  el("status").textContent = "buscando…";
+  const params = new URLSearchParams(state);
+  if (append && cursor) params.set("cursor", cursor);
+  try {
+    const response = await fetch(`/api/requests?${params}`);
+    const page = await response.json();
+    if (!response.ok) {
+      el("status").textContent = page.error || "não deu para buscar.";
+      return;
+    }
+    cursor = page.next_cursor;
+    render(page, append);
+  } catch (err) {
+    el("status").textContent = `não deu para buscar: ${err}`;
+  } finally {
+    loading = false;
+  }
+}
+
+function render(page, append) {
+  const rows = el("rows");
+  if (!append) rows.innerHTML = "";
+  for (const event of page.events) rows.insertAdjacentHTML("beforeend", rowOf(event));
+  const shown = rows.children.length;
+  el("count").textContent = page.total
+    ? `${shown} de ${page.total} requisições`
+    : "nenhuma requisição";
+  el("empty").hidden = shown > 0;
+  el("more").hidden = !cursor;
+  el("status").textContent = "";
+  if (selected) {
+    const row = rows.querySelector(`tr[data-id="${CSS.escape(selected)}"]`);
+    if (row) row.setAttribute("aria-selected", "true");
+  }
+}
+
+function rowOf(event) {
+  const bad = event.status >= 400;
+  const tokens = event.input_tokens + event.output_tokens;
+  const marks = [
+    event.stream ? "stream" : "",
+    event.fell_back ? '<span class="tag fell">fallback</span>' : "",
+    (event.tools_called || []).length ? esc(event.tools_called.join(" ")) : "",
+  ].filter(Boolean).join(" · ");
+  return `<tr data-id="${esc(event.request_id)}">
+    <td class="when" title="${esc(day(event.started_at))}">${esc(clock(event.started_at, true))}</td>
+    <td>${esc((event.route || "").replace("/v1/", ""))}</td>
+    <td>${esc(event.requested_model || "—")}</td>
+    <td>${bad && event.error_type
+      ? `<span class="tag bad">${esc(event.error_type)}</span>`
+      : esc(event.candidate_model || "—")} <span class="tag">${marks}</span></td>
+    <td class="n">${compact(tokens)}</td>
+    <td class="n">${ms(event.duration_ms)}</td>
+    <td class="n status ${bad ? "bad" : ""}">${event.status}</td>
+  </tr>`;
+}
+
+async function openDetail(requestId) {
+  selected = requestId;
+  for (const row of document.querySelectorAll("#rows tr")) {
+    row.setAttribute("aria-selected", String(row.dataset.id === requestId));
+  }
+  el("detail").innerHTML = `<p class="empty">Carregando…</p>`;
+  const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}`);
+  const event = await response.json();
+  if (!response.ok) {
+    el("detail").innerHTML = `<p class="empty">${esc(event.error || "não encontrada")}</p>`;
+    return;
+  }
+  el("detail").innerHTML = detailOf(event);
+}
+
+function detailOf(event) {
+  const tokens = event.input_tokens + event.output_tokens;
+  // A cadeia como aconteceu: cada tentativa que falhou, e no fim quem
+  // respondeu. É a pergunta que traz alguém a esta tela.
+  const attempts = (event.attempts || []).map((line) => {
+    const [who, ...rest] = String(line).split(":");
+    return `<li><b>${esc(who)}</b> <small>${esc(rest.join(":").trim())}</small></li>`;
+  });
+  if (event.candidate_model) {
+    attempts.push(
+      `<li class="won"><b>${esc(event.candidate_model)}</b> <small>respondeu em ${ms(event.duration_ms)}</small></li>`
+    );
+  }
+  const offered = (event.tools_offered || []).map((tool) => {
+    const used = (event.tools_called || []).includes(tool);
+    return `<span class="pill ${used ? "used" : ""}">${esc(tool)}</span>`;
+  });
+  return `
+    <h2>${esc(event.candidate_model || "nenhum candidato respondeu")}</h2>
+    <p class="id">${esc(event.request_id)}</p>
+    <dl>
+      <dt>Quando</dt><dd>${esc(day(event.started_at))} ${esc(clock(event.started_at, true))}</dd>
+      <dt>Rota</dt><dd>${esc(event.route)} · ${esc(event.dialect)}${event.stream ? " · stream" : ""}</dd>
+      <dt>Pedido</dt><dd>${esc(event.requested_model || "—")}</dd>
+      <dt>Regra</dt><dd>${esc(event.rule)}${event.matched ? ` → ${esc(event.matched)}` : ""}</dd>
+      <dt>Provedor</dt><dd>${esc(event.provider || "—")}</dd>
+      <dt>Status</dt><dd>${event.status}${event.error_type ? ` · ${esc(event.error_type)}` : ""}</dd>
+      <dt>Tokens</dt><dd>${compact(event.input_tokens)} entrada · ${compact(event.output_tokens)} saída · ${compact(tokens)} total</dd>
+      <dt>Duração</dt><dd>${ms(event.duration_ms)}${event.ttft_ms !== null ? ` · 1º token ${ms(event.ttft_ms)}` : ""}</dd>
+      <dt>Raciocínio</dt><dd>${event.thinking_blocks} bloco(s)</dd>
+    </dl>
+    <h3>Cadeia</h3>
+    <ul class="chain">${attempts.join("") || '<li class="won"><b>sem tentativas registradas</b></li>'}</ul>
+    <h3>Ferramentas</h3>
+    ${offered.length ? `<div class="pills">${offered.join("")}</div>` : '<p class="empty">Nenhuma oferecida.</p>'}
+  `;
+}
+
+function update(push = true) {
+  cursor = null;
+  writeUrl(push);
+  search();
+}
+
+el("filters").addEventListener("submit", (event) => event.preventDefault());
+
+for (const chip of document.querySelectorAll(".chip")) {
+  chip.addEventListener("click", () => {
+    const on = chip.getAttribute("aria-pressed") === "true";
+    chip.setAttribute("aria-pressed", String(!on));
+    if (on) delete state[chip.dataset.filter];
+    else state[chip.dataset.filter] = chip.dataset.value;
+    update();
+  });
+}
+
+let typing = null;
+for (const id of ["text", "provider", "candidate_model"]) {
+  el(id).addEventListener("input", (event) => {
+    clearTimeout(typing);
+    // Espera a pessoa parar de digitar: uma consulta por tecla transformaria a
+    // busca numa rajada contra o mesmo banco que o proxy está gravando.
+    typing = setTimeout(() => {
+      const value = event.target.value.trim();
+      if (value) state[id] = value;
+      else delete state[id];
+      update(false);
+    }, 300);
+  });
+}
+
+for (const head of document.querySelectorAll("th[data-order]")) {
+  head.addEventListener("click", () => {
+    state.order_by = head.dataset.order;
+    update();
+  });
+}
+
+el("rows").addEventListener("click", (event) => {
+  const row = event.target.closest("tr");
+  if (row?.dataset.id) openDetail(row.dataset.id);
+});
+
+el("more").addEventListener("click", () => search({ append: true }));
+
+el("reset").addEventListener("click", () => {
+  state = { order_by: "time" };
+  readUrlFromState();
+  update();
+});
+
+function readUrlFromState() {
+  el("text").value = "";
+  el("provider").value = "";
+  el("candidate_model").value = "";
+  for (const chip of document.querySelectorAll(".chip")) chip.setAttribute("aria-pressed", "false");
+}
+
+window.addEventListener("popstate", () => {
+  readUrl();
+  cursor = null;
+  search();
+});
+
+readUrl();
+writeUrl(false);
+search();
+</script>
+</body>
+</html>

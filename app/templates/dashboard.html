@@ -46,6 +46,9 @@
     letter-spacing: 0.14em;
   }
   header h1 span { color: var(--requests); }
+  header nav { display: flex; gap: 16px; font-size: 13px; }
+  header nav a { color: var(--muted); text-decoration: none; }
+  header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
   .state { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
   .state b { color: var(--ink); font-weight: 500; }
   .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
@@ -194,6 +197,10 @@
 <body>
 <header>
   <h1>SHU<span>N</span>T</h1>
+  <nav>
+    <a href="/" aria-current="page">Painel</a>
+    <a href="/requests">Requisições</a>
+  </nav>
   <div class="state" id="state"></div>
   <div class="windows" id="windows">
     <button data-hours="0.0833" aria-pressed="false">5min</button>

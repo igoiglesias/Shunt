@@ -67,3 +67,27 @@ async def test_a_database_that_hangs_at_boot_does_not_hang_the_proxy(monkeypatch
     engine = await main._engine_or_none()
     assert engine is None
     assert time.monotonic() - started < 5
+
+
+def test_the_audit_screen_is_served_and_links_back_to_the_panel():
+    with client() as c:
+        response = c.get("/requests")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/html")
+    assert "<title>Shunt — requisições</title>" in response.text
+    assert 'href="/"' in response.text
+
+
+def test_the_panel_links_to_the_audit_screen():
+    from app.main import DASHBOARD
+
+    assert 'href="/requests"' in DASHBOARD.read_text(encoding="utf-8")
+
+
+def test_the_audit_screen_reads_the_three_audit_routes():
+    from app.main import AUDIT
+
+    page = AUDIT.read_text(encoding="utf-8")
+    assert "/api/requests?" in page
+    assert "/api/requests/export?" in page
+    assert "/api/requests/${encodeURIComponent(requestId)}" in page

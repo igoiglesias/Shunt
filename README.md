@@ -25,6 +25,7 @@ speaking Anthropic through the same proxy.
 - [Fallback, retries and timeouts](#fallback-retries-and-timeouts)
 - [Endpoints](#endpoints)
 - [The usage panel](#the-usage-panel)
+- [The request screen](#the-request-screen)
 - [Development](#development)
 - [What Shunt does not do](#what-shunt-does-not-do)
 
@@ -334,6 +335,10 @@ never sees anything before `message_start`.
 | `GET` | `/api/stats` | The panel's summary as JSON, cached for a few seconds. |
 | `GET` | `/api/stats/stream` | One SSE event per finished request, read from memory. |
 | `POST` | `/api/stats/clear` | Deletes the stored history. Needs `{"confirm": true}`. |
+| `GET` | `/requests` | The request audit screen. |
+| `GET` | `/api/requests` | Search the stored requests. Filters combine; paging is by cursor. |
+| `GET` | `/api/requests/export` | The same search as CSV. |
+| `GET` | `/api/requests/{id}` | One request, with its whole chain of attempts. |
 
 `/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
 `x-api-key` or a Claude user agent; OpenAI shape to one sending only
@@ -384,6 +389,24 @@ visible:
 | Recording to the database | 2.92 ms | 4.85 ms | 5.85 ms |
 | Recording, panel open | 3.05 ms | 4.70 ms | 5.76 ms |
 | Database unreachable | 2.58 ms | 3.75 ms | 4.16 ms |
+
+### The request screen
+
+`http://127.0.0.1:8000/requests` is the other half: the panel says how things
+are going, this says what happened in one request, and how many look like it.
+
+Type into the search box and it matches the request id, either model, the
+provider, a tool name, or the reason a candidate was skipped. The chips beside
+it are the five cuts that get asked for most — failures, streams, fallbacks,
+requests that called a tool, anything slower than five seconds — and they
+combine with everything else. Click a row and the panel beside it shows that
+request's whole chain: each candidate that was skipped and why, then the one
+that answered, with tokens, latency and time to first token.
+
+The search lives in the URL, so an investigation is a link you can send to
+someone. **Exportar CSV** hands the same result to a spreadsheet.
+
+What the screen never shows is the prompt or the answer. They are not stored.
 
 ### Clearing the history
 

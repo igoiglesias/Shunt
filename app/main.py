@@ -41,7 +41,9 @@ async def lifespan(app: FastAPI):
     await app.state.pool.aclose()
 
 
-DASHBOARD = Path(__file__).parent / "templates" / "dashboard.html"
+TEMPLATES = Path(__file__).parent / "templates"
+DASHBOARD = TEMPLATES / "dashboard.html"
+AUDIT = TEMPLATES / "audit.html"
 
 # Prazo para o banco responder no boot. Medido: com a URL apontada para uma
 # porta morta, `create_all` nao levanta -- ele PENDURA, e o proxy nunca chega a
@@ -98,3 +100,9 @@ async def dashboard() -> str:
     checagem de vida; ela mudou para `/health`, e o README registra a troca.
     """
     return DASHBOARD.read_text(encoding="utf-8")
+
+
+@app.get("/requests", response_class=HTMLResponse)
+async def audit_screen() -> str:
+    """A tela de auditoria: buscar, abrir e exportar requisicoes gravadas."""
+    return AUDIT.read_text(encoding="utf-8")
