@@ -49,7 +49,8 @@
   header nav { display: flex; gap: 16px; font-size: 13px; }
   header nav a { color: var(--muted); text-decoration: none; }
   header nav a[aria-current="page"] { color: var(--ink); border-bottom: 2px solid var(--requests); }
-  .state { display: flex; gap: 18px; flex-wrap: wrap; color: var(--muted); font-size: 12.5px; }
+  .state { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 12px; }
+  .state div:first-child { color: var(--muted); }
   .state b { color: var(--ink); font-weight: 500; }
   .lamp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
   .lamp.on { background: var(--requests); box-shadow: 0 0 8px var(--requests); }
@@ -70,7 +71,12 @@
   .windows button:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
 
   main { padding: 20px; display: grid; gap: 20px; }
-  .flow-band { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; }
+  .flow-band {
+    display: grid;
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: 20px;
+    align-items: stretch;
+  }
   section {
     background: var(--panel);
     border: 1px solid var(--panel-edge);
@@ -132,7 +138,7 @@
   .tape li.bad { background: rgba(228, 87, 76, 0.08); }
   .tape li {
     display: grid;
-    grid-template-columns: 9ch minmax(0, 1fr) auto;
+    grid-template-columns: 9ch minmax(0, 1fr) 13ch;
     gap: 14px;
     padding: 5px 0;
     border-bottom: 1px solid #1d2835;
@@ -145,7 +151,7 @@
   .tape .what b { font-weight: 500; margin-right: 6px; }
   .tape .what { min-width: 0; overflow-wrap: anywhere; }
   .tape .what small { color: var(--muted); }
-  .tape .cost { font-family: var(--num); color: var(--muted); }
+  .tape .cost { font-family: var(--num); color: var(--muted); text-align: right; }
   .tape li.bad .what b { color: var(--error); }
   .tape li.fell .what b { color: var(--fallback); }
   .tape li.fresh { animation: land 900ms ease-out; }
@@ -413,74 +419,111 @@ function drawFigures() {
 // O diagrama que dá nome ao painel: o que foi PEDIDO à esquerda, o que
 // RESPONDEU à direita, e a espessura da faixa é o volume. É a pergunta que
 // um proxy de substituição de modelo existe para responder.
+// O herói da página. Duas colunas soltas diziam "pediram opus 35 vezes" e "o
+// local respondeu 36"; nenhuma das duas dizia se foi o opus que caiu no local.
+// A fita entre elas diz, e é a pergunta que um proxy de substituição existe
+// para responder.
 function drawFlow() {
-  const asked = snapshot.by_requested_model.slice(0, 5);
-  const served = snapshot.by_model.slice(0, 5);
-  if (!asked.length || !served.length) {
-    el("flow").innerHTML = `<p class="empty">Nenhuma requisição nesta janela.</p>`;
+  const pairs = snapshot.pairs || [];
+  if (!pairs.length) {
+    el("flow").innerHTML = `<p class="empty">Nenhuma requisição atendida nesta janela.</p>`;
     return;
   }
-  // Medido em 390 px: as duas colunas lado a lado colidem, e o texto escalado
-  // pelo viewBox fica ilegível. No estreito o diagrama vira duas faixas
-  // empilhadas, com o texto dimensionado em unidades do viewBox.
+
   const narrow = window.innerWidth <= 860;
-  const scale = narrow ? 2 : 1;
-  const ROW = 44 * scale;
-  const BAR_MAX = 26 * scale;
-  const width = 640;
+  const scale = narrow ? 1.9 : 1;
+  const W = 640;
+  const ROW = 46 * scale;
+  const GAP = 10 * scale;
+  const left = 4;
+  const right = W - 4;
 
-  const side = (list, x, anchor, top, color) => {
-    const peak = Math.max(...list.map((item) => item.requests), 1);
-    return list.map((item, index) => {
-      const name = item.model || item.requested_model;
-      const y = top + index * ROW;
-      const thickness = Math.max(4, (item.requests / peak) * BAR_MAX);
-      const tx = anchor === "end" ? x - 12 : x + 12;
-      return `
-        <rect x="${anchor === "end" ? x - 5 : x + 1}" y="${y}" width="${4 * scale}" height="${thickness.toFixed(1)}"
-              rx="2" fill="${color}" />
-        <text class="flow-label" x="${tx}" y="${y + 11 * scale}" text-anchor="${anchor}"
-              style="font-size:${12 * scale}px">${esc(name)}</text>
-        <text class="flow-sub" x="${tx}" y="${y + 27 * scale}" text-anchor="${anchor}"
-              style="font-size:${10.5 * scale}px">${item.requests} req · ${compact(item.tokens)} tok</text>`;
-    }).join("");
+  // Um nó por modelo de cada lado, com altura proporcional ao volume.
+  const side = (key) => {
+    const totals = new Map();
+    for (const pair of pairs) totals.set(pair[key], (totals.get(pair[key]) || 0) + pair.requests);
+    return [...totals.entries()].sort((a, b) => b[1] - a[1]);
   };
+  const asked = side("asked");
+  const served = side("served");
+  const total = pairs.reduce((sum, pair) => sum + pair.requests, 0) || 1;
 
-  if (narrow) {
-    const head = 26 * scale;
-    const servedTop = head + asked.length * ROW + head;
-    const height = servedTop + served.length * ROW + 10;
-    el("flow").innerHTML = `
-      <svg viewBox="0 0 ${width} ${height}" role="img"
-           aria-label="Modelos pedidos e modelos que responderam">
-        <text class="axis" x="2" y="${head - 8}" style="font-size:${11 * scale}px">modelo pedido</text>
-        ${side(asked, 2, "start", head, "var(--requests)")}
-        <text class="axis" x="2" y="${servedTop - 8}" style="font-size:${11 * scale}px">modelo que respondeu</text>
-        ${side(served, 2, "start", servedTop, "var(--tokens)")}
-      </svg>`;
-    return;
-  }
-
+  const TOP = 40 * scale;
+  const LABEL = 22 * scale;
+  // A altura vem do conteúdo: uma barra mínima por modelo, o resto repartido
+  // pelo volume. Calcular antes é o que garante que o último nó caiba.
   const rows = Math.max(asked.length, served.length);
-  const height = rows * ROW + 26;
+  const barSpace = Math.max(120, rows * 26 * scale);
+  const H = TOP + barSpace + rows * (GAP + LABEL) + 10;
+
+  const place = (list) => {
+    const map = new Map();
+    let y = TOP;
+    for (const [name, count] of list) {
+      const height = Math.max(8 * scale, (count / total) * barSpace);
+      map.set(name, { y, height, count });
+      y += height + GAP + LABEL;
+    }
+    return map;
+  };
+  const leftNodes = place(asked);
+  const rightNodes = place(served);
+
+  const node = (map, x, anchor, color) =>
+    [...map.entries()]
+      .map(([name, box]) => {
+        const tx = anchor === "end" ? x - 10 : x + 10;
+        return `
+          <rect x="${anchor === "end" ? x - 5 : x + 1}" y="${box.y.toFixed(1)}" width="4"
+                height="${box.height.toFixed(1)}" rx="2" fill="${color}" />
+          <text class="flow-label" x="${tx}" y="${(box.y - 6).toFixed(1)}"
+                text-anchor="${anchor}" style="font-size:${12 * scale}px">${esc(name)}</text>
+          <text class="flow-sub" x="${tx}" y="${(box.y + 10).toFixed(1)}"
+                text-anchor="${anchor}" style="font-size:${10.5 * scale}px">${box.count} req</text>`;
+      })
+      .join("");
+
+  // Cada fita sai do nó pedido e entra no nó que respondeu, empilhando-se
+  // dentro de ambos — é isso que deixa ver que um pedido se dividiu.
+  const usedLeft = new Map();
+  const usedRight = new Map();
+  const ribbons = pairs
+    .map((pair) => {
+      const from = leftNodes.get(pair.asked);
+      const to = rightNodes.get(pair.served);
+      if (!from || !to) return "";
+      const share = pair.requests / total;
+      const thickness = Math.max(2, share * barSpace);
+      const y1 = from.y + (usedLeft.get(pair.asked) || 0);
+      const y2 = to.y + (usedRight.get(pair.served) || 0);
+      usedLeft.set(pair.asked, (usedLeft.get(pair.asked) || 0) + thickness);
+      usedRight.set(pair.served, (usedRight.get(pair.served) || 0) + thickness);
+      const x1 = left + 6;
+      const x2 = right - 6;
+      const mid = (x1 + x2) / 2;
+      const path = [
+        `M${x1},${y1.toFixed(1)}`,
+        `C${mid},${y1.toFixed(1)} ${mid},${y2.toFixed(1)} ${x2},${y2.toFixed(1)}`,
+        `L${x2},${(y2 + thickness).toFixed(1)}`,
+        `C${mid},${(y2 + thickness).toFixed(1)} ${mid},${(y1 + thickness).toFixed(1)} ${x1},${(y1 + thickness).toFixed(1)}`,
+        "Z",
+      ].join(" ");
+      const title = `${pair.asked} → ${pair.served}: ${pair.requests} req · ${compact(pair.tokens)} tok`;
+      return `<path d="${path}" fill="var(--requests)" opacity="0.14"><title>${esc(title)}</title></path>`;
+    })
+    .join("");
+
   el("flow").innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img"
-         aria-label="Modelos pedidos à esquerda, modelos que responderam à direita">
-      <text class="axis" x="2" y="12">modelo pedido</text>
-      <text class="axis" x="638" y="12" text-anchor="end">modelo que respondeu</text>
-      ${side(asked, 2, "start", 24, "var(--requests)")}
-      ${side(served, 638, "end", 24, "var(--tokens)")}
-      <line x1="320" y1="20" x2="320" y2="${height - 8}" stroke="var(--panel-edge)" />
+    <svg viewBox="0 0 ${W} ${H}" role="img"
+         aria-label="Fitas ligando o modelo pedido ao modelo que respondeu">
+      <text class="axis" x="${left}" y="12">modelo pedido</text>
+      <text class="axis" x="${right}" y="12" text-anchor="end">modelo que respondeu</text>
+      ${ribbons}
+      ${node(leftNodes, left, "start", "var(--requests)")}
+      ${node(rightNodes, right, "end", "var(--tokens)")}
     </svg>`;
 }
 
-// Requisições e tokens são grandezas incomparáveis — 28 contra 2.800.000 — e
-// desenhá-las como duas barras irmãs convida à comparação errada. Requisições
-// são barras contra o eixo da esquerda; tokens são uma linha contra o eixo da
-// direita, cada um com a sua escala rotulada.
-//
-// O eixo do tempo é o tempo: a posição de cada hora vem do relógio, e não do
-// índice na lista. Duas horas com um buraco de seis entre elas ficavam coladas.
 function drawSeries() {
   const points = snapshot.per_hour;
   if (!points.length) {

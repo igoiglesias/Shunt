@@ -215,6 +215,7 @@ def test_the_snapshot_carries_every_section_the_panel_draws(seeded):
         "by_provider",
         "by_route",
         "by_requested_model",
+        "pairs",
         "errors",
         "chain",
         "tools",
@@ -343,3 +344,31 @@ def test_the_tool_table_stops_at_eight_rows(make_engine, tmp_path):
         session.commit()
     assert len(queries.tool_usage(engine)) == 8
     assert len(queries.snapshot(engine)["tools"]) == 8
+
+
+def test_the_pair_says_which_request_landed_on_which_model(make_engine, tmp_path):
+    """As duas listas separadas nao dizem se foi o opus que caiu no local."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'pares.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", requested_model="claude-opus-5", candidate_model="qwen3.8-27b"),
+                row(request_id="b", requested_model="claude-opus-5", candidate_model="qwen3.8-27b"),
+                row(request_id="c", requested_model="claude-opus-5", candidate_model="gpt-oss-120b"),
+                row(request_id="d", requested_model="claude-haiku-4-5", candidate_model="gpt-oss-120b"),
+                # Recusada: sem candidato, nao e um par.
+                row(request_id="e", requested_model="claude-opus-5", candidate_model=None),
+                # Listagem: sem modelo pedido, tambem nao.
+                row(request_id="f", requested_model="", candidate_model=None, route="/v1/models"),
+            ]
+        )
+        session.commit()
+    pares = queries.pairs(engine)
+    assert pares[0] == {
+        "asked": "claude-opus-5",
+        "served": "qwen3.8-27b",
+        "requests": 2,
+        "tokens": 30,
+    }
+    assert len(pares) == 3
+    assert all(par["served"] for par in pares)

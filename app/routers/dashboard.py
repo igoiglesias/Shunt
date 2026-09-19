@@ -112,6 +112,7 @@ def empty_snapshot(hours: float) -> dict:
         "by_provider": [],
         "by_route": [],
         "by_requested_model": [],
+        "pairs": [],
         "errors": [],
         "chain": {
             "requests": 0,

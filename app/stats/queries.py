@@ -183,6 +183,37 @@ def by_requested_model(
     return _grouped(engine, RequestEvent.requested_model, hours, limit, "requested_model")
 
 
+def pairs(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = 12) -> list[dict]:
+    """Quem pediu o que, e quem de fato respondeu -- o par, e nao as duas pontas.
+
+    As duas listas separadas dizem "pediram opus 35 vezes" e "o local respondeu
+    36"; nenhuma das duas diz se foi o opus que caiu no local. O par diz, e e a
+    pergunta que um proxy de substituicao existe para responder.
+    """
+    since = _since(hours)
+    with Session(engine) as session:
+        rows = session.execute(
+            select(
+                RequestEvent.requested_model,
+                RequestEvent.candidate_model,
+                func.count(RequestEvent.id),
+                func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
+            )
+            .where(
+                RequestEvent.started_at >= since,
+                RequestEvent.requested_model != "",
+                RequestEvent.candidate_model.is_not(None),
+            )
+            .group_by(RequestEvent.requested_model, RequestEvent.candidate_model)
+            .order_by(func.count(RequestEvent.id).desc())
+            .limit(limit)
+        ).all()
+    return [
+        {"asked": asked, "served": served, "requests": count, "tokens": tokens}
+        for asked, served, count, tokens in rows
+    ]
+
+
 def errors_by_type(
     engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
 ) -> list[dict]:
@@ -616,6 +647,7 @@ def snapshot(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         "by_provider": by_provider(engine, hours),
         "by_route": by_route(engine, hours),
         "by_requested_model": by_requested_model(engine, hours),
+        "pairs": pairs(engine, hours),
         "errors": errors_by_type(engine, hours),
         "chain": chain_health(engine, hours),
         "tools": tool_usage(engine, hours),

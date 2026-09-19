@@ -450,6 +450,23 @@ def test_the_series_has_two_axes_a_legend_and_no_overlapping_labels(browser, ser
     assert medido["linhasDeGrade"] >= 3, "faltou a grade que da escala ao grafico"
 
 
+def test_the_flow_links_each_request_to_what_answered_it(browser, server):
+    """Duas colunas soltas nao diziam se foi o opus que caiu no local."""
+    page, problems = open_panel(browser, server, 1500, 1000)
+    medido = page.evaluate(
+        """() => ({
+            fitas: document.querySelectorAll('#flow path').length,
+            nos: [...document.querySelectorAll('#flow text.flow-label')].map(t => t.textContent),
+            titulos: [...document.querySelectorAll('#flow path title')].map(t => t.textContent),
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert medido["fitas"] > 0, "nenhuma fita ligando os dois lados"
+    assert medido["nos"], "nenhum modelo no diagrama"
+    assert any("→" in titulo for titulo in medido["titulos"]), medido["titulos"]
+
+
 # Os dois testes de limpeza ficam no FIM do arquivo de proposito: eles zeram
 # o banco que o servidor deste modulo compartilha, e qualquer teste depois
 # deles veria um painel vazio que nao e o que ele quer medir.
