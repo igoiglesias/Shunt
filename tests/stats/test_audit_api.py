@@ -217,3 +217,21 @@ async def test_a_request_without_a_stored_body_says_so(store):
 async def test_without_a_database_the_body_and_the_facets_say_so():
     assert (await audit.request_body(with_params(Recorder(None)), "x")).status_code == 409
     assert (await audit.facets(with_params(Recorder(None)))).status_code == 409
+
+
+async def test_the_facets_never_offer_an_empty_value(store, make_engine, tmp_path):
+    """Mutante B10: sem o filtro de vazio, o seletor ganhava uma opcao em branco.
+
+    `/v1/models` grava modelo pedido vazio, e uma opcao sem rotulo na lista e
+    um filtro que ninguem consegue explicar.
+    """
+    from sqlalchemy.orm import Session
+
+    from tests.stats.test_queries import row
+
+    with Session(store.engine) as session:
+        session.add(row(request_id="listagem", route="/v1/models", requested_model=""))
+        session.commit()
+    facets = body_of(await audit.facets(with_params(store)))
+    for lista in facets.values():
+        assert all(item["value"] for item in lista), lista

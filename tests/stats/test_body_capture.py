@@ -179,3 +179,19 @@ def test_nothing_to_store_stores_nothing():
 def test_a_block_shape_never_seen_before_still_reads(bloco, esperado):
     """Provedor inventa tipo de bloco; a conversa nao pode virar excecao."""
     assert bodies._block_text(bloco) == esperado
+
+
+def test_the_capture_redacts_before_storing():
+    """Mutante B2: `capture` sem `redact` sobreviveu.
+
+    Os testes de redacao chamavam `redact` direto; nenhum provava que o caminho
+    que GRAVA passa por ela -- que e onde a chave chegaria ao banco.
+    """
+    capturado = bodies.capture(
+        "user: minha chave e sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAA",
+        "assistant: anotei ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    )
+    assert "sk-ant-api03" not in capturado["prompt"]
+    assert "ghp_" not in capturado["answer"]
+    assert capturado["prompt"].count("[redigido]") == 1
+    assert capturado["answer"].count("[redigido]") == 1
