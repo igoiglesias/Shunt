@@ -200,6 +200,23 @@ def _translate_response(data: dict, req: ShuntRequest, candidate: Candidate) -> 
     return anthropic_response_to_openai(data, requested)
 
 
+def _missing_credential(candidate: Candidate, settings: Settings) -> str | None:
+    """Nome da variavel que o provedor declara e o ambiente nao tem, ou None.
+
+    Declarar `api_key_env` e nao ter a variavel e erro de instalacao, nao de
+    requisicao: chamar assim manda um pedido sem credencial, leva 401 e gasta
+    uma tentativa para descobrir o que a configuracao ja sabia. Um provedor com
+    `api_key_env=None` -- um llama.cpp aberto, por exemplo -- nao quer
+    credencial nenhuma e continua sendo chamado.
+    """
+    if candidate.transparent:
+        return None
+    env = settings.providers[candidate.provider].api_key_env
+    if env and not settings.api_key(candidate.provider):
+        return env
+    return None
+
+
 def _exception_text(exc: BaseException | None) -> str:
     """Nome da classe mais a mensagem, porque a mensagem sozinha pode ser vazia.
 
@@ -306,6 +323,10 @@ async def _dispatch(
         label = candidate.alias or candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
+            continue
+        missing = _missing_credential(candidate, settings)
+        if missing is not None:
+            trace.append(f"{label}: credential {missing} is not set")
             continue
         try:
             payload = _payload(req, candidate, settings)
@@ -649,6 +670,10 @@ async def _stream_chain(
         label = candidate.alias or candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
+            continue
+        missing = _missing_credential(candidate, settings)
+        if missing is not None:
+            trace.append(f"{label}: credential {missing} is not set")
             continue
         try:
             payload = _payload(req, candidate, settings)

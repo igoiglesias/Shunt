@@ -139,3 +139,29 @@ def test_transport_failure_in_a_stream_names_the_exception_class(shunt, provider
         body = "".join(response.iter_text())
     assert "event: error" in body
     assert "ConnectError" in body
+
+
+def test_candidate_whose_credential_is_unset_is_skipped_not_called_unauthenticated(
+    shunt, provider, settings, monkeypatch
+):
+    """Declarar `api_key_env` e nao ter a variavel e erro de instalacao.
+
+    Chamar o provedor assim mando um pedido sem credencial, que volta 401 e
+    gasta uma tentativa para dizer o que a configuracao ja sabia. Um provedor
+    que declara `api_key_env=None` e outro caso: ele nao quer credencial, e
+    continua sendo chamado.
+    """
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings.routes = [("opus", ["free", "qwen"])]
+    provider.queue(Scripted(json_body={**OK, "model": "qwen3-8b"}))
+    response = shunt.post("/v1/messages", json=ASK)
+    assert response.status_code == 200
+    assert response.headers["x-shunt-model"] == "qwen3-8b"
+    assert len(provider.calls) == 1, "o candidato sem credencial nao pode ser chamado"
+
+
+def test_the_error_names_the_environment_variable_that_is_missing(shunt, settings, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings.routes = [("opus", ["free"])]
+    body = shunt.post("/v1/messages", json=ASK).json()
+    assert "OPENROUTER_API_KEY" in body["error"]["message"]
