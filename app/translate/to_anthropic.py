@@ -40,6 +40,7 @@ from typing import Any
 
 from app.schemas.anthropic import AnthropicErrorResponse
 from app.translate.ids import to_anthropic_id
+from app.translate.usage import openai_usage_to_anthropic
 
 STOP_REASONS = {
     "stop": "end_turn",
@@ -128,7 +129,6 @@ def openai_response_to_anthropic(resp: dict, requested_model: str) -> dict:
             }
         )
 
-    usage = resp.get("usage") or {}
     return {
         "id": _to_msg_id(resp.get("id")),
         "type": "message",
@@ -137,10 +137,10 @@ def openai_response_to_anthropic(resp: dict, requested_model: str) -> dict:
         "content": content,
         "stop_reason": STOP_REASONS.get(choices[0].get("finish_reason", "stop"), "end_turn"),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-        },
+        # Inclui os campos de cache QUANDO o provedor os manda. O cliente le
+        # `cache_read_input_tokens` para saber que o prefixo foi reaproveitado;
+        # descartar isso na traducao escondia o unico sinal que existe.
+        "usage": openai_usage_to_anthropic(resp.get("usage")),
     }
 
 

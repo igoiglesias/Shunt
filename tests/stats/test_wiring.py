@@ -282,3 +282,67 @@ def test_a_requisicao_seguinte_da_mesma_sessao_herda_o_projeto(stored):
     assert primeiro.project == "/home/x/agenda"
     assert segundo.project == "/home/x/agenda"
     assert segundo.session_id == "sessao-2"
+
+
+@respx.mock
+def test_o_cache_reportado_pelo_provedor_e_gravado(stored):
+    """Medido no llama.cpp local: a 2a chamada identica traz 2814 de 2818."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **answer(),
+                "usage": {
+                    "prompt_tokens": 2818,
+                    "completion_tokens": 10,
+                    "prompt_tokens_details": {"cached_tokens": 2814, "cache_write_tokens": 4},
+                },
+            },
+        )
+    )
+    with client() as c:
+        c.post("/v1/messages", json=ASK)
+    (event,) = stored()
+
+    assert event.input_tokens == 2818
+    assert event.cached_input_tokens == 2814
+    assert event.cache_write_tokens == 4
+
+
+@respx.mock
+def test_provedor_calado_sobre_cache_grava_nulo_e_nao_zero(stored):
+    """O Groq nao manda `prompt_tokens_details`. Zero ali seria a afirmacao
+    "o cache errou" onde nao houve medicao."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=answer())
+    )
+    with client() as c:
+        c.post("/v1/messages", json=ASK)
+    (event,) = stored()
+
+    assert event.cached_input_tokens is None
+    assert event.cache_write_tokens is None
+
+
+@respx.mock
+def test_o_cache_de_um_stream_tambem_e_gravado(stored):
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"choices": [{"delta": {"content": "oi"}}]}\n\n'
+                b'data: {"choices": [{"delta": {}, "finish_reason": "stop"}],'
+                b' "usage": {"prompt_tokens": 900, "completion_tokens": 5,'
+                b' "prompt_tokens_details": {"cached_tokens": 880}}}\n\n'
+                b"data: [DONE]\n\n"
+            ),
+        )
+    )
+    with client() as c, c.stream("POST", "/v1/messages", json={**ASK, "stream": True}) as response:
+        "".join(response.iter_text())
+    (event,) = stored()
+
+    assert event.stream is True
+    assert event.cached_input_tokens == 880
+    assert event.cache_write_tokens is None

@@ -35,6 +35,8 @@ def store(make_engine, tmp_path):
                     candidate_model="openai/gpt-oss-120b",
                     project="/home/x/agenda",
                     session_id="s-1",
+                    cached_input_tokens=8,
+                    cache_write_tokens=2,
                     tools_offered=["Read"],
                     tools_called=["Read"],
                 ),
@@ -273,3 +275,22 @@ async def test_as_facetas_oferecem_os_projetos_que_existem(store):
     facetas = body_of(await audit.facets(with_params(store)))
 
     assert facetas["projects"] == [{"value": "/home/x/agenda", "count": 1}]
+
+
+async def test_o_detalhe_e_o_csv_levam_o_cache_informado(store):
+    """Sem isto, a tela nao distingue "nao cacheou" de "o provedor nao disse"."""
+    pagina = body_of(await audit.search_requests(with_params(store)))
+    evento = {e["request_id"]: e for e in pagina["events"]}
+
+    assert evento["ok"]["cached_input_tokens"] == 8
+    assert evento["ok"]["cache_write_tokens"] == 2
+    # A requisicao cujo provedor nao informou continua NULA, e nao zero.
+    assert evento["falhou"]["cached_input_tokens"] is None
+
+    exportado = await audit.export_requests(with_params(store))
+    partes = [parte async for parte in exportado.body_iterator]
+    texto = "".join(p if isinstance(p, str) else p.decode() for p in partes)
+    linhas = {linha["request_id"]: linha for linha in csv.DictReader(io.StringIO(texto))}
+
+    assert linhas["ok"]["cached_input_tokens"] == "8"
+    assert linhas["falhou"]["cached_input_tokens"] == ""

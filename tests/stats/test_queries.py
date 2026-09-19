@@ -699,3 +699,82 @@ def test_a_busca_filtra_e_acha_pelo_projeto(make_engine, tmp_path):
 
     assert [e["request_id"] for e in exato["events"]] == ["um"]
     assert [e["request_id"] for e in livre["events"]] == ["dois"]
+
+
+# --- Cache -------------------------------------------------------------------
+#
+# Silencio e zero sao coisas diferentes. Medido: o Groq nao manda o campo, o
+# OpenRouter manda zero, e o llama.cpp local manda 2814 de 2818. Uma tela que
+# chama as tres coisas de "0%" leva a decisao errada -- foi assim que um modelo
+# leu este painel e recomendou ligar um cache que ja estava ligado.
+
+
+def test_a_taxa_de_cache_so_conta_quem_informou(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="c1", provider="local", input_tokens=1000,
+                    cached_input_tokens=900),
+                row(request_id="c2", provider="local", input_tokens=1000,
+                    cached_input_tokens=100),
+                # Sem sinal: fica fora das duas somas.
+                row(request_id="c3", provider="local", input_tokens=5000,
+                    cached_input_tokens=None),
+            ]
+        )
+        session.commit()
+
+    linha = queries.by_provider(engine)[0]
+
+    assert linha["cache_reported_requests"] == 2
+    assert linha["cached_input_tokens"] == 1000
+    # 1000 de 2000 tokens informados, e nao de 7000.
+    assert linha["cache_hit_rate"] == 0.5
+
+
+def test_provedor_que_nunca_informa_nao_ganha_taxa(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+    with Session(engine) as session:
+        session.add(row(request_id="mudo", provider="groq", input_tokens=3678))
+        session.commit()
+
+    linha = queries.by_provider(engine)[0]
+
+    assert linha["cache_reported_requests"] == 0
+    assert linha["cache_hit_rate"] is None
+
+
+def test_provedor_que_informa_zero_tem_taxa_zero(make_engine, tmp_path):
+    """Zero E uma medicao: o provedor disse que nao reaproveitou nada."""
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+    with Session(engine) as session:
+        session.add(
+            row(request_id="frio", provider="openrouter", input_tokens=3620,
+                cached_input_tokens=0)
+        )
+        session.commit()
+
+    linha = queries.by_provider(engine)[0]
+
+    assert linha["cache_reported_requests"] == 1
+    assert linha["cache_hit_rate"] == 0.0
+
+
+def test_a_janela_inteira_tem_a_propria_taxa_de_cache(make_engine, tmp_path):
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", input_tokens=2000, cached_input_tokens=1500),
+                row(request_id="b", input_tokens=2000, cached_input_tokens=500),
+                row(request_id="c", input_tokens=9000),
+            ]
+        )
+        session.commit()
+
+    totais = queries.totals(engine)
+
+    assert totais["cache_reported_requests"] == 2
+    assert totais["cached_input_tokens"] == 2000
+    assert totais["cache_hit_rate"] == 0.5

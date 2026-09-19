@@ -62,6 +62,8 @@ def seed(path) -> None:
                 tools_offered=["read"],
                 tools_called=["read"] if index % 3 == 0 else [],
                 thinking_blocks=1,
+                cached_input_tokens=(90 * index if index % 4 else None),
+                cache_write_tokens=None,
                 project="/home/iglesias/Projetos/agenda" if index % 3 else None,
                 session_id=f"s-{index % 4}",
             )
@@ -721,3 +723,51 @@ def test_the_generation_rate_is_on_screen_for_every_model(browser, server):
         assert "nada a medir" in resumo
     else:
         assert "medidas" in resumo
+
+
+def test_the_panel_tells_a_silent_provider_from_a_cold_cache(browser, server):
+    """"—" é "não informou"; "0%" é "informou que não reaproveitou nada"."""
+    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    page, problems = open_panel(browser, server, 1440, 1000)
+    lido = page.evaluate(
+        """() => ({
+            coluna: [...document.querySelectorAll('#models thead th')].map(t => t.textContent.trim()),
+            celulas: [...document.querySelectorAll('#models tbody tr')].map(
+                r => r.children[7].textContent.trim()),
+            resumo: [...document.querySelectorAll('#figures .figure')].map(f => f.textContent),
+        })"""
+    )
+    page.close()
+    assert problems == []
+    if not api["totals"]["requests"]:
+        return
+    assert "cache" in lido["coluna"]
+    esperado = [
+        "—" if linha["cache_hit_rate"] is None else f"{round(linha['cache_hit_rate'] * 100)}%"
+        for linha in api["by_model"]
+    ]
+    assert lido["celulas"] == esperado
+    assert any("entrada de cache" in texto for texto in lido["resumo"])
+
+
+def test_the_answered_table_shows_every_column_without_sideways_scrolling(browser, server):
+    """Medido a 1500px: com oito colunas numa coluna de 455px o cabeçalho saía
+    como "CA" e o cache ficava atrás de uma rolagem horizontal."""
+    page, problems = open_panel(browser, server, 1500, 1000)
+    medido = page.evaluate(
+        """() => {
+            const t = document.querySelector('#models table');
+            if (!t) return null;
+            const caixa = document.getElementById('models').getBoundingClientRect();
+            return {
+                colunas: [...t.querySelectorAll('th')].map(e => e.textContent.trim()),
+                cortada: t.getBoundingClientRect().width > caixa.width + 1,
+            };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    if medido is None:
+        return
+    assert medido["colunas"][-1] == "cache"
+    assert medido["cortada"] is False

@@ -222,6 +222,14 @@
     gap: 20px;
     align-items: stretch;
   }
+  /* "Quem respondeu" tem sete colunas -- modelo, provedor, req, tokens, erros,
+     média, tok/s e cache. Medido num painel de 1500px: numa coluna de 455px o
+     cabeçalho saía como "CA" e os valores de cache ficavam fora da vista, atrás
+     de uma rolagem horizontal que ninguém procura. Ocupa duas colunas onde há
+     duas. */
+  @media (min-width: 1240px) {
+    .grid > section.wide { grid-column: span 2; }
+  }
 
   /* Janela sem tráfego: uma faixa que explica e oferece a saída vale mais do
      que sete painéis repetindo "nada aqui" em alturas de tela cheia. */
@@ -399,7 +407,7 @@
   </section>
 
   <div class="grid">
-    <section><h2>Quem respondeu</h2><div id="models"></div></section>
+    <section class="wide"><h2>Quem respondeu</h2><div id="models"></div></section>
     <section><h2>Cadeia de fallback</h2><div id="chain"></div></section>
     <section><h2>Ferramentas</h2><div id="tools"></div></section>
   </div>
@@ -451,6 +459,10 @@ const msParts = (v) => {
 const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? v + "ms" : (v / 1000).toFixed(1) + "s");
 // Sem nada para medir a taxa é "—", e não 0: zero afirma que o modelo é lento,
 // e o que aconteceu foi não ter havido geração nenhuma na janela.
+// "—" é "o provedor não informou"; "0%" é "ele informou que não reaproveitou
+// nada". Chamar as duas coisas de 0% foi o que levou um modelo a recomendar
+// ligar um cache que já estava ligado.
+const cache = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
 const taxa = (v) => (v === null || v === undefined ? "—" : v >= 100 ? String(Math.round(v)) : v.toFixed(1));
 const pct = (v) => (v * 100).toFixed(v < 0.1 ? 1 : 0) + "%";
 
@@ -546,6 +558,14 @@ function drawFigures() {
           `${compact(entrada)} entrada · ${compact(saida)} saída`,
         ],
         ["", [compact(t.streams), ""], "em streaming", share(t.streams)],
+        [
+          "",
+          [cache(t.cache_hit_rate), ""],
+          "entrada de cache",
+          t.cache_reported_requests
+            ? `${compact(t.cache_reported_requests)} de ${compact(t.requests)} informadas`
+            : "nenhum provedor informou",
+        ],
       ],
     ],
     [
@@ -1033,6 +1053,7 @@ function drawServed() {
       <th>Modelo</th><th>Provedor</th><th class="n">req</th>
       <th class="n">tokens</th><th class="n">erros</th><th class="n">média</th>
       <th class="n" title="tokens de saída por segundo de geração; fora do streaming a conta inclui o tempo até o primeiro token">tok/s</th>
+      <th class="n" title="parte da entrada servida de cache, contando só as requisições em que o provedor informou">cache</th>
     </tr></thead><tbody>
     ${rows
       .map((r) => `<tr>
@@ -1043,6 +1064,7 @@ function drawServed() {
           <td class="n" style="color:${r.errors ? "var(--error-text)" : "inherit"}">${r.errors}</td>
           <td class="n">${ms(r.avg_duration_ms)}</td>
           <td class="n" title="${r.rated_requests} de ${r.requests} requisições medidas">${taxa(r.tokens_per_second)}</td>
+          <td class="n" title="${r.cache_reported_requests} de ${r.requests} requisições informaram cache">${cache(r.cache_hit_rate)}</td>
         </tr>`)
       .join("")}
     </tbody></table></div>`;

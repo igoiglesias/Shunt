@@ -90,6 +90,25 @@ def _latency(values: list[int]) -> dict:
     }
 
 
+def _cache(rows: list[RequestEvent]) -> dict:
+    """O que os provedores disseram sobre cache -- e sobre quantas requisicoes.
+
+    Vai no dossie porque sem isso o analista conclui pelo que NAO ve: um modelo
+    lendo este periodo sem esta secao recomendou ligar um cache que ja estava
+    ligado, e propos um `cache_control` que o provedor desta rota nem entende.
+    """
+    informadas = [row for row in rows if row.cached_input_tokens is not None]
+    entrada = sum(row.input_tokens or 0 for row in informadas)
+    lido = sum(row.cached_input_tokens or 0 for row in informadas)
+    return {
+        "reported_requests": len(informadas),
+        "silent_requests": len(rows) - len(informadas),
+        "cached_input_tokens": lido,
+        "input_tokens_of_reported": entrada,
+        "hit_rate": round(lido / entrada, 4) if entrada else None,
+    }
+
+
 def _volume(rows: list[RequestEvent], total: int, row_limit: int) -> dict:
     durations = [row.duration_ms for row in rows if row.duration_ms is not None]
     return {
@@ -104,6 +123,7 @@ def _volume(rows: list[RequestEvent], total: int, row_limit: int) -> dict:
         "input_tokens": sum(row.input_tokens or 0 for row in rows),
         "output_tokens": sum(row.output_tokens or 0 for row in rows),
         "duration_ms": _latency(durations),
+        "cache": _cache(rows),
     }
 
 

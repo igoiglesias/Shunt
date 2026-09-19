@@ -77,6 +77,14 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 ),
                 func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
                 func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.cached_input_tokens), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.input_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
             ).where(RequestEvent.started_at >= since)
         ).one()
         durations = list(
@@ -103,6 +111,9 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         rated_tokens,
         generation_ms,
         rated_requests,
+        cached_input_tokens,
+        informed_input_tokens,
+        cache_reported_requests,
     ) = row
     return {
         "requests": requests,
@@ -119,6 +130,9 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         "rated_requests": rated_requests,
         "generation_ms": int(generation_ms),
         "tokens_per_second": _rate(int(rated_tokens), int(generation_ms)),
+        "cached_input_tokens": int(cached_input_tokens),
+        "cache_reported_requests": cache_reported_requests,
+        "cache_hit_rate": _hit_rate(int(cached_input_tokens), int(informed_input_tokens)),
     }
 
 
@@ -264,6 +278,21 @@ def _rated():
     return and_(RequestEvent.output_tokens > 0, generation.is_not(None), generation > 0)
 
 
+# Cache: so entra na conta a requisicao em que o provedor DISSE alguma coisa.
+# Medido: o Groq nao manda o campo, o OpenRouter manda zero e o llama.cpp local
+# manda 2814 de 2818. Somar as tres como se fossem zero produziria "0% de cache"
+# para todo mundo -- que foi exatamente a leitura errada que levou a recomendar
+# ligar um cache que ja estava ligado.
+def _cache_reported():
+    return RequestEvent.cached_input_tokens.is_not(None)
+
+
+def _hit_rate(cached: int, informed_input: int) -> float | None:
+    if not informed_input:
+        return None
+    return round(cached / informed_input, 4)
+
+
 def _rate(tokens: int, generation_ms: int) -> float | None:
     if not generation_ms:
         return None
@@ -285,6 +314,14 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
                 ),
                 func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
                 func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.cached_input_tokens), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.input_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
             )
             .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
             .group_by(column)
@@ -301,8 +338,14 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
             "rated_requests": rated,
             "generation_ms": int(generation),
             "tokens_per_second": _rate(int(rated_tokens), int(generation)),
+            "cached_input_tokens": int(cached),
+            "cache_reported_requests": informed,
+            "cache_hit_rate": _hit_rate(int(cached), int(informed_input)),
         }
-        for value, requests, tokens, errors, avg, rated_tokens, generation, rated in rows
+        for (
+            value, requests, tokens, errors, avg, rated_tokens, generation, rated,
+            cached, informed_input, informed,
+        ) in rows
     ]
 
 
@@ -388,6 +431,14 @@ def by_project(
                 ),
                 func.coalesce(func.sum(case((_rated(), _generation_ms()), else_=0)), 0),
                 func.coalesce(func.sum(case((_rated(), 1), else_=0)), 0),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.cached_input_tokens), else_=0)),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(case((_cache_reported(), RequestEvent.input_tokens), else_=0)), 0
+                ),
+                func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
             )
             .where(RequestEvent.started_at >= since)
             .group_by(rotulo)
@@ -407,8 +458,14 @@ def by_project(
             "rated_requests": rated,
             "generation_ms": int(generation),
             "tokens_per_second": _rate(int(rated_tokens), int(generation)),
+            "cached_input_tokens": int(cached),
+            "cache_reported_requests": informed,
+            "cache_hit_rate": _hit_rate(int(cached), int(informed_input)),
         }
-        for path, requests, tokens, errors, avg, rated_tokens, generation, rated in rows
+        for (
+            path, requests, tokens, errors, avg, rated_tokens, generation, rated,
+            cached, informed_input, informed,
+        ) in rows
     ]
 
 
@@ -657,6 +714,8 @@ def _as_event(row: RequestEvent) -> dict:
         "thinking_blocks": row.thinking_blocks,
         "project": row.project,
         "session_id": row.session_id,
+        "cached_input_tokens": row.cached_input_tokens,
+        "cache_write_tokens": row.cache_write_tokens,
     }
 
 

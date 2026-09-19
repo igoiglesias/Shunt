@@ -26,6 +26,7 @@ speaking Anthropic through the same proxy.
 - [Endpoints](#endpoints)
 - [The usage panel](#the-usage-panel)
 - [The request screen](#the-request-screen)
+- [Cache: what the provider reported](#cache-what-the-provider-reported)
 - [Generation rate and project](#generation-rate-and-project)
 - [Analysing a period](#analysing-a-period)
 - [Development](#development)
@@ -438,6 +439,39 @@ cut the same way, with a button that copies it as a `curl` — the conversation
 says what was said, this says how to reproduce it.
 
 Clearing the history takes the stored conversations with it.
+
+## Cache: what the provider reported
+
+The panel has a **cache** column per model and a figure in the window summary:
+how much of the input the provider said it served from cache. Shunt used to drop
+that signal in translation — so neither the client nor the panel could tell
+whether the repeated prefix was being reused at all.
+
+**Absent and zero are different**, and the screen keeps them apart. Measured on
+the three providers here, with two identical requests each:
+
+| provider | what it reports |
+|---|---|
+| llama.cpp (local) | 2nd call: `cached_tokens` 2814 of 2818 — it caches on its own, for free |
+| Groq `gpt-oss-120b` | no `prompt_tokens_details` at all — says nothing |
+| OpenRouter free model | `cached_tokens: 0` on both — says it reused nothing |
+
+A provider that says nothing shows `—`, never `0%`: calling silence "0% cache"
+is how a reader concludes the cache is broken when it was never measured — and
+it is exactly what led an analysis of this panel to recommend turning on a cache
+that was already on. The rate counts only the requests whose provider reported,
+and each row says how many those were.
+
+The signal also reaches the client now: an OpenAI-shaped
+`prompt_tokens_details.cached_tokens` becomes Anthropic's
+`cache_read_input_tokens` (and back the other way), so a harness that displays
+cache hits can display them through Shunt.
+
+One thing Shunt does not do: add `cache_control` of its own. The OpenAI chat API
+has no such field, so it cannot survive the translation to the providers
+configured here; against an Anthropic-protocol candidate the client's own
+`cache_control` passes through untouched, which is the correct behaviour for a
+proxy that holds no credentials and rewrites no prompts.
 
 ## Generation rate and project
 

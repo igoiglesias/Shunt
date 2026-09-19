@@ -253,3 +253,15 @@ def test_bloco_que_nao_e_texto_fica_fora_da_analise(store, monkeypatch):
     # Raciocinio nao e analise: entregar os dois juntos poria o rascunho do
     # modelo na tela como se fosse recomendacao.
     assert resultado["text"] == "1. Faça X."
+
+
+def test_o_prompt_avisa_que_silencio_nao_e_ausencia_de_cache(store, dublê):
+    """A recomendacao errada que motivou esta historia: um modelo leu o periodo
+    sem a secao de cache e propos ligar um cache que ja estava ligado."""
+    import asyncio
+
+    asyncio.run(analysis.analyse(store, SETTINGS, None, filters={}, model="m"))
+
+    system = dublê[0].body["system"]
+    assert "silent_requests" in system
+    assert "ausência de dado" in system

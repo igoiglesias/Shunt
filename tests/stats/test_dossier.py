@@ -429,3 +429,35 @@ def test_a_analise_pode_ser_de_um_projeto_so(engine):
 
     assert dossie["volume"]["requests"] == 1
     assert dossie["period"]["filters"] == {"project": "/home/x/agenda"}
+
+
+def test_o_dossie_diz_o_que_os_provedores_informaram_de_cache(engine):
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="a", input_tokens=1000, cached_input_tokens=900),
+                row(request_id="b", input_tokens=1000, cached_input_tokens=100),
+                row(request_id="mudo", input_tokens=5000),
+            ]
+        )
+        session.commit()
+
+    cache = dossier.build(engine)["volume"]["cache"]
+
+    assert cache["reported_requests"] == 2
+    assert cache["silent_requests"] == 1
+    assert cache["cached_input_tokens"] == 1000
+    # A taxa é sobre a entrada INFORMADA (2000), não sobre os 7000 da janela:
+    # senão o dossiê sugere que o cache falhou onde ninguém mediu.
+    assert cache["hit_rate"] == 0.5
+
+
+def test_sem_ninguem_informando_a_taxa_de_cache_e_nula(engine):
+    with Session(engine) as session:
+        session.add(row(request_id="mudo", input_tokens=5000))
+        session.commit()
+
+    cache = dossier.build(engine)["volume"]["cache"]
+
+    assert cache["hit_rate"] is None
+    assert cache["silent_requests"] == 1

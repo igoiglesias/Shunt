@@ -851,6 +851,12 @@ function detailOf(event) {
       <dt>Projeto</dt><dd title="${esc(event.project || "")}">${esc(event.project || "—")}</dd>
       <dt>Status</dt><dd>${event.status}${event.error_type ? ` · ${esc(event.error_type)}` : ""}</dd>
       <dt>Tokens</dt><dd>${compact(event.input_tokens)} entrada · ${compact(event.output_tokens)} saída · ${compact(tokens)} total</dd>
+      <dt>Cache</dt><dd>${
+        event.cached_input_tokens === null || event.cached_input_tokens === undefined
+          ? "o provedor não informou"
+          : `${compact(event.cached_input_tokens)} de ${compact(event.input_tokens)} da entrada` +
+            (event.cache_write_tokens ? ` · ${compact(event.cache_write_tokens)} escritos` : "")
+      }</dd>
       <dt>Duração</dt><dd>${ms(event.duration_ms)}${event.ttft_ms !== null ? ` · 1º token ${ms(event.ttft_ms)}` : ""}</dd>
       <dt>Raciocínio</dt><dd>${event.thinking_blocks} bloco(s)</dd>
     </dl>

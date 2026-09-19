@@ -541,3 +541,25 @@ def test_the_translator_reports_the_usage_it_saw():
     t.feed({"choices": [{"delta": {"content": "oi"}}]})
     t.feed({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5}})
     assert t.usage() == {"input_tokens": 12, "output_tokens": 5}
+
+
+def test_o_cache_atravessa_o_stream_ate_o_message_delta():
+    """Em streaming o `usage` chega num chunk qualquer, e o cache vem com ele."""
+    t = OpenAIStreamToAnthropic("claude-opus-5", "msg_1")
+    t.feed({"choices": [{"delta": {"content": "oi"}}]})
+    t.feed(
+        {
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 2818,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 2814},
+            },
+        }
+    )
+
+    assert t.usage() == {
+        "input_tokens": 2818,
+        "output_tokens": 10,
+        "cache_read_input_tokens": 2814,
+    }

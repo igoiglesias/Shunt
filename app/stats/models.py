@@ -60,6 +60,13 @@ class RequestEvent(Base):
     attempts: Mapped[list] = mapped_column(JSON, default=list)
     fell_back: Mapped[bool] = mapped_column(default=False)
 
+    # O que o provedor disse sobre cache. NULO quando ele nao disse nada -- que
+    # e diferente de zero: medido, o Groq nao manda o campo e o OpenRouter manda
+    # zero. Guardar os dois como 0 faria a tela afirmar "0% de cache" sobre quem
+    # apenas nao informa.
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # De qual projeto veio, lido do corpo na ingestao (veja `app/core/project.py`).
     # Nulo e o caso comum e legitimo: cliente que nao e o Claude Code, ou versao
     # que mudou o rotulo do bloco de ambiente. A tela mostra "sem projeto" com a

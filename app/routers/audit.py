@@ -35,6 +35,7 @@ CSV_COLUMNS = (
     "status",
     "error_type",
     "input_tokens",
+    "cached_input_tokens",
     "output_tokens",
     "ttft_ms",
     "duration_ms",

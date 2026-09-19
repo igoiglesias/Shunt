@@ -49,7 +49,11 @@ Regras da resposta:
 3. Quando o dossiê não sustentar uma conclusão, diga que não sustenta em vez de
    preencher a lacuna. `sampled: true` significa que os agregados descrevem uma
    amostra do período, e não o período inteiro.
-4. Português do Brasil, sem preâmbulo e sem elogio ao dossiê.
+4. Em `volume.cache`, `silent_requests` são requisições cujo provedor não
+   informa cache — ausência de dado, e não ausência de cache. `hit_rate` é
+   calculado só sobre `input_tokens_of_reported`. Não recomende ligar cache sem
+   olhar esses números: um provedor pode já estar cacheando sozinho.
+5. Português do Brasil, sem preâmbulo e sem elogio ao dossiê.
 """
 
 INSTRUCTION = (

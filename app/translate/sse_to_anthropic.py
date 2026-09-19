@@ -36,6 +36,7 @@ from typing import Any
 from app.stats import bodies
 from app.translate.ids import to_anthropic_id
 from app.translate.to_anthropic import STOP_REASONS, reasoning_of
+from app.translate.usage import openai_usage_to_anthropic
 
 Event = tuple[str, dict[str, Any]]
 
@@ -193,10 +194,7 @@ class OpenAIStreamToAnthropic:
         events: list[Event] = self._start()
 
         if chunk.get("usage"):
-            self._usage = {
-                "input_tokens": chunk["usage"].get("prompt_tokens", 0),
-                "output_tokens": chunk["usage"].get("completion_tokens", 0),
-            }
+            self._usage = openai_usage_to_anthropic(chunk["usage"])
 
         choices = chunk.get("choices") or []
         if not choices:

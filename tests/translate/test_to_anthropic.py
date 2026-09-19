@@ -348,3 +348,41 @@ def test_a_reasoning_field_that_is_not_a_string_is_ignored():
             {"choices": [{"message": {"content": "ok", "reasoning": estranho}}]}, "m"
         )
         assert [b["type"] for b in out["content"]] == ["text"], estranho
+
+
+def test_o_cache_do_provedor_chega_ao_cliente_anthropic():
+    """Medido no llama.cpp local: a 2a chamada identica traz 2814 de 2818
+    tokens de cache. Descartado na traducao, nem o cliente nem o painel sabiam."""
+    resposta = openai_response_to_anthropic(
+        {
+            "id": "chatcmpl-1",
+            "model": "qwen3.8-27b",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 2818,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {"cached_tokens": 2814},
+            },
+        },
+        "claude-opus-5",
+    )
+
+    assert resposta["usage"] == {
+        "input_tokens": 2818,
+        "output_tokens": 10,
+        "cache_read_input_tokens": 2814,
+    }
+
+
+def test_provedor_calado_sobre_cache_nao_ganha_campo_inventado():
+    resposta = openai_response_to_anthropic(
+        {
+            "id": "chatcmpl-1",
+            "model": "gpt-oss-120b",
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3678, "completion_tokens": 10},
+        },
+        "claude-opus-5",
+    )
+
+    assert resposta["usage"] == {"input_tokens": 3678, "output_tokens": 10}

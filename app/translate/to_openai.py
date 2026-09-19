@@ -47,6 +47,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.translate.ids import to_openai_id
+from app.translate.usage import anthropic_usage_to_openai
 
 MAX_STOP_SEQUENCES = 4
 
@@ -277,7 +278,6 @@ def anthropic_response_to_openai(
     if tool_calls:
         message["tool_calls"] = tool_calls
 
-    usage = resp.get("usage") or {}
     return {
         "id": _to_chatcmpl_id(resp.get("id")),
         "object": "chat.completion",
@@ -290,8 +290,5 @@ def anthropic_response_to_openai(
                 "finish_reason": FINISH_REASONS.get(resp.get("stop_reason", "end_turn"), "stop"),
             }
         ],
-        "usage": {
-            "prompt_tokens": usage.get("input_tokens", 0),
-            "completion_tokens": usage.get("output_tokens", 0),
-        },
+        "usage": anthropic_usage_to_openai(resp.get("usage")),
     }

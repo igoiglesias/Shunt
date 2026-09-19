@@ -58,6 +58,7 @@ from app.translate.to_anthropic import (
 )
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai, anthropic_response_to_openai
+from app.translate.usage import cache_of
 
 # (protocolo do provedor, endpoint pedido pelo cliente) -> path no provedor.
 # A Anthropic nao tem equivalente a /completions nem a /embeddings: o par
@@ -334,6 +335,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     project, session_id = project_and_session(req.body)
     result = await _dispatch(req, settings, pool, resolution)
     usage = result.body.get("usage") or {}
+    cached, cache_written = cache_of(usage)
     called, thinking = _tools_called(result.body)
     log_request(
         RequestLog(
@@ -359,6 +361,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             thinking_blocks=thinking,
             project=project,
             session_id=session_id,
+            cached_input_tokens=cached,
+            cache_write_tokens=cache_written,
             body=bodies.capture(
                 bodies.prompt_text(req.body), bodies.answer_text(result.body), req.body
             ),
@@ -1014,6 +1018,8 @@ async def dispatch_stream(
                 thinking_blocks=tally.thinking_blocks,
                 project=project,
                 session_id=session_id,
+                cached_input_tokens=tally.usage.get("cache_read_input_tokens"),
+                cache_write_tokens=tally.usage.get("cache_creation_input_tokens"),
                 body=bodies.capture(
                     bodies.prompt_text(req.body), tally.answer_text, req.body
                 ),

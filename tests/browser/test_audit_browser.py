@@ -60,6 +60,8 @@ def seed(path) -> None:
                 tools_offered=["Read", "Bash"] if index % 3 == 0 else [],
                 tools_called=["Bash"] if index % 3 == 0 else [],
                 thinking_blocks=1,
+                cached_input_tokens=(50 * index if index % 3 else None),
+                cache_write_tokens=None,
                 project="/home/iglesias/Projetos/agenda" if index % 2 else None,
                 session_id=f"s-{index % 3}",
             )
