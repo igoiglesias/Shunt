@@ -230,8 +230,13 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     }
 
 
+# Oito linhas bastam: a nona ferramenta de um catalogo de harness nunca foi
+# chamada, e a tabela existe para mostrar as que foram.
+TOOL_LIMIT = 8
+
+
 def tool_usage(
-    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = DEFAULT_LIMIT
+    engine: Engine, hours: float = DEFAULT_HOURS, limit: int = TOOL_LIMIT
 ) -> list[dict]:
     """Oferecida e chamada lado a lado: a razao diz quais ferramentas pagam o prompt."""
     since = _since(hours)

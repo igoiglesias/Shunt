@@ -326,3 +326,20 @@ def test_clearing_takes_the_conversation_with_it(make_engine, tmp_path):
     queries.delete_events(engine)
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(RequestBody)) == 0
+
+
+def test_the_tool_table_stops_at_eight_rows(make_engine, tmp_path):
+    """Um harness oferece o catalogo inteiro; a nona nunca foi chamada.
+
+    Este teste existe porque o limite se perdeu uma vez ao restaurar arquivos
+    depois de uma varredura de mutacao, e so o painel ao vivo mostrou.
+    """
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'muitas.db'}")
+    catalogo = [f"Ferramenta{i:02d}" for i in range(15)]
+    with Session(engine) as session:
+        session.add_all(
+            [row(request_id=f"r{i}", tools_offered=catalogo, tools_called=[]) for i in range(3)]
+        )
+        session.commit()
+    assert len(queries.tool_usage(engine)) == 8
+    assert len(queries.snapshot(engine)["tools"]) == 8

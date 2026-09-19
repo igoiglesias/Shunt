@@ -408,6 +408,48 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     assert "reconectando" in state
 
 
+def test_the_summary_is_grouped_instead_of_a_row_of_loose_numbers(browser, server):
+    page, problems = open_panel(browser, server, 1500, 1000)
+    grupos = page.evaluate(
+        "() => [...document.querySelectorAll('#figures .group h3')].map(h => h.textContent)"
+    )
+    page.close()
+    assert problems == []
+    assert grupos == ["Volume", "Latência", "Saúde"]
+
+def test_the_series_has_two_axes_a_legend_and_no_overlapping_labels(browser, server):
+    """Requisicoes e tokens sao grandezas incomparaveis: cada uma no seu eixo."""
+    page, problems = open_panel(browser, server, 1500, 1000)
+    medido = page.evaluate(
+        """() => {
+            const textos = [...document.querySelectorAll('#series text')];
+            const caixas = textos.map(t => t.getBoundingClientRect());
+            let colisoes = 0;
+            for (let i = 0; i < caixas.length; i++) {
+                for (let j = i + 1; j < caixas.length; j++) {
+                    const a = caixas[i], b = caixas[j];
+                    if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+                        colisoes += 1;
+                    }
+                }
+            }
+            return {
+                colisoes,
+                legenda: [...document.querySelectorAll('#series + .legend .key, .legend .key')]
+                    .map(k => k.textContent.trim()),
+                barras: document.querySelectorAll('#series rect').length,
+                linhasDeGrade: document.querySelectorAll('#series line').length,
+            };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    assert medido["colisoes"] == 0, f"{medido['colisoes']} rotulos sobrepostos no grafico"
+    assert medido["legenda"] == ["requisições", "tokens", "horas com erro"]
+    assert medido["barras"] > 0
+    assert medido["linhasDeGrade"] >= 3, "faltou a grade que da escala ao grafico"
+
+
 # Os dois testes de limpeza ficam no FIM do arquivo de proposito: eles zeram
 # o banco que o servidor deste modulo compartilha, e qualquer teste depois
 # deles veria um painel vazio que nao e o que ele quer medir.
@@ -445,3 +487,5 @@ def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
     page.close()
     assert state == "false"
     assert label == "Limpar histórico"
+
+

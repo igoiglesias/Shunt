@@ -86,8 +86,11 @@
   }
   h2 em { font-style: normal; color: var(--dim); font-weight: 400; }
 
-  .figures { display: flex; flex-wrap: wrap; gap: 26px; }
-  .figure .value { font-family: var(--num); font-size: 26px; line-height: 1.1; }
+  .figures { display: flex; flex-wrap: wrap; gap: 14px 34px; align-items: flex-start; }
+  .group + .group { border-left: 1px solid var(--panel-edge); padding-left: 34px; }
+  .group h3 { margin: 0 0 8px; font-size: 11.5px; font-weight: 500; color: var(--dim); }
+  .group-figures { display: flex; flex-wrap: wrap; gap: 22px; }
+  .figure .value { font-family: var(--num); font-size: 24px; line-height: 1.1; }
   .figure .label { font-size: 12px; color: var(--muted); }
   .figure.requests .value { color: var(--requests); }
   .figure.tokens .value { color: var(--tokens); }
@@ -95,7 +98,7 @@
   .figure.errors .value { color: var(--error); }
 
   .scroll { overflow-x: auto; }
-  .scroll table { min-width: 330px; }
+  .scroll table { min-width: 380px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 5px 8px 5px 0; text-align: left; border-bottom: 1px solid #1d2835; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
@@ -154,10 +157,26 @@
     .tape li.fresh { animation: none; }
   }
 
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
+    gap: 20px;
+  }
   .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
   svg { display: block; width: 100%; height: auto; }
   .axis { fill: var(--dim); font-size: 10px; font-family: var(--num); }
+  .legend { display: flex; gap: 16px; margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
+  .key::before {
+    content: "";
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    margin-right: 6px;
+  }
+  .key.req::before { background: var(--requests); }
+  .key.tok::before { background: var(--tokens); border-radius: 50%; }
+  .key.err::before { background: var(--error); border-radius: 50%; }
   .flow-label { fill: var(--ink); font-size: 12px; }
   .flow-sub { fill: var(--muted); font-size: 10.5px; font-family: var(--num); }
   footer {
@@ -336,21 +355,59 @@ function drawState() {
       : `Persistência desligada: defina TURSO_DATABASE_URL para guardar histórico. O painel ao vivo segue funcionando.`;
 }
 
+// Oito números em fila pedem que o leitor descubra sozinho quais conversam
+// entre si. Em três grupos — volume, latência, saúde — a comparação certa fica
+// ao alcance e a errada fica longe.
 function drawFigures() {
   const t = snapshot.totals;
-  const figures = [
-    ["requests", compact(t.requests), "requisições"],
-    ["tokens", compact(t.input_tokens + t.output_tokens), `tokens (${compact(t.input_tokens)} entrada)`],
-    ["", ms(t.p50_duration_ms), "latência p50"],
-    ["", ms(t.p95_duration_ms), "latência p95"],
-    ["", ms(t.p50_ttft_ms), "1º token p50"],
-    ["fallback", compact(t.fallbacks), "trocas de candidato"],
-    ["", ms(t.p95_ttft_ms), "1º token p95"],
-    [t.error_rate > 0.05 ? "errors" : "", t.requests ? pct(t.error_rate) : "—", `erros (${t.errors})`],
+  const grupos = [
+    [
+      "Volume",
+      [
+        ["requests", compact(t.requests), "requisições"],
+        ["tokens", compact(t.input_tokens + t.output_tokens), "tokens"],
+        ["", compact(t.input_tokens), "de entrada"],
+        ["", compact(t.streams), "em streaming"],
+      ],
+    ],
+    [
+      "Latência",
+      [
+        ["", ms(t.p50_duration_ms), "mediana"],
+        ["", ms(t.p95_duration_ms), "p95"],
+        ["", ms(t.p50_ttft_ms), "1º token"],
+        ["", ms(t.p95_ttft_ms), "1º token p95"],
+      ],
+    ],
+    [
+      "Saúde",
+      [
+        [
+          t.error_rate > 0.05 ? "errors" : "",
+          t.requests ? pct(t.error_rate) : "—",
+          `erros (${t.errors})`,
+        ],
+        ["fallback", compact(t.fallbacks), "trocas de candidato"],
+      ],
+    ],
   ];
-  el("figures").innerHTML = figures.map(([kind, value, label]) =>
-    `<div class="figure ${kind}"><div class="value">${esc(value)}</div><div class="label">${esc(label)}</div></div>`
-  ).join("");
+  el("figures").innerHTML = grupos
+    .map(
+      ([titulo, figuras]) => `
+      <div class="group">
+        <h3>${esc(titulo)}</h3>
+        <div class="group-figures">
+          ${figuras
+            .map(
+              ([kind, value, label]) =>
+                `<div class="figure ${kind}"><div class="value">${esc(value)}</div>
+                 <div class="label">${esc(label)}</div></div>`
+            )
+            .join("")}
+        </div>
+      </div>`
+    )
+    .join("");
 }
 
 // O diagrama que dá nome ao painel: o que foi PEDIDO à esquerda, o que
@@ -417,59 +474,111 @@ function drawFlow() {
     </svg>`;
 }
 
+// Requisições e tokens são grandezas incomparáveis — 28 contra 2.800.000 — e
+// desenhá-las como duas barras irmãs convida à comparação errada. Requisições
+// são barras contra o eixo da esquerda; tokens são uma linha contra o eixo da
+// direita, cada um com a sua escala rotulada.
+//
+// O eixo do tempo é o tempo: a posição de cada hora vem do relógio, e não do
+// índice na lista. Duas horas com um buraco de seis entre elas ficavam coladas.
 function drawSeries() {
   const points = snapshot.per_hour;
   if (!points.length) {
     el("series").innerHTML = `<p class="empty">Sem tráfego nesta janela.</p>`;
     return;
   }
-  const width = 960, height = 140, pad = 24;
+
+  const W = 960, H = 190;
+  const padL = 46, padR = 54, padT = 16, padB = 26;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const base = padT + plotH;
+
+  const at = (point) => new Date(`${point.hour}Z`).getTime();
+  const tokensOf = (point) => point.input_tokens + point.output_tokens;
+  const first = at(points[0]);
+  const last = at(points[points.length - 1]);
+  const hour = 3600 * 1000;
+  // Uma hora só não tem intervalo: abre-se uma hora de cada lado para a barra
+  // não ocupar a largura inteira do painel.
+  const from = first - hour / 2;
+  const to = last + hour / 2;
+  const x = (time) => padL + ((time - from) / (to - from)) * plotW;
   const maxRequests = Math.max(...points.map((p) => p.requests), 1);
-  const maxTokens = Math.max(...points.map((p) => p.input_tokens + p.output_tokens), 1);
-  const step = points.length > 1 ? (width - pad * 2) / (points.length - 1) : 0;
-  const x = (i) => (points.length > 1 ? pad + i * step : width / 2);
-  const yR = (v) => height - 22 - (v / maxRequests) * (height - 40);
-  const yT = (v) => height - 22 - (v / maxTokens) * (height - 40);
-  const base = height - 22;
-  const ticks = points.map((p, i) => (i % Math.ceil(points.length / 8) === 0
-    ? `<text class="axis" x="${x(i).toFixed(1)}" y="${height - 6}" text-anchor="middle">${esc(clock(p.hour, false))}</text>`
-    : "")).join("");
-  const peak = `<text class="axis" x="${pad}" y="12">pico ${maxRequests} req · ${compact(maxTokens)} tok</text>`;
+  const maxTokens = Math.max(...points.map(tokensOf), 1);
+  const yR = (v) => base - (v / maxRequests) * plotH;
+  const yT = (v) => base - (v / maxTokens) * plotH;
+  const barW = Math.max(6, Math.min(34, (plotW / Math.max(points.length, 1)) * 0.5));
 
-  // Menos de três horas de tráfego não fazem uma linha: fazem duas barras.
-  // O painel de quem acabou de subir o proxy não pode parecer quebrado.
-  if (points.length < 3) {
-    const barWidth = 26;
-    el("series").innerHTML = `
-      <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Requisições e tokens por hora">
-        ${points.map((p, i) => {
-          const cx = x(i);
-          const tokens = p.input_tokens + p.output_tokens;
-          return `
-            <rect x="${cx - barWidth - 3}" y="${yR(p.requests)}" width="${barWidth}"
-                  height="${(base - yR(p.requests)).toFixed(1)}" fill="var(--requests)" opacity="0.85" />
-            <rect x="${cx + 3}" y="${yT(tokens)}" width="${barWidth}"
-                  height="${(base - yT(tokens)).toFixed(1)}" fill="var(--tokens)" opacity="0.85" />
-            <text class="flow-sub" x="${cx - barWidth / 2 - 3}" y="${yR(p.requests) - 6}"
-                  text-anchor="middle">${p.requests}</text>
-            <text class="flow-sub" x="${cx + barWidth / 2 + 3}" y="${yT(tokens) - 6}"
-                  text-anchor="middle">${compact(tokens)}</text>`;
-        }).join("")}
-        <line x1="${pad}" y1="${base}" x2="${width - pad}" y2="${base}" stroke="var(--panel-edge)" />
-        ${ticks}${peak}
-      </svg>`;
-    return;
-  }
+  // Três linhas de grade, com o valor de cada eixo na sua própria ponta.
+  const grid = [0, 0.5, 1]
+    .map((fraction) => {
+      const y = base - fraction * plotH;
+      return `
+        <line x1="${padL}" y1="${y.toFixed(1)}" x2="${W - padR}" y2="${y.toFixed(1)}"
+              stroke="var(--panel-edge)" stroke-dasharray="${fraction ? "2 4" : "0"}" />
+        <text class="axis" x="${padL - 8}" y="${(y + 3.5).toFixed(1)}" text-anchor="end"
+              fill="var(--requests)">${compact(Math.round(maxRequests * fraction))}</text>
+        <text class="axis" x="${W - padR + 8}" y="${(y + 3.5).toFixed(1)}"
+              fill="var(--tokens)">${compact(Math.round(maxTokens * fraction))}</text>`;
+    })
+    .join("");
 
-  const line = (accessor, y) => points.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(accessor(p)).toFixed(1)}`).join("");
+  const bars = points
+    .map((point) => {
+      const cx = x(at(point));
+      const top = yR(point.requests);
+      const title = `${clock(point.hour, false)} · ${point.requests} req · ${compact(tokensOf(point))} tok`;
+      return `<rect x="${(cx - barW / 2).toFixed(1)}" y="${top.toFixed(1)}"
+                    width="${barW.toFixed(1)}" height="${Math.max(1, base - top).toFixed(1)}"
+                    rx="2" fill="var(--requests)" opacity="0.85"><title>${esc(title)}</title></rect>`;
+    })
+    .join("");
+
+  const line =
+    points.length > 1
+      ? `<path d="${points
+          .map((p, i) => `${i ? "L" : "M"}${x(at(p)).toFixed(1)},${yT(tokensOf(p)).toFixed(1)}`)
+          .join("")}" fill="none" stroke="var(--tokens)" stroke-width="2" />`
+      : "";
+  const dots = points
+    .map((p) => {
+      const cx = x(at(p)).toFixed(1);
+      return `<circle cx="${cx}" cy="${yT(tokensOf(p)).toFixed(1)}" r="3.5" fill="var(--tokens)" />`;
+    })
+    .join("");
+  const errors = points
+    .filter((p) => p.errors)
+    .map(
+      (p) =>
+        `<circle cx="${x(at(p)).toFixed(1)}" cy="${(yR(p.requests) - 8).toFixed(1)}" r="3.5"
+                 fill="var(--error)"><title>${p.errors} com erro</title></circle>`
+    )
+    .join("");
+
+  // Um rótulo a cada N horas, escolhido pela largura disponível — rótulos
+  // sobrepostos são pior do que rótulo nenhum.
+  const step = Math.max(1, Math.ceil(points.length / 10));
+  const ticks = points
+    .filter((_, i) => i % step === 0)
+    .map(
+      (p) =>
+        `<text class="axis" x="${x(at(p)).toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(
+          clock(p.hour, false)
+        )}</text>`
+    )
+    .join("");
+
   el("series").innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Requisições e tokens por hora">
-      <path d="${line((p) => p.input_tokens + p.output_tokens, yT)}" fill="none" stroke="var(--tokens)" stroke-width="1.5" opacity="0.8" />
-      <path d="${line((p) => p.requests, yR)}" fill="none" stroke="var(--requests)" stroke-width="2" />
-      ${points.map((p, i) => p.errors
-        ? `<circle cx="${x(i).toFixed(1)}" cy="${yR(p.requests).toFixed(1)}" r="3" fill="var(--error)" />` : "").join("")}
-      ${ticks}${peak}
-    </svg>`;
+    <svg viewBox="0 0 ${W} ${H}" role="img"
+         aria-label="Requisições por hora em barras e tokens por hora em linha">
+      ${grid}${bars}${line}${dots}${errors}${ticks}
+    </svg>
+    <p class="legend">
+      <span class="key req">requisições</span>
+      <span class="key tok">tokens</span>
+      <span class="key err">horas com erro</span>
+    </p>`;
 }
 
 function drawTable(id, rows, key, heading) {
