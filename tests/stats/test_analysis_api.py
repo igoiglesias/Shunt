@@ -152,3 +152,12 @@ def test_listar_e_abrir_sem_banco_recusam_tambem(dublê):
 
     assert listagem.status_code == 409
     assert detalhe.status_code == 409
+
+
+def test_a_listagem_oferece_os_modelos_configurados(store, dublê):
+    listagem = body_of(asyncio.run(audit.list_analyses(request_for(store))))
+
+    # A escolha de quem vai ler o período aparece ANTES de gastar: sem isso,
+    # uma instalação sem `default_model` só descobre o 409 depois do clique.
+    assert listagem["models"] == ["cheap", "free"]
+    assert listagem["default_model"] == "cheap"

@@ -5,6 +5,7 @@ cadeia da requisicao clicada, e se o estado da busca vive na URL -- que e o que
 transforma uma investigacao num link.
 """
 
+import json
 import os
 import socket
 import subprocess
@@ -717,7 +718,10 @@ ANALISE = {
     "id": 1,
     "status": 200,
     "cached": False,
-    "text": "1. Tire a ferramenta Bash do catálogo: oferecida 8, chamada 8.\n2. Segunda coisa.",
+    "text": (
+        "**1. Tire a ferramenta `Bash` do catálogo:** oferecida 8, chamada 8.\n"
+        "**2. Segunda coisa.**"
+    ),
     "requested_model": "claude-opus-5",
     "candidate_model": "openai/gpt-oss-120b",
     "provider": "groq",
@@ -756,6 +760,16 @@ def test_analysis_button_sends_the_filters_on_screen(browser, server):
     page.click("#analyse")
     page.wait_for_selector("#analysis-text")
     leitura = page.inner_text(".read")
+    marcacao = page.evaluate(
+        """() => {
+            const read = document.querySelector('.read');
+            return {
+                negrito: read.querySelectorAll('b').length,
+                codigo: read.querySelectorAll('code').length,
+                cru: read.innerText.includes('**') || read.innerText.includes('`'),
+            };
+        }"""
+    )
     page.close()
     assert problems == []
     assert "provider=groq" in pedidos[0]
@@ -763,7 +777,14 @@ def test_analysis_button_sends_the_filters_on_screen(browser, server):
     # `order_by` ordena uma listagem e nao um periodo: mandar adiante faria a
     # rota recusar o dossie.
     assert "order_by" not in pedidos[0]
-    assert leitura.startswith("1. Tire a ferramenta Bash")
+    assert "Tire a ferramenta Bash" in leitura
+    # A resposta vem em Markdown: mostrar "**1. ...**" cru faria a leitura
+    # parecer um log. Vira lista, e nenhum asterisco sobra na tela.
+    assert marcacao["negrito"] == 2
+    assert marcacao["codigo"] == 1
+    assert marcacao["cru"] is False
+    # A numeração sobrevive: ela é a ordem por impacto que o prompt exigiu.
+    assert "1." in leitura
 
 
 def test_the_dossier_behind_the_reading_can_be_checked(browser, server):
@@ -845,3 +866,54 @@ def test_on_a_phone_the_side_panel_takes_the_whole_width(browser, server):
     assert problems == []
     assert medido["painel"] >= medido["tela"] - 2, medido
     assert medido["leitura"] > 250, medido
+
+
+def test_the_model_that_reads_the_period_can_be_chosen_before_paying(browser, server):
+    """Sem `default_model` a análise recusa; a escolha tem de estar na tela antes."""
+    page, problems = open_audit(browser, server)
+    corpos = []
+
+    def handle(route, request):
+        if request.method == "POST":
+            corpos.append(request.post_data)
+            route.fulfill(
+                status=200, content_type="application/json", body=json.dumps(ANALISE)
+            )
+        else:
+            route.continue_()
+
+    page.route("**/api/analysis*", handle)
+    # O seletor é preenchido pela própria rota da análise, e o catálogo desta
+    # instalação é o que o servidor de teste carregou.
+    page.wait_for_function("() => document.getElementById('analysis-model').options.length > 0")
+    opcoes = page.evaluate(
+        "() => [...document.getElementById('analysis-model').options].map((o) => o.value)"
+    )
+    page.select_option("#analysis-model", opcoes[-1])
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    page.close()
+    assert problems == []
+    assert opcoes
+    assert f'"model":"{opcoes[-1]}"' in (corpos[0] or "").replace(" ", "")
+
+
+def test_on_a_phone_opening_the_panel_scrolls_to_it(browser, server):
+    """Medido num print de 390px: o painel abria fora da tela, e o clique parecia não fazer nada."""
+    page, problems = open_audit(browser, server, width=390, height=844)
+    stub_analysis(page)
+    page.click("#analyse")
+    page.wait_for_selector("#analysis-text")
+    page.wait_for_timeout(800)
+    caixa = page.evaluate(
+        """() => {
+            const c = document.getElementById('detail').getBoundingClientRect();
+            return {topo: Math.round(c.top), base: Math.round(c.bottom), tela: window.innerHeight};
+        }"""
+    )
+    page.close()
+    assert problems == []
+    # O critério é quanto do painel ficou VISÍVEL, e não a que altura ele parou:
+    # com o painel no fim do documento a página não tem para onde rolar mais.
+    visivel = min(caixa["base"], caixa["tela"]) - max(caixa["topo"], 0)
+    assert visivel >= 250, caixa

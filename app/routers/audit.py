@@ -273,12 +273,26 @@ async def analyse_period(request: Request):
 
 @router.get("/api/analysis")
 async def list_analyses(request: Request):
-    """As analises ja pagas. Sem o dossie: a listagem e um menu."""
+    """As analises ja pagas, e quem pode ler o periodo.
+
+    O catalogo vem junto porque a tela precisa oferecer a escolha ANTES de
+    gastar: `default_model` e opcional, e uma instalacao sem ele so descobriria
+    que nao ha para quem mandar depois de clicar. Vem daqui, e nao de
+    `/v1/models`, porque aquela rota e do proxy e grava uma linha no historico a
+    cada visita -- a tela ficaria poluindo o proprio periodo que analisa.
+    """
     engine = _engine(request)
     if engine is None:
         return _no_database()
     items = await asyncio.to_thread(analysis.recent, engine)
-    return JSONResponse({"analyses": items})
+    settings = request.app.state.settings
+    return JSONResponse(
+        {
+            "analyses": items,
+            "models": sorted(settings.models),
+            "default_model": settings.default_model,
+        }
+    )
 
 
 @router.get("/api/analysis/{analysis_id}")

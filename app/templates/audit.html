@@ -183,11 +183,21 @@
      cansa: texto em sans, medida presa, e as quebras de linha preservadas
      porque a resposta vem numerada. */
   .read {
-    white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.65;
     max-width: 68ch;
     margin: 10px 0 14px;
+  }
+  .read p { margin: 0 0 10px; }
+  .read h4 { margin: 16px 0 6px; font-size: 13px; }
+  .read ul { margin: 0 0 10px; padding-left: 18px; }
+  .read li { margin: 0 0 6px; }
+  .read code {
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.06);
   }
   /* O dossiê é o oposto: número alinhado, em monoespaçada, com rolagem própria
      -- ele existe para ser CONFERIDO, e não lido de ponta a ponta. */
@@ -345,6 +355,7 @@
   <span class="spacer"></span>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
   <button type="button" class="ghost" id="export">Exportar CSV</button>
+  <select id="analysis-model" aria-label="modelo que lê o período"></select>
   <button type="button" class="ghost" id="analyse">Analisar este período</button>
   </div>
 </form>
@@ -572,6 +583,18 @@ function rowOf(event) {
 function showDetail() {
   el("detail").hidden = false;
   document.querySelector("main").classList.add("with-detail");
+  // No telefone o painel empilha ABAIXO da tabela: sem rolar até ele, clicar
+  // não parece ter feito nada. Medido num print de 390px — a análise abriu
+  // fora da tela.
+  revealDetail();
+}
+
+// Rolar uma vez não basta: o painel abre com "Analisando…" e cresce quando o
+// texto chega, e o conteúdo novo empurra a posição para onde já se rolou.
+// Medido a 390px: depois da primeira rolagem o topo do painel ficava a 746px.
+function revealDetail() {
+  if (window.innerWidth > 900) return;
+  el("detail").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function closeDetail() {
@@ -597,6 +620,7 @@ async function openDetail(requestId) {
   }
   el("detail").innerHTML = detailOf(event);
   wireTabs(event.request_id);
+  revealDetail();
 }
 
 // A conversa é buscada só quando alguém pede: ela pode ter dezenas de
@@ -827,6 +851,63 @@ function detailOf(event) {
 // sobre uma linha. Abrir uma segunda área ao lado espremeria a tabela.
 let analysis = null;
 
+// O catálogo vem da própria rota da análise: `/v1/models` grava uma linha no
+// histórico a cada visita, e a tela passaria a sujar o período que analisa.
+async function loadAnalysisModels() {
+  try {
+    const response = await fetch("/api/analysis");
+    if (!response.ok) return;
+    const data = await response.json();
+    const select = el("analysis-model");
+    const escolhas = data.models || [];
+    select.innerHTML = escolhas
+      .map((name) => `<option value="${esc(name)}"${name === data.default_model ? " selected" : ""}>${esc(name)}</option>`)
+      .join("");
+    select.hidden = escolhas.length === 0;
+  } catch (err) {
+    /* sem banco ou sem rede: o botão ainda funciona e o erro aparece no painel */
+  }
+}
+
+// O modelo responde em Markdown, e mostrar o Markdown cru ("**1. Reduzir…**",
+// crase em volta de cada número) faz a leitura parecer um log. Isto cobre o
+// subconjunto que uma análise usa: título, negrito, itálico, código e lista.
+// A escapada vem PRIMEIRO -- o texto vem de um modelo, e é conteúdo, não HTML.
+function markdownLite(texto) {
+  const linhas = esc(texto || "").split("\n");
+  const saida = [];
+  let lista = false;
+  for (const bruta of linhas) {
+    const linha = bruta.trimEnd();
+    // Só marcador de bala vira lista. Recomendação numerada fica parágrafo COM
+    // o número: ele é a ordem por impacto que o prompt pediu, e uma <ol> o
+    // reescreveria a partir de 1 -- inclusive quando o modelo pula um número.
+    const item = linha.match(/^\s*(?:[-•]|\*(?!\*))\s+(.*)$/);
+    if (item) {
+      if (!lista) { saida.push("<ul>"); lista = true; }
+      saida.push(`<li>${inline(item[1])}</li>`);
+      continue;
+    }
+    if (lista) { saida.push("</ul>"); lista = false; }
+    const titulo = linha.match(/^\s*(#{1,4})\s+(.*)$/);
+    if (titulo) {
+      saida.push(`<h4>${inline(titulo[2])}</h4>`);
+      continue;
+    }
+    if (!linha.trim()) continue;
+    saida.push(`<p>${inline(linha)}</p>`);
+  }
+  if (lista) saida.push("</ul>");
+  return saida.join("");
+}
+
+function inline(texto) {
+  return texto
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,;:]|$)/g, "$1<i>$2</i>");
+}
+
 function analysisOf(item) {
   const spent = item.cached
     ? "reaproveitada — não custou tokens agora"
@@ -845,11 +926,12 @@ function analysisOf(item) {
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="analysis" aria-selected="true">Leitura</button>
       <button type="button" role="tab" data-tab="dossier" aria-selected="false">Dossiê</button>
+      <span class="spacer"></span>
+      <button type="button" class="ghost" id="reanalyse">Refazer</button>
     </div>
     <div id="analysis-text">
       ${sampled}
-      <p class="read">${esc(item.text || "")}</p>
-      <button type="button" class="ghost" id="reanalyse">Refazer análise</button>
+      <div class="read">${markdownLite(item.text)}</div>
     </div>
     <div id="analysis-dossier" hidden>
       <p class="empty">Os números que a leitura acima tem de citar. ${compact(requests)} requisições no recorte.</p>
@@ -886,7 +968,10 @@ async function analysePeriod({ refresh } = {}) {
     const response = await fetch(`/api/analysis?${params}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ refresh: Boolean(refresh) }),
+      body: JSON.stringify({
+        refresh: Boolean(refresh),
+        model: el("analysis-model").value || undefined,
+      }),
     });
     const item = await response.json();
     if (!response.ok) {
@@ -902,6 +987,7 @@ async function analysePeriod({ refresh } = {}) {
     analysis = item;
     el("detail").innerHTML = analysisOf(item);
     wireAnalysis();
+    revealDetail();
   } catch (err) {
     el("detail").innerHTML = `<p class="empty">não deu para analisar: ${esc(err)}</p>`;
   }
@@ -1070,6 +1156,7 @@ readUrl();
 writeUrl(false);
 search();
 loadFacets();
+loadAnalysisModels();
 </script>
 </body>
 </html>

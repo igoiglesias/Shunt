@@ -26,6 +26,7 @@ speaking Anthropic through the same proxy.
 - [Endpoints](#endpoints)
 - [The usage panel](#the-usage-panel)
 - [The request screen](#the-request-screen)
+- [Analysing a period](#analysing-a-period)
 - [Development](#development)
 - [What Shunt does not do](#what-shunt-does-not-do)
 
@@ -436,6 +437,47 @@ cut the same way, with a button that copies it as a `curl` — the conversation
 says what was said, this says how to reproduce it.
 
 Clearing the history takes the stored conversations with it.
+
+### Analysing a period
+
+**Analisar este período** on the request screen hands the period you are looking
+at to a model and asks it, as a specialist, how to improve the loop: skills,
+tools, prompts, model choice, harness settings. The button inherits the active
+filters, so the slice analysed is the slice on screen.
+
+What it sends is not a dump of the database. It is a dossier built from the
+queries the screens already use:
+
+- volume, tokens, latency and errors for the period, by model and by provider;
+- the chain — how often each candidate was skipped, and for which of the four
+  reasons;
+- tools offered against tools called, because a tool nobody ever calls pays
+  prompt on every request;
+- the slowest and the costliest requests, each with its chain;
+- a sample of conversations, **only when recording is on**, already redacted and
+  cut.
+
+The request count comes from a `COUNT` over the whole period while the
+aggregates read at most five thousand rows; when those differ the dossier says
+`sampled: true` and the screen says so above the reading. The prompt requires
+every recommendation to cite the number that supports it, and the **Dossiê** tab
+beside the reading holds those numbers, so a recommendation can be checked
+rather than believed.
+
+The call goes out **through Shunt itself** — same resolution, same chain, same
+credentials as any request from the harness — so the analysis shows up in the
+panel like any other request, and the tokens it spent are counted there. Pick
+which model reads the period with `default_model`, or send `{"model": "..."}`:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/analysis?since=2026-09-19T00:00:00Z' \
+  -H 'content-type: application/json' -d '{"model": "claude-opus-5"}'
+```
+
+An analysis is stored with the dossier that produced it and reused for the same
+window — it costs tokens, and nobody wants to pay twice for the same period.
+**Refazer análise**, or `{"refresh": true}`, pays again on purpose. An analysis
+that failed is never cached.
 
 ### Clearing the history
 
