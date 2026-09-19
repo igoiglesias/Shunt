@@ -19,3 +19,4 @@ wheels/
 # Banco local do painel de uso
 stats.db
 stats.db-*
+stats-antes-da-limpeza.db*
