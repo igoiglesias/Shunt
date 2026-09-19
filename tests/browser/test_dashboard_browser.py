@@ -120,7 +120,10 @@ def open_panel(browser, base, width, height):
         lambda message: problems.append(message.text) if message.type == "error" else None,
     )
     page.goto(base, wait_until="networkidle")
-    page.wait_for_selector("#figures .figure")
+    # O sinal de "carregou" e o estado do gravador, que existe sempre. Esperar
+    # por uma figura exigiria trafego: uma janela vazia desenha a faixa de
+    # saida e esconde o resumo.
+    page.wait_for_selector("#state div")
     return page, problems
 
 
@@ -465,6 +468,90 @@ def test_the_flow_links_each_request_to_what_answered_it(browser, server):
     assert medido["fitas"] > 0, "nenhuma fita ligando os dois lados"
     assert medido["nos"], "nenhum modelo no diagrama"
     assert any("→" in titulo for titulo in medido["titulos"]), medido["titulos"]
+
+
+def test_an_empty_window_offers_the_way_out(browser, server):
+    """Sete paineis dizendo "nada aqui" nao sao um estado vazio util.
+
+    O banco semeado tem trafego em toda janela, entao a resposta vazia vem
+    mockada -- o que se mede aqui e o que a TELA faz com ela.
+    """
+    page, problems = open_panel(browser, server, 1400, 900)
+    vazio = {
+        "window_hours": 0.0833,
+        "totals": {
+            "requests": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "errors": 0,
+            "error_rate": 0.0,
+            "fallbacks": 0,
+            "streams": 0,
+            "p50_duration_ms": None,
+            "p95_duration_ms": None,
+            "p50_ttft_ms": None,
+            "p95_ttft_ms": None,
+        },
+        "per_hour": [],
+        "by_model": [],
+        "by_provider": [],
+        "by_route": [],
+        "by_requested_model": [],
+        "pairs": [],
+        "errors": [],
+        "chain": {
+            "requests": 0,
+            "first_candidate_answered": 0,
+            "first_candidate_rate": 0.0,
+            "skips": [],
+        },
+        "tools": [],
+        "recent": [],
+        "health": {
+            "enabled": True,
+            "configured": True,
+            "queued": 0,
+            "dropped": 0,
+            "failures": 0,
+            "commits": 0,
+            "reconnects": 0,
+        },
+    }
+    page.route(
+        "**/api/stats?*",
+        lambda route: route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(vazio)
+        ),
+    )
+    page.get_by_role("button", name="5min").click()
+    page.wait_for_function("() => document.querySelector('main').classList.contains('idle')")
+    dito = page.inner_text(".nothing-said")
+    escondidos = page.evaluate(
+        """() => ({
+            grade: getComputedStyle(document.querySelector('.grid')).display,
+            faixa: getComputedStyle(document.querySelector('.flow-band')).display,
+            saida: !document.getElementById('widen').hidden,
+        })"""
+    )
+    page.close()
+    assert problems == []
+    assert "Nenhuma requisição nos últimos 5 min" in dito
+    assert escondidos["grade"] == "none"
+    assert escondidos["faixa"] == "none"
+    assert escondidos["saida"] is True
+
+
+def test_the_way_out_of_an_empty_window_is_the_24h_button(browser, server):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="5min").click()
+    page.wait_for_timeout(400)
+    page.evaluate("() => { document.getElementById('widen').click(); }")
+    page.wait_for_function(
+        """() => [...document.querySelectorAll('#windows button')]
+            .find(b => b.getAttribute('aria-pressed') === 'true')?.textContent === '24h'"""
+    )
+    page.close()
+    assert problems == []
 
 
 # Os dois testes de limpeza ficam no FIM do arquivo de proposito: eles zeram

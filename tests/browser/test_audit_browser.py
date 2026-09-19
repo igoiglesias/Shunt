@@ -682,3 +682,28 @@ def test_every_control_can_be_reached_by_keyboard(browser, server):
     assert problems == []
     assert foco["ativo"] == "reset"
     assert alcancados
+
+
+def test_at_laptop_width_the_table_keeps_duration_and_status_visible(browser, server):
+    """Entre 900 e 1280 a tabela divide a tela com o detalhe; a rota cede."""
+    page, problems = open_audit(browser, server, width=1180, height=900)
+    medido = page.evaluate(
+        """() => {
+            const linha = document.querySelector('#rows tr');
+            const dentro = (td) => {
+                const caixa = td.getBoundingClientRect();
+                const lista = document.querySelector('.list').getBoundingClientRect();
+                return caixa.right <= lista.right + 1;
+            };
+            return {
+                rotaVisivel: getComputedStyle(linha.querySelector('td.route')).display !== 'none',
+                duracaoDentro: dentro(linha.children[6]),
+                statusDentro: dentro(linha.children[7]),
+            };
+        }"""
+    )
+    page.close()
+    assert problems == []
+    assert medido["rotaVisivel"] is False
+    assert medido["duracaoDentro"], "a duracao ficou fora da area visivel"
+    assert medido["statusDentro"], "o status ficou fora da area visivel"

@@ -105,3 +105,11 @@ def test_neither_page_is_cached_by_the_browser():
             response = c.get(path)
             assert response.status_code == 200
             assert "no-store" in response.headers.get("cache-control", ""), path
+
+
+def test_the_panel_shows_called_tools_first():
+    """Consistencia com a tela de requisicoes: o catalogo inteiro enche a tabela
+    de zeros, e o que responde a pergunta e o que foi chamado."""
+    page = DASHBOARD.read_text(encoding="utf-8")
+    assert "const usadas = tools.filter((t) => t.called > 0);" in page
+    assert "oferecidas e nunca chamadas" in page

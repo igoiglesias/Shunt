@@ -259,6 +259,15 @@
   .legend-marks .mark { margin-left: 10px; }
   .legend-marks .mark:first-child { margin-left: 0; }
 
+  /* Entre 900 e 1280 a tabela divide a tela com o detalhe e não cabe inteira.
+     A rota é quase sempre a mesma e cede o lugar para duração e status, que é
+     o que alguém está procurando. */
+  @media (max-width: 1280px) and (min-width: 721px) {
+    th.route, td.route { display: none; }
+    .scroll table, table { min-width: 0; }
+    th, td { padding: 6px 8px; }
+  }
+
   @media (max-width: 900px) {
     form > * { min-width: 0; }
     #range { width: 100%; }
@@ -362,7 +371,7 @@
       <thead>
         <tr>
           <th role="button" data-order="time" aria-sort="descending">Quando</th>
-          <th>Rota</th>
+          <th class="route">Rota</th>
           <th>Modelo pedido</th>
           <th>Modelo que respondeu</th>
           <th title="streaming, troca de candidato, ferramenta chamada">Sinais</th>
@@ -569,7 +578,7 @@ function rowOf(event) {
     <td class="when" data-label="Quando" title="${esc(day(event.started_at))}">${esc(
       clock(event.started_at, true)
     )}</td>
-    <td data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
+    <td class="route" data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
     <td data-label="Pedido">${esc(event.requested_model || "—")}</td>
     <td data-label="Respondeu">${bad && event.error_type
       ? `<span class="tag bad" data-label="Respondeu">${esc(event.error_type)}</span>`

@@ -169,6 +169,30 @@
     gap: 20px;
   }
   .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
+  /* Janela sem tráfego: uma faixa que explica e oferece a saída vale mais do
+     que sete painéis repetindo "nada aqui" em alturas de tela cheia. */
+  #nothing {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  #nothing[hidden] { display: none; }
+  .nothing-said { margin: 0; color: var(--muted); }
+  .ghost {
+    font: inherit;
+    font-size: 12.5px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--panel-edge);
+    border-radius: 3px;
+    padding: 4px 11px;
+    cursor: pointer;
+  }
+  .ghost:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
+  main.idle .flow-band,
+  main.idle > section:not(#nothing),
+  main.idle .grid { display: none; }
   svg { display: block; width: 100%; height: auto; }
   .axis { fill: var(--dim); font-size: 10px; font-family: var(--num); }
   .legend { display: flex; gap: 16px; margin: 6px 0 0; font-size: 11.5px; color: var(--muted); }
@@ -236,6 +260,10 @@
 </header>
 
 <main>
+  <section id="nothing" hidden>
+    <p class="nothing-said"></p>
+    <button type="button" class="ghost" id="widen">Ver as últimas 24 h</button>
+  </section>
   <div class="flow-band">
     <section>
       <h2>Modelo pedido e quem respondeu <em>largura = requisições</em></h2>
@@ -328,6 +356,20 @@ async function load() {
 }
 
 function draw() {
+  // Janela vazia: uma faixa com a saída, em vez de sete painéis vazios.
+  const idle = (snapshot.totals?.requests ?? 0) === 0;
+  document.querySelector("main").classList.toggle("idle", idle);
+  el("nothing").hidden = !idle;
+  if (idle) {
+    const quando =
+      hours < 1 ? `nos últimos ${Math.round(hours * 60)} min` : `nas últimas ${hours} h`;
+    el("nothing").querySelector(".nothing-said").textContent = snapshot.health?.enabled
+      ? `Nenhuma requisição ${quando}.`
+      : `Nenhuma requisição ${quando}, e a persistência está desligada.`;
+    el("widen").hidden = hours >= 24;
+    drawState();
+    return;
+  }
   drawState();
   drawFigures();
   drawFlow();
@@ -666,18 +708,24 @@ function drawTools() {
     el("tools").innerHTML = `<p class="empty">Nenhuma ferramenta oferecida nesta janela.</p>`;
     return;
   }
-  const max = Math.max(...tools.map((t) => t.offered), 1);
+  const usadas = tools.filter((t) => t.called > 0);
+  const paradas = tools.length - usadas.length;
+  const mostradas = usadas.length ? usadas : tools.slice(0, 3);
+  const max = Math.max(...mostradas.map((t) => t.offered), 1);
   el("tools").innerHTML = `
     <div class="scroll"><table><thead><tr>
       <th>Ferramenta</th><th class="n">oferecida</th><th class="n">chamada</th><th class="n">uso</th>
     </tr></thead><tbody>
-    ${tools.map((t) => `<tr>
+    ${mostradas.map((t) => `<tr>
       <td class="bar"><span style="width:${(t.offered / max) * 100}%"></span><b>${esc(t.tool)}</b></td>
       <td class="n">${t.offered}</td>
       <td class="n">${t.called}</td>
       <td class="n">${t.call_rate === null ? "—" : pct(t.call_rate)}</td>
     </tr>`).join("")}
-    </tbody></table></div>`;
+    </tbody></table></div>
+    ${usadas.length && paradas
+      ? `<p class="empty">Mais ${paradas} oferecidas e nunca chamadas nesta janela.</p>`
+      : ""}`;
 }
 
 function drawErrors() {
@@ -841,6 +889,11 @@ el("only-errors").addEventListener("click", (event) => {
   const on = button.getAttribute("aria-pressed") === "true";
   button.setAttribute("aria-pressed", String(!on));
   applyTapeFilter();
+});
+
+el("widen").addEventListener("click", () => {
+  const alvo = document.querySelector('#windows button[data-hours="24"]');
+  if (alvo) alvo.click();
 });
 
 el("windows").addEventListener("click", (clicked) => {
