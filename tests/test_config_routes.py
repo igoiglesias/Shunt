@@ -29,3 +29,14 @@ def test_the_claude_code_slots_all_end_on_a_remote_fallback():
         chain = resolve(slot, settings).chain
         assert len(chain) >= 2, slot
         assert {c.provider for c in chain} != {"local"}, slot
+
+
+def test_the_legacy_free_name_lands_on_the_remote_chain_head():
+    """`model: "free"` nao e mais um alias nem uma escotilha: o nome antigo
+    casa na familia `free` (substring) e sobe no primeiro remoto, em vez de
+    forcar um unico provedor como a rota `("free", ["free"])` que existiu. Fixa
+    o mapeamento que a renomeacao `free` -> `open-free` mudou para quem ja
+    mandava o nome antigo no harness."""
+    chain = resolve("free", settings).chain
+    assert chain[0].alias == "open-free"
+    assert chain[0].provider == "openrouter"

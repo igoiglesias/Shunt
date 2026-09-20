@@ -45,12 +45,19 @@ models = {
         "provider": "local",
         "model": "qwen3.8-27b",
         "supports": {"tools": True, "streaming": True, "vision": True},
+        "context_window": 128512,
+        "max_output_tokens": 8192,
+    },
+    "open-free": {
+        "provider": "openrouter",
+        "model": "openrouter/free",
+        "supports": {"tools": True, "streaming": True, "vision": False},
         "context_window": 262144,
         "max_output_tokens": 8192,
     },
-    "free": {
+    "open-nemotron-ultra": {
         "provider": "openrouter",
-        "model": "openrouter/free",
+        "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "supports": {"tools": True, "streaming": True, "vision": False},
         "context_window": 262144,
         "max_output_tokens": 8192,
@@ -67,20 +74,14 @@ models = {
 # Os tres nomes que o Claude Code pede. O padrao casa por substring, entao
 # `haiku` pega `claude-haiku-4-5` e qualquer outra versao do mesmo porte.
 routes = [
-    # Escotilha para forcar o Groq. O nome NAO pode conter o padrao de
-    # nenhuma outra rota: a resolucao por familia e por substring, na ordem
-    # desta lista, entao um alias chamado `free-groq` casaria com a rota
-    # `free` e nunca chegaria no Groq.
     ("groq", ["groq-free"]),
-    # Escotilha para forcar o llama.cpp local pelo nome.
     ("local", ["qwen-local"]),
-    # Escotilha para forcar o remoto: o alias do modelo tambem e um padrao de
-    # rota, entao `model: "free"` sobe direto para o OpenRouter, sem passar
-    # pelo local. Serve para conferir a cadeia de fallback sem derrubar nada.
-    ("free", ["free"]),
-    ("haiku", ["groq-free", "qwen-local", "free"]),
-    ("sonnet", ["free", "qwen-local", "groq-free"]),
-    ("opus", ["qwen-local", "free", "groq-free"]),
+    ("nemotron", ["open-nemotron-ultra"]),
+    ("free", ["open-free", "groq-free", "open-nemotron-ultra"]),
+    ("fable", ["open-nemotron-ultra", "open-free", "groq-free"]),
+    ("haiku", ["groq-free","open-nemotron-ultra", "open-free"]),
+    ("sonnet", ["open-free", "open-nemotron-ultra", "groq-free"]),
+    ("opus", ["qwen-local", "open-nemotron-ultra", "open-free", "groq-free"]),
 ]
 
 default_model = None

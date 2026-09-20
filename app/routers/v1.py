@@ -43,6 +43,7 @@ from app.core.observability import RequestLog, log_request
 from app.core.resolver import UnknownProviderError, resolve
 from app.core.tokens import estimate_input_tokens
 from app.schemas.anthropic import (
+    AnthropicModel,
     AnthropicModelList,
     AnthropicRequest,
     CountTokensRequest,
@@ -51,6 +52,7 @@ from app.schemas.openai import (
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
+    OpenAIModel,
     OpenAIModelList,
 )
 
@@ -323,6 +325,36 @@ def _model_entries(settings: Settings) -> list[dict]:
         }
         for alias, model in settings.models.items()
     ]
+
+
+@router.get("/models/{model_id}")
+async def get_model(model_id: str, request: Request):
+    """Um modelo pelo alias, no dialeto de quem perguntou.
+
+    A projecao e a mesma da listagem, menos o wrapper de lista: cada parser
+    le o documento solto sem a envoltura `data`. Sem o alias a resposta e 404
+    no envelope de quem perguntou -- nao o `detail` genrico do framework, que
+    nenhum SDK dos dois protocolos sabe classificar.
+    """
+    started = time.monotonic()
+    settings = request.app.state.settings
+    protocol = detect_protocol(request.headers)
+    entries = _model_entries(settings)
+    entry = next((e for e in entries if e["id"] == model_id), None)
+    if entry is None:
+        _record("/v1/models", protocol, 404, started, requested_model=model_id)
+        return JSONResponse(
+            status_code=404,
+            content=error_body(protocol, 404, f"modelo nao encontrado: {model_id}"),
+        )
+    _record("/v1/models", protocol, 200, started, requested_model=model_id)
+    if protocol == "anthropic":
+        return AnthropicModel(
+            **{k: entry[k] for k in ("id", "display_name", "created_at")}
+        ).model_dump()
+    if protocol == "openai":
+        return OpenAIModel(**{k: entry[k] for k in ("id", "created", "owned_by")}).model_dump()
+    return entry
 
 
 @router.get("/models")

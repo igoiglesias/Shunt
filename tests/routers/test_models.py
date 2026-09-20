@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from app.config.settings import Settings
 from app.core.upstream import UpstreamPool
 from app.main import app
+from app.routers import v1
 from app.routers.v1 import detect_protocol
 from tests.core.test_dispatcher import SETTINGS
 
@@ -127,3 +128,80 @@ def test_an_installation_with_no_models_has_no_first_id():
         body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()
     assert body["data"] == []
     assert body["first_id"] is None
+
+
+def test_get_one_model_answers_anthropic_shape_for_an_anthropic_caller():
+    with client() as c:
+        resp = c.get("/v1/models/free", headers={"anthropic-version": "2023-06-01"})
+    assert resp.status_code == 200
+    entry = resp.json()
+    assert entry["id"] == "free"
+    assert entry["type"] == "model"
+    assert entry["display_name"] == "free (vendor/free)"
+    assert entry["created_at"] == "2026-01-01T00:00:00Z"
+    assert set(entry) == {"type", "id", "display_name", "created_at"}
+
+
+def test_get_one_model_answers_openai_shape_for_an_openai_caller():
+    with client() as c:
+        resp = c.get("/v1/models/free", headers={"authorization": "Bearer sk"})
+    assert resp.status_code == 200
+    entry = resp.json()
+    assert entry["id"] == "free"
+    assert entry["object"] == "model"
+    assert entry["owned_by"] == "openrouter"
+    assert entry["created"] == 1700000000
+    assert set(entry) == {"id", "object", "created", "owned_by"}
+
+
+def test_get_one_model_falls_back_to_a_superset_when_the_dialect_is_unknown():
+    with client() as c:
+        resp = c.get("/v1/models/cheap")
+    assert resp.status_code == 200
+    entry = resp.json()
+    assert entry["id"] == "cheap"
+    assert entry["object"] == "model" and entry["type"] == "model"
+    assert entry["owned_by"] and entry["display_name"]
+
+
+def test_get_an_unknown_model_answers_404_in_the_callers_dialect():
+    with client() as c:
+        resp = c.get("/v1/models/nao-existe", headers={"anthropic-version": "2023-06-01"})
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["type"] == "error"
+    assert body["error"]["type"] == "not_found_error"
+    assert "nao-existe" in body["error"]["message"]
+
+
+def test_an_openai_caller_gets_an_openai_envelope_for_an_unknown_model():
+    with client() as c:
+        resp = c.get("/v1/models/nao-existe", headers={"authorization": "Bearer sk"})
+    assert resp.status_code == 404
+    body = resp.json()
+    assert set(body) == {"error"}
+    assert body["error"]["type"] == "not_found_error"
+    assert "nao-existe" in body["error"]["message"]
+
+
+def test_get_one_model_when_there_are_no_models_is_a_404_not_a_crash():
+    with client(EMPTY) as c:
+        resp = c.get("/v1/models/qualquer", headers={"anthropic-version": "2023-06-01"})
+    assert resp.status_code == 404
+    assert resp.json()["type"] == "error"
+
+
+def test_get_one_model_records_observability_like_the_listing(monkeypatch):
+    """O log e a mesma linha que a listagem: rota, dialeto de quem perguntou,
+    e o alias pedido -- tanto quando responde 200 quanto quando responde 404.
+    Sem este teste um `_record` com status ou route errado passa em silencio."""
+    calls: list = []
+    monkeypatch.setattr(v1, "log_request", lambda entry: calls.append(entry))
+    with client() as c:
+        assert c.get("/v1/models/free", headers={"x-api-key": "sk"}).status_code == 200
+        assert c.get("/v1/models/nao-existe", headers={"x-api-key": "sk"}).status_code == 404
+    ok, miss = calls
+    assert ok.route == "/v1/models" and ok.dialect == "anthropic" and ok.status == 200
+    assert ok.requested_model == "free"
+    assert miss.route == "/v1/models" and miss.dialect == "anthropic" and miss.status == 404
+    assert miss.requested_model == "nao-existe"

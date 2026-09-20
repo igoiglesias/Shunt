@@ -367,6 +367,114 @@ def test_image_block_with_url_source_passes_the_url_through():
     assert part["image_url"]["url"] == "https://example.com/a.png"
 
 
+def test_text_and_image_block_becomes_text_and_image_url():
+    """A→O: user message com bloco de texto + imagem (base64) → a saída tem text+image_url."""
+    out = convert(
+        {
+            "model": "m",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "veja"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "QUJD",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    msg = out["messages"][0]
+    assert msg["role"] == "user"
+    assert isinstance(msg["content"], list)
+    assert len(msg["content"]) == 2
+    parts = {p["type"]: p for p in msg["content"]}
+    assert parts["text"]["text"] == "veja"
+    assert parts["image_url"]["image_url"]["url"] == "data:image/png;base64,QUJD"
+
+
+def test_image_block_with_url_source_and_text_passes_through():
+    """A→O: user message com image source.type url + text → image_url.url passa a URL (não vira data:)."""
+    out = convert(
+        {
+            "model": "m",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "veja"},
+                        {
+                            "type": "image",
+                            "source": {"type": "url", "url": "https://example.com/img.png"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    msg = out["messages"][0]
+    parts = {p["type"]: p for p in msg["content"]}
+    assert parts["text"]["text"] == "veja"
+    assert parts["image_url"]["image_url"]["url"] == "https://example.com/img.png"
+
+
+def test_tool_result_with_image_and_text_loses_image():
+    """Limite documentado: image dentro de tool_result é descartada; apenas o texto sobrevive.
+
+    OpenAI aceita string somente no content de uma mensagem role: "tool", por isso
+    não é possível representar um image_url nesse resultado."""
+    out = convert(
+        {
+            "model": "m",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": [
+                                {"type": "text", "text": "resultado"},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+    assert out["messages"][0]["role"] == "tool"
+    assert out["messages"][0]["content"] == "resultado"
+
+
+def test_unknown_block_type_is_skipped():
+    """Edge: um bloco de conteúdo desconhecido (tipo não-texto, não-image) é descartado sem estourar."""
+    out = convert(
+        {
+            "model": "m",
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "unknown", "value": 42}, {"type": "text", "text": "oi"}],
+                }
+            ],
+        }
+    )
+    msg = out["messages"][0]
+    assert msg["role"] == "user"
+    assert msg["content"] == "oi"
+
+
 # --- Fix round 1: close gaps the review found (correct behaviour, no test) ---
 
 

@@ -31,17 +31,21 @@ class Resolution:
     chain: list[Candidate]
 
 
-def _candidate(alias: str, settings: Settings) -> Candidate:
-    model = settings.models[alias]
-    return Candidate(
-        alias=alias,
-        provider=model.provider,
-        model=model.model,
-        protocol=settings.providers[model.provider].protocol,
-    )
+def _candidate(alias: str, settings: Settings, requested: str) -> Candidate:
+    """Candidato configurado em models; transparente (alias como model ID) quando ausente."""
+    if alias in settings.models:
+        model = settings.models[alias]
+        return Candidate(
+            alias=alias,
+            provider=model.provider,
+            model=model.model,
+            protocol=settings.providers[model.provider].protocol,
+        )
+    # alias ausente em models: transparente, model=alias, provider derivado do requested
+    return _transparent(requested, settings, model=alias)
 
 
-def _transparent(requested: str, settings: Settings) -> Candidate:
+def _transparent(requested: str, settings: Settings, model: str | None = None) -> Candidate:
     provider = None
     for prefix, name in PROVIDER_HINTS:
         if requested.startswith(prefix):
@@ -57,13 +61,13 @@ def _transparent(requested: str, settings: Settings) -> Candidate:
     return Candidate(
         alias=None,
         provider=provider,
-        model=requested,
+        model=model if model is not None else requested,
         protocol=settings.providers[provider].protocol,
         transparent=True,
     )
 
 
-def _chain(aliases: list[str], settings: Settings) -> list[Candidate]:
+def _chain(aliases: list[str], settings: Settings, requested: str) -> list[Candidate]:
     ordered = list(aliases)
     if settings.default_model:
         ordered = (
@@ -76,7 +80,7 @@ def _chain(aliases: list[str], settings: Settings) -> list[Candidate]:
     for alias in ordered:
         if alias not in seen:
             seen.add(alias)
-            result.append(_candidate(alias, settings))
+            result.append(_candidate(alias, settings, requested))
     return result
 
 
@@ -95,7 +99,7 @@ def last_resort(requested: str, settings: Settings) -> list[Candidate]:
     que ja devolvia, e nao uma chamada a esmo.
     """
     if settings.default_model:
-        return [_candidate(settings.default_model, settings)]
+        return [_candidate(settings.default_model, settings, requested)]
     try:
         return [_transparent(requested, settings)]
     except UnknownProviderError:
@@ -105,10 +109,10 @@ def last_resort(requested: str, settings: Settings) -> list[Candidate]:
 def resolve(requested: str, settings: Settings) -> Resolution:
     for pattern, aliases in settings.routes:
         if pattern == requested:
-            return Resolution("exact", pattern, _chain(aliases, settings))
+            return Resolution("exact", pattern, _chain(aliases, settings, requested))
     for pattern, aliases in settings.routes:
         if pattern in requested:
-            return Resolution("family", pattern, _chain(aliases, settings))
+            return Resolution("family", pattern, _chain(aliases, settings, requested))
     if settings.default_model:
-        return Resolution("default", None, _chain([settings.default_model], settings))
+        return Resolution("default", None, _chain([settings.default_model], settings, requested))
     return Resolution("transparent", None, [_transparent(requested, settings)])

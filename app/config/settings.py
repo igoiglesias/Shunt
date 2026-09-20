@@ -44,9 +44,6 @@ class Settings(BaseModel):
                 )
             if not candidates:
                 raise ValueError(f"route {pattern!r} has an empty candidate list")
-            for candidate in candidates:
-                if candidate not in known:
-                    raise ValueError(f"route {pattern!r} points to unknown model {candidate!r}")
         if self.default_model is not None and self.default_model not in known:
             raise ValueError(f"default_model points to unknown model {self.default_model!r}")
         return self

@@ -133,6 +133,53 @@ def test_transparent_rejects_name_with_no_declared_provider():
         resolve("claude-fable-5-1", settings)
 
 
+# -- Candidato transparente na cadeia de rota ----------------------------------
+
+def test_settings_constructor_accepts_unconfigured_route_candidate():
+    """Settings nao rejeita rota com candidato ausente em models."""
+    settings = build([("fable", ["opus"])])
+    assert "opus" not in settings.models
+
+
+def test_route_candidate_not_in_models_becomes_transparent():
+    """Alias ausente em models: transparente, model=alias, provider do requested."""
+    settings = build([("fable", ["opus"])])
+    result = resolve("claude-fable-5-1", settings)
+    assert result.chain[0].transparent is True
+    assert result.chain[0].model == "opus"
+    assert result.chain[0].provider == "anthropic"
+    assert result.chain[0].alias is None
+
+
+def test_mixed_chain_configured_then_transparent():
+    """Candidato configurado primeiro, transparente ocupa sua posicao na cadeia."""
+    settings = build([("fable", ["qwen", "opus"])])
+    chain = resolve("claude-fable-5-1", settings).chain
+    assert chain[0].alias == "qwen"
+    assert chain[0].transparent is False
+    assert chain[1].alias is None
+    assert chain[1].transparent is True
+    assert chain[1].model == "opus"
+
+
+def test_transparent_candidate_openai_provider():
+    """Requested gpt-* -> provider=openai para alias nao configurado."""
+    settings = build([("gpt", ["gpt-4o"])])
+    result = resolve("gpt-4o-2024", settings)
+    assert result.chain[0].transparent is True
+    assert result.chain[0].model == "gpt-4o"
+    assert result.chain[0].provider == "openai"
+
+
+def test_transparent_candidate_no_route_match_falls_back_to_requested_name():
+    """Sem rota que casa, fallback transparente usa requested, nao o alias."""
+    settings = build([("fable", ["opus"])])
+    result = resolve("claude-haiku-4-5", settings)
+    assert result.rule == "transparent"
+    assert result.chain[0].model == "claude-haiku-4-5"
+    assert result.chain[0].provider == "anthropic"
+
+
 # -- Historia E: quem atende quando nada na cadeia cabe ------------------------
 
 

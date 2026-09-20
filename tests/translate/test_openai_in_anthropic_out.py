@@ -420,6 +420,61 @@ def test_plain_url_image_becomes_a_url_image_block():
     assert block == {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}}
 
 
+def test_text_and_data_url_image_become_text_and_image_blocks():
+    """O->A: user message com texto + image_url data URI -> bloco text E bloco
+    image base64, nesta ordem, com media_type e data corretos."""
+    # Não entra aqui a mensagem role:"tool" do OpenAI, que por ser
+    # string-only não comporta image_url. Limite do protocolo OpenAI.
+    out = openai_request_to_anthropic(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "veja"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+                    ],
+                }
+            ],
+        },
+        "claude-fable-5-1",
+        4096,
+    )
+    assert out["messages"][0]["content"] == [
+        {"type": "text", "text": "veja"},
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+        },
+    ]
+
+
+def test_text_and_plain_url_image_become_text_and_url_image_blocks():
+    """O->A: URL comum (nao data:) vira bloco image com source type url --
+    nunca uma data URI fabricada."""
+    out = openai_request_to_anthropic(
+        {
+            "model": "m",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "veja"},
+                        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+                    ],
+                }
+            ],
+        },
+        "claude-fable-5-1",
+        4096,
+    )
+    assert out["messages"][0]["content"] == [
+        {"type": "text", "text": "veja"},
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+    ]
+
+
 def test_two_system_messages_are_joined_with_a_blank_line():
     out = openai_request_to_anthropic(
         {
