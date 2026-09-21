@@ -1,0 +1,58 @@
+{% if model %}
+<form hx-patch="/admin/config/models/{{ model.alias }}" hx-target="#models-list" hx-swap="outerHTML">
+  <h3>Editar Modelo: {{ model.alias }}</h3>
+{% else %}
+<form hx-post="/admin/config/models" hx-target="#models-list" hx-swap="outerHTML">
+  <h3>Novo Modelo</h3>
+{% endif %}
+<div class="form-grid">
+  {% if not model %}
+  <div class="form-group">
+    <label for="alias">Alias *</label>
+    <input type="text" id="alias" name="alias" required placeholder="ex: gpt-4o">
+  </div>
+  {% endif %}
+  <div class="form-group">
+    <label for="provider_id">Provedor *</label>
+    <select id="provider_id" name="provider_id" required>
+      {% for p in providers %}
+        <option value="{{ p.id }}" {% if model and model.provider_id == p.id %}selected{% endif %}>{{ p.name }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="form-group">
+    <label for="upstream_model">Upstream Model *</label>
+    <input type="text" id="upstream_model" name="upstream_model" required placeholder="ex: openai/gpt-4o" value="{{ model.upstream_model if model else '' }}">
+  </div>
+  <div class="form-group">
+    <label for="context_window">Context Window *</label>
+    <input type="number" id="context_window" name="context_window" required min="1" value="{{ model.context_window if model else 131072 }}">
+  </div>
+  <div class="form-group">
+    <label for="max_output_tokens">Max Output Tokens *</label>
+    <input type="number" id="max_output_tokens" name="max_output_tokens" required min="1" value="{{ model.max_output_tokens if model else 8192 }}">
+  </div>
+</div>
+<div class="form-grid" style="margin-top: 8px;">
+  <div class="form-group checkbox-group">
+    <input type="checkbox" id="supports_tools" name="supports_tools" {% if model is none or model.supports_tools %}checked{% endif %}>
+    <label for="supports_tools">Tools</label>
+  </div>
+  <div class="form-group checkbox-group">
+    <input type="checkbox" id="supports_streaming" name="supports_streaming" {% if model is none or model.supports_streaming %}checked{% endif %}>
+    <label for="supports_streaming">Streaming</label>
+  </div>
+  <div class="form-group checkbox-group">
+    <input type="checkbox" id="supports_vision" name="supports_vision" {% if model and model.supports_vision %}checked{% endif %}>
+    <label for="supports_vision">Vision</label>
+  </div>
+  <div class="form-group checkbox-group">
+    <input type="checkbox" id="is_default" name="is_default" {% if model and model.is_default %}checked{% endif %}>
+    <label for="is_default">Default</label>
+  </div>
+</div>
+<div style="margin-top: 16px; display: flex; gap: 8px;">
+  <button type="submit" class="btn btn-primary">{% if model %}Salvar{% else %}Criar{% endif %}</button>
+  <button type="button" class="btn" hx-get="/admin/config/models" hx-target="#model-form" hx-swap="outerHTML">Cancelar</button>
+</div>
+</form>

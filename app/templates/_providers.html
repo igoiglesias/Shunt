@@ -1,0 +1,33 @@
+{% if providers %}
+<div class="table-container">
+<table>
+<thead><tr>
+  <th>Nome</th>
+  <th>Base URL</th>
+  <th>Protocolo</th>
+  <th>API Key Env</th>
+  <th class="n">Ações</th>
+</tr></thead>
+<tbody>
+{% for p in providers %}
+<tr>
+  <td><b>{{ p.name }}</b></td>
+  <td class="mono">{{ p.base_url }}</td>
+  <td><span class="chip" aria-pressed="true">{{ p.protocol }}</span></td>
+  <td class="mono">{{ p.api_key_env or "—" }}</td>
+  <td class="n">
+    <div class="actions">
+      <button class="btn btn-sm" hx-get="/admin/config/providers/{{ p.name }}/edit" hx-target="#provider-form" hx-swap="outerHTML">Editar</button>
+      <form class="inline-form" hx-delete="/admin/config/providers/{{ p.name }}" hx-target="#providers-list" hx-swap="outerHTML" hx-confirm="Excluir provedor {{ p.name }}?">
+        <button type="submit" class="btn btn-sm btn-danger">Excluir</button>
+      </form>
+    </div>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+</div>
+{% else %}
+<p class="empty-state">Nenhum provedor cadastrado.</p>
+{% endif %}

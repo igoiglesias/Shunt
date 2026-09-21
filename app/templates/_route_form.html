@@ -1,0 +1,78 @@
+{% if route %}
+<form hx-patch="/admin/config/routes/{{ route.id }}" hx-target="#routes-list" hx-swap="outerHTML">
+  <h3>Editar Rota: {{ route.pattern }}</h3>
+{% else %}
+<form hx-post="/admin/config/routes" hx-target="#routes-list" hx-swap="outerHTML">
+  <h3>Nova Rota</h3>
+{% endif %}
+<div class="form-grid">
+  {% if not route %}
+  <div class="form-group">
+    <label for="pattern">Pattern *</label>
+    <input type="text" id="pattern" name="pattern" required placeholder="ex: gpt, local, deepseek">
+  </div>
+  {% else %}
+  <input type="hidden" name="pattern" value="{{ route.pattern }}">
+  <div class="form-group">
+    <label for="pattern">Pattern</label>
+    <input type="text" value="{{ route.pattern }}" disabled style="background: var(--panel-2); color: var(--muted);">
+  </div>
+  {% endif %}
+</div>
+
+<div style="margin-top: 12px;">
+  <label style="font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim);">Candidatos (ordem = prioridade de fallback)</label>
+  <div id="candidates-list" style="margin-top: 8px;">
+    {% set candidates = route.candidates if route else [] %}
+    {% if candidates %}
+      {% for c in candidates %}
+        <div class="form-row" style="margin-bottom: 8px; align-items: center;">
+          <div class="form-group" style="flex: 1;">
+            <select name="candidates" required>
+              <option value="">— selecione —</option>
+              {% for m in models %}
+                <option value="{{ m.alias }}" {% if c.model_alias == m.alias %}selected{% endif %}>{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.form-row').remove()">Remover</button>
+        </div>
+      {% endfor %}
+    {% else %}
+      <div class="form-row" style="margin-bottom: 8px; align-items: center;">
+        <div class="form-group" style="flex: 1;">
+          <select name="candidates" required>
+            <option value="">— selecione —</option>
+            {% for m in models %}
+              <option value="{{ m.alias }}">{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+  <button type="button" class="btn btn-sm" onclick="
+    const div = document.createElement('div');
+    div.className = 'form-row';
+    div.style.marginBottom = '8px';
+    div.style.alignItems = 'center';
+    div.innerHTML = `
+      <div class="form-group" style="flex: 1;">
+        <select name="candidates" required>
+          <option value="">— selecione —</option>
+          {% for m in models %}
+            <option value=\"{{ m.alias }}\">{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button type=\"button\" class=\"btn btn-sm btn-danger\" onclick=\"this.closest('.form-row').remove()\">Remover</button>
+    `;
+    document.getElementById('candidates-list').appendChild(div);
+  ">+ Adicionar Candidato</button>
+</div>
+
+<div style="margin-top: 16px; display: flex; gap: 8px;">
+  <button type="submit" class="btn btn-primary">{% if route %}Salvar{% else %}Criar{% endif %}</button>
+  <button type="button" class="btn" hx-get="/admin/config/routes" hx-target="#route-form" hx-swap="outerHTML">Cancelar</button>
+</div>
+</form>

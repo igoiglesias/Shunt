@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — Configuração</title>
+<link rel="stylesheet" href="/shunt.css">
+<style>
+  /* Admin-specific styles */
+  .admin-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  .admin-nav a { color: var(--muted); text-decoration: none; padding: 6px 12px; border: 1px solid var(--edge); border-radius: 2px; font-size: 13px; }
+  .admin-nav a:hover { color: var(--ink); border-color: var(--edge-strong); }
+  .admin-nav a[aria-current="page"] { color: var(--ground); background: var(--ink); font-weight: 600; }
+
+  .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+  .form-group input, .form-group select { color: var(--ink); background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px; padding: 6px 10px; font-size: 13px; }
+  .form-group input:focus, .form-group select:focus { outline: 2px solid var(--warning); outline-offset: 2px; }
+  .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .form-row .form-group { flex: 1; min-width: 150px; }
+
+  .table-container { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 12px 8px 0; text-align: left; border-bottom: 1px solid var(--edge); }
+  th { color: var(--dim); font-weight: 600; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
+  td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .actions { display: flex; gap: 6px; }
+  .btn { font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid var(--edge); border-radius: 2px; background: transparent; color: var(--muted); cursor: pointer; min-height: 26px; }
+  .btn:hover { color: var(--ink); border-color: var(--edge-strong); }
+  .btn:focus-visible { outline: 2px solid var(--warning); outline-offset: 2px; }
+  .btn-primary { color: var(--ground); background: var(--ink); border-color: var(--ink); font-weight: 600; }
+  .btn-danger { color: #fff; background: var(--error); border-color: var(--error); }
+  .btn-sm { padding: 2px 8px; font-size: 11.5px; }
+
+  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .section-header h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+  .section-header h2 em { font-style: normal; font-weight: 400; letter-spacing: 0.02em; text-transform: none; color: var(--dim); }
+
+  .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 2px; padding: 15px 17px 17px; margin-bottom: 20px; }
+  .card h3 { margin: 0 0 12px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+
+  .inline-form { display: inline; }
+  .checkbox-group { display: flex; align-items: center; gap: 8px; }
+  .checkbox-group input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--warning); }
+
+  .empty-state { color: var(--dim); padding: 20px; text-align: center; }
+
+  .history-table td { font-family: var(--mono); font-size: 12px; }
+  .history-table .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+  @media (max-width: 760px) {
+    .form-grid { grid-template-columns: 1fr; }
+    .admin-nav { justify-content: center; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>SHU<span>N</span>T</h1>
+  <nav class="admin-nav">
+    <a href="/">Painel</a>
+    <a href="/requests">Requisições</a>
+    <a href="/admin/config" aria-current="page">Configuração</a>
+  </nav>
+</header>
+
+<main style="padding: 20px; display: grid; gap: 20px; max-width: 1400px; margin: 0 auto;">
+  <!-- Providers Section -->
+  <section class="card" id="providers-section">
+    <div class="section-header">
+      <h2>Provedores</h2>
+      <button class="btn btn-primary" hx-get="/admin/config/providers/new" hx-target="#provider-form" hx-swap="outerHTML">Novo</button>
+    </div>
+    <div id="providers-list">{{ providers_html | safe }}</div>
+    <div id="provider-form"></div>
+  </section>
+
+  <!-- Models Section -->
+  <section class="card" id="models-section">
+    <div class="section-header">
+      <h2>Modelos</h2>
+      <button class="btn btn-primary" hx-get="/admin/config/models/new" hx-target="#model-form" hx-swap="outerHTML">Novo</button>
+    </div>
+    <div id="models-list">{{ models_html | safe }}</div>
+    <div id="model-form"></div>
+  </section>
+
+  <!-- Routes Section -->
+  <section class="card" id="routes-section">
+    <div class="section-header">
+      <h2>Rotas e Fallback</h2>
+      <button class="btn btn-primary" hx-get="/admin/config/routes/new" hx-target="#route-form" hx-swap="outerHTML">Nova Rota</button>
+    </div>
+    <div id="routes-list">{{ routes_html | safe }}</div>
+    <div id="route-form"></div>
+  </section>
+
+  <!-- Default Model Section -->
+  <section class="card" id="default-section">
+    <div class="section-header">
+      <h2>Modelo Padrão</h2>
+    </div>
+    <div id="default-content">{{ default_html | safe }}</div>
+  </section>
+
+  <!-- History Section -->
+  <section class="card" id="history-section">
+    <div class="section-header">
+      <h2>Histórico de Versões</h2>
+      <button class="btn" hx-get="/admin/config/history" hx-target="#history-content" hx-swap="innerHTML">Atualizar</button>
+    </div>
+    <div id="history-content">{{ history_html | safe }}</div>
+  </section>
+
+  <!-- Reload Button -->
+  <section class="card">
+    <div class="section-header">
+      <h2>Recarregar Configuração</h2>
+    </div>
+    <button class="btn btn-primary" hx-post="/admin/config/reload" hx-target="#reload-result" hx-swap="innerHTML">Recarregar do Banco</button>
+    <div id="reload-result" style="margin-top: 12px;"></div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<script>
+  // HTMX configuration
+  document.body.addEventListener('htmx:afterSwap', function(evt) {
+    // Re-initialize any form handlers after HTMX swaps
+  });
+
+  // Confirm delete actions
+  document.body.addEventListener('htmx:confirm', function(evt) {
+    if (evt.target.classList.contains('btn-danger')) {
+      return confirm('Tem certeza? Esta ação não pode ser desfeita.');
+    }
+  });
+</script>
+</body>
+</html>

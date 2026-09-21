@@ -1,0 +1,35 @@
+{% if provider %}
+<form hx-patch="/admin/config/providers/{{ provider.name }}" hx-target="#providers-list" hx-swap="outerHTML">
+  <h3>Editar Provedor: {{ provider.name }}</h3>
+{% else %}
+<form hx-post="/admin/config/providers" hx-target="#providers-list" hx-swap="outerHTML">
+  <h3>Novo Provedor</h3>
+{% endif %}
+<div class="form-grid">
+  {% if not provider %}
+  <div class="form-group">
+    <label for="name">Nome *</label>
+    <input type="text" id="name" name="name" required placeholder="ex: openrouter">
+  </div>
+  {% endif %}
+  <div class="form-group">
+    <label for="base_url">Base URL *</label>
+    <input type="text" id="base_url" name="base_url" required placeholder="https://api.example.com/v1" value="{{ provider.base_url if provider else '' }}">
+  </div>
+  <div class="form-group">
+    <label for="protocol">Protocolo *</label>
+    <select id="protocol" name="protocol" required>
+      <option value="openai" {% if provider and provider.protocol == 'openai' %}selected{% endif %}>openai</option>
+      <option value="anthropic" {% if provider and provider.protocol == 'anthropic' %}selected{% endif %}>anthropic</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label for="api_key_env">API Key Env</label>
+    <input type="text" id="api_key_env" name="api_key_env" placeholder="NOME_DA_VARIAVEL" value="{{ provider.api_key_env if provider else '' }}">
+  </div>
+</div>
+<div style="margin-top: 16px; display: flex; gap: 8px;">
+  <button type="submit" class="btn btn-primary">{% if provider %}Salvar{% else %}Criar{% endif %}</button>
+  <button type="button" class="btn" hx-get="/admin/config/providers" hx-target="#provider-form" hx-swap="outerHTML">Cancelar</button>
+</div>
+</form>

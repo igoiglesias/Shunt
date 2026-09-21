@@ -1,0 +1,18 @@
+<div class="form-grid">
+  <div class="form-group">
+    <label for="default-alias">Modelo Padrão</label>
+    <select id="default-alias" name="alias" hx-post="/admin/config/default-model" hx-target="#default-content" hx-swap="outerHTML">
+      {% for m in models %}
+        <option value="{{ m.alias }}" {% if default and m.alias == default.alias %}selected{% endif %}>{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
+      {% endfor %}
+    </select>
+  </div>
+</div>
+
+{% if default %}
+<div style="margin-top: 16px; padding: 12px; background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px;">
+  <div style="font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); margin-bottom: 8px;">Atual</div>
+  <div><b>{{ default.alias }}</b> — {{ default.provider.name }}/{{ default.upstream_model }}</div>
+  <div class="mono" style="margin-top: 4px; color: var(--muted); font-size: 12px;">{{ default.context_window }} ctx · {{ default.max_output_tokens }} max out · tools: {{ 'sim' if default.supports_tools else 'não' }} · stream: {{ 'sim' if default.supports_streaming else 'não' }} · vision: {{ 'sim' if default.supports_vision else 'não' }}</div>
+</div>
+{% endif %}
