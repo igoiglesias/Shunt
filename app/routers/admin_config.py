@@ -7,10 +7,11 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.config.settings import Settings, load_settings
+from app.config.settings import Settings, load_settings_from_db
+from app.core.upstream import UpstreamPool
 from app.stats.models import (
     ConfigVersion,
     Model,
@@ -97,17 +98,34 @@ def request_engine(request: Request):
     return engine
 
 
+async def apply_settings(app, settings: Settings) -> None:
+    """Troca as settings vivas do processo, junto com o pool que as usa.
+
+    O pool guarda o objeto de settings no boot e le `providers` dele em toda
+    requisicao: trocar so `app.state.settings` deixaria provider novo, ou
+    `base_url` mudado, inacessivel ate restart. O pool antigo e fechado antes
+    da troca para nao vazar conexao de upstream.
+    """
+    old_pool = getattr(app.state, "pool", None)
+    if old_pool is not None:
+        await old_pool.aclose()
+    app.state.settings = settings
+    app.state.pool = UpstreamPool(settings)
+
+
 def snapshot_current_settings(session: Session) -> dict:
     """Gera snapshot JSON da configuracao atual."""
     providers = session.execute(select(Provider).order_by(Provider.id)).scalars().all()
     models = session.execute(select(Model).order_by(Model.id)).scalars().all()
     routes = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
+    routes_with_candidates = []
     for r in routes:
-        r.candidates = session.execute(
+        candidates = session.execute(
             select(RouteCandidate)
             .where(RouteCandidate.route_id == r.id)
             .order_by(RouteCandidate.order_index)
         ).scalars().all()
+        routes_with_candidates.append((r, candidates))
     default_model = session.execute(select(Model).where(Model.is_default == True)).scalar_one_or_none()
     return {
         "providers": [
@@ -137,9 +155,9 @@ def snapshot_current_settings(session: Session) -> dict:
             {
                 "pattern": r.pattern,
                 "order_index": r.order_index,
-                "candidates": [c.model_alias for c in r.candidates],
+                "candidates": [c.model_alias for c in candidates],
             }
-            for r in routes
+            for r, candidates in routes_with_candidates
         ],
         "default_model": default_model.alias if default_model else None,
     }
@@ -166,13 +184,15 @@ async def admin_config_page(request: Request, _: None = Depends(require_admin_to
     with Session(engine) as session:
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
         models = session.execute(select(Model).order_by(Model.alias)).scalars().all()
-        routes = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
-        for r in routes:
-            r.candidates = session.execute(
+        routes_db = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
+        routes_with_candidates = []
+        for r in routes_db:
+            candidates = session.execute(
                 select(RouteCandidate)
                 .where(RouteCandidate.route_id == r.id)
                 .order_by(RouteCandidate.order_index)
             ).scalars().all()
+            routes_with_candidates.append((r, candidates))
         default_model = session.execute(select(Model).where(Model.is_default == True)).scalar_one_or_none()
         versions = session.execute(
             select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(50)
@@ -183,8 +203,9 @@ async def admin_config_page(request: Request, _: None = Depends(require_admin_to
         request=request,
         providers=providers,
         models=models,
-        routes=routes,
+        routes=routes_with_candidates,
         default_model=default_model,
+        default=default_model,
         versions=versions,
     )
 
@@ -213,10 +234,16 @@ async def create_provider(
     with Session(engine) as session:
         if session.execute(select(Provider).where(Provider.name == name)).scalar_one_or_none():
             raise HTTPException(status_code=400, detail="Provider ja existe")
+        if protocol not in ("openai", "anthropic"):
+            # Sem isso o valor invalido commita e load_settings_from_db levanta
+            # ValidationError depois -> 500 em toda mutacao ate a linha sair.
+            raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
         p = Provider(name=name, base_url=base_url, protocol=protocol, api_key_env=api_key_env)
         session.add(p)
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_providers(request)
 
 
@@ -234,11 +261,15 @@ async def update_provider(
         p = session.execute(select(Provider).where(Provider.name == name)).scalar_one_or_none()
         if not p:
             raise HTTPException(status_code=404, detail="Provider nao encontrado")
+        if protocol not in ("openai", "anthropic"):
+            raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
         p.base_url = base_url
         p.protocol = protocol
         p.api_key_env = api_key_env
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_providers(request)
 
 
@@ -259,6 +290,8 @@ async def delete_provider(
         session.delete(p)
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_providers(request)
 
 
@@ -289,20 +322,34 @@ async def list_models(request: Request, _: None = Depends(require_admin_token)):
     return render("_models.html", request=request, models=models, providers=providers)
 
 
+def _flag(values: list[str] | None, default: bool) -> bool:
+    """Deriva um bool do form sem depender da ordem das chaves.
+
+    O template manda um hidden companion `false` ANTES do checkbox `true`:
+    desmarcado envia uma chave, marcado envia duas iguais. Derivar de
+    `values[-1]` (o que o Starlette faz) deixaria o resultado depender da
+    posicao dos inputs no template; derivar do conteudo nao."""
+    return default if values is None else ("true" in values)
+
+
 @router.post("/models", response_class=HTMLResponse)
 async def create_model(
     request: Request,
     alias: Annotated[str, Form()],
     provider_id: Annotated[int, Form()],
     upstream_model: Annotated[str, Form()],
-    supports_tools: Annotated[bool, Form()] = True,
-    supports_streaming: Annotated[bool, Form()] = True,
-    supports_vision: Annotated[bool, Form()] = False,
+    supports_tools: Annotated[list[str] | None, Form()] = None,
+    supports_streaming: Annotated[list[str] | None, Form()] = None,
+    supports_vision: Annotated[list[str] | None, Form()] = None,
     context_window: Annotated[int, Form()] = 131072,
     max_output_tokens: Annotated[int, Form()] = 8192,
-    is_default: Annotated[bool, Form()] = False,
+    is_default: Annotated[list[str] | None, Form()] = None,
     _: None = Depends(require_admin_token),
 ):
+    supports_tools = _flag(supports_tools, True)
+    supports_streaming = _flag(supports_streaming, True)
+    supports_vision = _flag(supports_vision, False)
+    is_default = _flag(is_default, False)
     engine = request_engine(request)
     with Session(engine) as session:
         if session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none():
@@ -328,6 +375,8 @@ async def create_model(
         session.add(m)
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_models(request)
 
 
@@ -337,12 +386,12 @@ async def update_model(
     alias: str,
     provider_id: Annotated[int, Form()],
     upstream_model: Annotated[str, Form()],
-    supports_tools: Annotated[bool, Form()] = True,
-    supports_streaming: Annotated[bool, Form()] = True,
-    supports_vision: Annotated[bool, Form()] = False,
-    context_window: Annotated[int, Form()] = 131072,
-    max_output_tokens: Annotated[int, Form()] = 8192,
-    is_default: Annotated[bool, Form()] = False,
+    supports_tools: Annotated[list[str] | None, Form()] = None,
+    supports_streaming: Annotated[list[str] | None, Form()] = None,
+    supports_vision: Annotated[list[str] | None, Form()] = None,
+    context_window: Annotated[int | None, Form()] = None,
+    max_output_tokens: Annotated[int | None, Form()] = None,
+    is_default: Annotated[list[str] | None, Form()] = None,
     _: None = Depends(require_admin_token),
 ):
     engine = request_engine(request)
@@ -350,6 +399,17 @@ async def update_model(
         m = session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none()
         if not m:
             raise HTTPException(status_code=404, detail="Model nao encontrado")
+        # Campo ausente preserva o valor atual (o form sempre envia, mas um
+        # cliente direto pode omitir; nesse caso nao inventar default). Vale
+        # para os flags e para os dois ints: omisso nunca zera nem reseta.
+        supports_tools = _flag(supports_tools, m.supports_tools)
+        supports_streaming = _flag(supports_streaming, m.supports_streaming)
+        supports_vision = _flag(supports_vision, m.supports_vision)
+        is_default = _flag(is_default, m.is_default)
+        if context_window is None:
+            context_window = m.context_window
+        if max_output_tokens is None:
+            max_output_tokens = m.max_output_tokens
         prov = session.get(Provider, provider_id)
         if not prov:
             raise HTTPException(status_code=400, detail="Provider invalido")
@@ -371,6 +431,8 @@ async def update_model(
         m.is_default = is_default
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_models(request)
 
 
@@ -393,6 +455,8 @@ async def delete_model(
         session.delete(m)
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_models(request)
 
 
@@ -422,26 +486,32 @@ async def edit_model_form(request: Request, alias: str, _: None = Depends(requir
 async def list_routes(request: Request, _: None = Depends(require_admin_token)):
     engine = request_engine(request)
     with Session(engine) as session:
-        routes = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
-        for r in routes:
-            r.candidates = session.execute(
+        routes_db = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
+        routes_with_candidates = []
+        for r in routes_db:
+            candidates = session.execute(
                 select(RouteCandidate)
                 .where(RouteCandidate.route_id == r.id)
                 .order_by(RouteCandidate.order_index)
             ).scalars().all()
+            routes_with_candidates.append((r, candidates))
         models = session.execute(select(Model).order_by(Model.alias)).scalars().all()
-    return render("_routes.html", request=request, routes=routes, models=models)
+    return render("_routes.html", request=request, routes=routes_with_candidates, models=models)
 
 
 @router.post("/routes", response_class=HTMLResponse)
 async def create_route(
     request: Request,
-    pattern: Annotated[str, Form()],
-    candidates: Annotated[list[str], Form()] = [],
+    pattern: Annotated[str | None, Form()] = None,
+    candidates: Annotated[list[str] | None, Form()] = None,
     _: None = Depends(require_admin_token),
 ):
     if not pattern:
         raise HTTPException(status_code=400, detail="Pattern obrigatorio")
+    # <select name="candidates"> deixado em "— selecione —" manda value="";
+    # filtra vazio e duplicatas (mesmo alias duas vezes = fallback sem sentido),
+    # preservando a ordem de prioridade.
+    candidates = list(dict.fromkeys(a for a in (candidates or []) if a))
     if not candidates:
         raise HTTPException(status_code=400, detail="Pelo menos um candidato obrigatorio")
     engine = request_engine(request)
@@ -450,15 +520,18 @@ async def create_route(
         for alias in candidates:
             if not session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none():
                 raise HTTPException(status_code=400, detail=f"Model {alias} nao existe")
-        # Proximo order_index
-        max_order = session.execute(select(Route.order_index).order_by(Route.order_index.desc())).scalar() or -1
-        route = Route(pattern=pattern, order_index=max_order + 1)
+        # Proximo order_index (None so quando nao ha rota; 0 e valido, entao
+        # nulo-teste explicito em vez de `or -1`, que devolveria -1 pro max 0)
+        max_order = session.execute(select(Route.order_index).order_by(Route.order_index.desc())).scalar()
+        route = Route(pattern=pattern, order_index=(max_order if max_order is not None else -1) + 1)
         session.add(route)
         session.flush()
         for idx, alias in enumerate(candidates):
             session.add(RouteCandidate(route_id=route.id, model_alias=alias, order_index=idx))
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_routes(request)
 
 
@@ -466,12 +539,14 @@ async def create_route(
 async def update_route(
     request: Request,
     route_id: int,
-    pattern: Annotated[str, Form()],
-    candidates: Annotated[list[str], Form()] = [],
+    pattern: Annotated[str | None, Form()] = None,
+    candidates: Annotated[list[str] | None, Form()] = None,
     _: None = Depends(require_admin_token),
 ):
     if not pattern:
         raise HTTPException(status_code=400, detail="Pattern obrigatorio")
+    # Mesma limpeza do create: descarta option vazio e duplicatas
+    candidates = list(dict.fromkeys(a for a in (candidates or []) if a))
     if not candidates:
         raise HTTPException(status_code=400, detail="Pelo menos um candidato obrigatorio")
     engine = request_engine(request)
@@ -484,13 +559,13 @@ async def update_route(
                 raise HTTPException(status_code=400, detail=f"Model {alias} nao existe")
         route.pattern = pattern
         # Recria candidates
-        session.execute(
-            RouteCandidate.__table__.delete().where(RouteCandidate.route_id == route_id)
-        )
+        session.execute(delete(RouteCandidate).where(RouteCandidate.route_id == route_id))
         for idx, alias in enumerate(candidates):
             session.add(RouteCandidate(route_id=route.id, model_alias=alias, order_index=idx))
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_routes(request)
 
 
@@ -502,12 +577,20 @@ async def reorder_routes(
 ):
     engine = request_engine(request)
     with Session(engine) as session:
+        existing = [r.id for r in session.execute(select(Route)).scalars().all()]
+        # `order` tem de ser uma permutacao das rotas existentes: payload parcial
+        # ou com id duplicado deixaria order_index repetido e prioridade de
+        # fallback indeterminada.
+        if sorted(order) != sorted(existing):
+            raise HTTPException(status_code=400, detail="Order nao cobre todas as rotas exatamente uma vez")
         for idx, route_id in enumerate(order):
             route = session.get(Route, route_id)
             if route:
                 route.order_index = idx
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_routes(request)
 
 
@@ -522,9 +605,15 @@ async def delete_route(
         route = session.get(Route, route_id)
         if not route:
             raise HTTPException(status_code=404, detail="Route nao encontrado")
+        # Candidados antes: a FK route_candidates.route_id e nullable=False e a
+        # relacao nao tem cascade -- session.delete(route) nullificaria o id e
+        # quebraria o commit com IntegrityError.
+        session.execute(delete(RouteCandidate).where(RouteCandidate.route_id == route_id))
         session.delete(route)
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await list_routes(request)
 
 
@@ -543,13 +632,13 @@ async def edit_route_form(request: Request, route_id: int, _: None = Depends(req
         route = session.get(Route, route_id)
         if not route:
             raise HTTPException(status_code=404, detail="Route nao encontrado")
-        route.candidates = session.execute(
+        candidates = session.execute(
             select(RouteCandidate)
             .where(RouteCandidate.route_id == route_id)
             .order_by(RouteCandidate.order_index)
         ).scalars().all()
         models = session.execute(select(Model).order_by(Model.alias)).scalars().all()
-    return render("_route_form.html", request=request, route=route, models=models)
+    return render("_route_form.html", request=request, route=route, models=models, candidates=candidates)
 
 
 # --- Default Model ---
@@ -580,6 +669,8 @@ async def set_default_model(
         m.is_default = True
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await get_default_model(request)
 
 
@@ -591,10 +682,8 @@ async def reload_config(request: Request, _: None = Depends(require_admin_token)
     """Invalida cache e recarrega settings do banco."""
     engine = request_engine(request)
     with Session(engine) as session:
-        settings = load_settings(session)
-    # Atualiza app.state.settings se existir
-    from app.main import app
-    app.state.settings = settings
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return JSONResponse({"status": "reloaded", "default_model": settings.default_model})
 
 
@@ -610,11 +699,11 @@ async def rollback_config(
         if not cv:
             raise HTTPException(status_code=404, detail="Versao nao encontrada")
         snap = json.loads(cv.snapshot_json)
-        # Limpa tabelas de config
-        session.execute(RouteCandidate.__table__.delete())
-        session.execute(Route.__table__.delete())
-        session.execute(Model.__table__.delete())
-        session.execute(Provider.__table__.delete())
+        # Limpa tabelas de config (ordem respeita FKs)
+        session.execute(delete(RouteCandidate))
+        session.execute(delete(Route))
+        session.execute(delete(Model))
+        session.execute(delete(Provider))
         # Reinsere do snapshot
         for pdata in snap["providers"]:
             p = Provider(**pdata)
@@ -643,6 +732,8 @@ async def rollback_config(
                 session.add(RouteCandidate(route_id=route.id, model_alias=alias, order_index=idx))
         session.commit()
         create_config_version(session)
+        settings = load_settings_from_db(session)
+    await apply_settings(request.app, settings)
     return await admin_config_page(request)
 
 

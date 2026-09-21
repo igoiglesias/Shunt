@@ -14,8 +14,17 @@ coluna seria perder a linha ou inventar um valor.
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -152,3 +161,85 @@ class Analysis(Base):
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class Provider(Base):
+    """Provedor upstream (local, openrouter, groq, anthropic, etc.)."""
+
+    __tablename__ = "providers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    protocol: Mapped[str] = mapped_column(String(16), nullable=False)  # "openai" or "anthropic"
+    api_key_env: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    models: Mapped[list[Model]] = relationship(back_populates="provider", lazy="selectin")
+
+
+class Model(Base):
+    """Modelo do catalogo: alias local -> provedor + nome upstream."""
+
+    __tablename__ = "models"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    alias: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    provider_id: Mapped[int] = mapped_column(ForeignKey("providers.id"), nullable=False)
+    upstream_model: Mapped[str] = mapped_column(String(256), nullable=False)
+    supports_tools: Mapped[bool] = mapped_column(Boolean, default=True)
+    supports_streaming: Mapped[bool] = mapped_column(Boolean, default=True)
+    supports_vision: Mapped[bool] = mapped_column(Boolean, default=False)
+    context_window: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    provider: Mapped[Provider] = relationship(back_populates="models", lazy="selectin")
+
+    __table_args__ = ()
+
+
+class Route(Base):
+    """Rota: padrao de substring -> lista ordenada de candidatos (Model.alias)."""
+
+    __tablename__ = "routes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pattern: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    candidates: Mapped[list[RouteCandidate]] = relationship(back_populates="route", lazy="selectin", order_by="RouteCandidate.order_index")
+
+    __table_args__ = ()
+
+
+class RouteCandidate(Base):
+    """Um candidato dentro de uma rota (ordem importa)."""
+
+    __tablename__ = "route_candidates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    route_id: Mapped[int] = mapped_column(ForeignKey("routes.id"), nullable=False)
+    model_alias: Mapped[str] = mapped_column(String(128), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    route: Mapped[Route] = relationship(back_populates="candidates", lazy="selectin")
+
+    __table_args__ = ()
+
+
+class ConfigVersion(Base):
+    """Snapshot da configuracao completa para auditoria/rollback."""
+
+    __tablename__ = "config_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    __table_args__ = ()

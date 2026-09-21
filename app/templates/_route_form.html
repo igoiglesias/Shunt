@@ -15,7 +15,7 @@
   <input type="hidden" name="pattern" value="{{ route.pattern }}">
   <div class="form-group">
     <label for="pattern">Pattern</label>
-    <input type="text" value="{{ route.pattern }}" disabled style="background: var(--panel-2); color: var(--muted);">
+    <input type="text" id="pattern" value="{{ route.pattern }}" disabled style="background: var(--panel-2); color: var(--muted);">
   </div>
   {% endif %}
 </div>
@@ -23,7 +23,7 @@
 <div style="margin-top: 12px;">
   <label style="font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim);">Candidatos (ordem = prioridade de fallback)</label>
   <div id="candidates-list" style="margin-top: 8px;">
-    {% set candidates = route.candidates if route else [] %}
+    {% set candidates = candidates if candidates is defined else (route.candidates if route else []) %}
     {% if candidates %}
       {% for c in candidates %}
         <div class="form-row" style="margin-bottom: 8px; align-items: center;">
@@ -51,23 +51,24 @@
       </div>
     {% endif %}
   </div>
-  <button type="button" class="btn btn-sm" onclick="
-    const div = document.createElement('div');
-    div.className = 'form-row';
-    div.style.marginBottom = '8px';
-    div.style.alignItems = 'center';
-    div.innerHTML = `
+  <!-- Linha nova clonada de um template: alias e nome de provedor ficam em
+       HTML renderizado pelo servidor (autoescape), nunca interpolados em JS. -->
+  <template id="candidate-row-template">
+    <div class="form-row" style="margin-bottom: 8px; align-items: center;">
       <div class="form-group" style="flex: 1;">
         <select name="candidates" required>
           <option value="">— selecione —</option>
           {% for m in models %}
-            <option value=\"{{ m.alias }}\">{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
+            <option value="{{ m.alias }}">{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
           {% endfor %}
         </select>
       </div>
-      <button type=\"button\" class=\"btn btn-sm btn-danger\" onclick=\"this.closest('.form-row').remove()\">Remover</button>
-    `;
-    document.getElementById('candidates-list').appendChild(div);
+      <button type="button" class="btn btn-sm btn-danger" onclick="this.closest('.form-row').remove()">Remover</button>
+    </div>
+  </template>
+  <button type="button" class="btn btn-sm" onclick="
+    const tpl = document.getElementById('candidate-row-template');
+    document.getElementById('candidates-list').appendChild(tpl.content.cloneNode(true));
   ">+ Adicionar Candidato</button>
 </div>
 

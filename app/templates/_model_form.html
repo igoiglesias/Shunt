@@ -35,19 +35,25 @@
 </div>
 <div class="form-grid" style="margin-top: 8px;">
   <div class="form-group checkbox-group">
-    <input type="checkbox" id="supports_tools" name="supports_tools" {% if model is none or model.supports_tools %}checked{% endif %}>
+    <!-- hidden companheiro: checkbox desmarcado envia nada sozinho, e o
+         default do endpoint (True/False) decidiria o lugar de quem clicou -->
+    <input type="hidden" name="supports_tools" value="false">
+    <input type="checkbox" id="supports_tools" name="supports_tools" value="true" {% if model is none or model.supports_tools %}checked{% endif %}>
     <label for="supports_tools">Tools</label>
   </div>
   <div class="form-group checkbox-group">
-    <input type="checkbox" id="supports_streaming" name="supports_streaming" {% if model is none or model.supports_streaming %}checked{% endif %}>
+    <input type="hidden" name="supports_streaming" value="false">
+    <input type="checkbox" id="supports_streaming" name="supports_streaming" value="true" {% if model is none or model.supports_streaming %}checked{% endif %}>
     <label for="supports_streaming">Streaming</label>
   </div>
   <div class="form-group checkbox-group">
-    <input type="checkbox" id="supports_vision" name="supports_vision" {% if model and model.supports_vision %}checked{% endif %}>
+    <input type="hidden" name="supports_vision" value="false">
+    <input type="checkbox" id="supports_vision" name="supports_vision" value="true" {% if model and model.supports_vision %}checked{% endif %}>
     <label for="supports_vision">Vision</label>
   </div>
   <div class="form-group checkbox-group">
-    <input type="checkbox" id="is_default" name="is_default" {% if model and model.is_default %}checked{% endif %}>
+    <input type="hidden" name="is_default" value="false">
+    <input type="checkbox" id="is_default" name="is_default" value="true" {% if model and model.is_default %}checked{% endif %}>
     <label for="is_default">Default</label>
   </div>
 </div>

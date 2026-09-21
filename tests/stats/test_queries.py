@@ -16,6 +16,25 @@ from app.core.resolver import Candidate, Resolution
 from app.stats import queries
 from app.stats.models import RequestEvent
 
+
+# Congela relógio do módulo queries para evitar flake de janela temporal.
+# _since() usa datetime.now(UTC) inline; os offsets dos testes partem de NOW,
+# então o instante congelado tem de ser o MESMO que NOW, senão as linhas
+# semeadas saem da janela e a consulta conta zero.
+FROZEN_NOW = datetime.now(UTC)
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return FROZEN_NOW
+
+
+@pytest.fixture(autouse=True)
+def _freeze_clock(monkeypatch):
+    monkeypatch.setattr(queries, "datetime", _FrozenDatetime)
+
+
 # O candidato que a rota resolveu para a linha de pulo do teste cruzado.
 NEMOTRON_CHAIN = [
     Candidate(
@@ -26,7 +45,7 @@ NEMOTRON_CHAIN = [
     )
 ]
 
-NOW = datetime.now(UTC)
+NOW = FROZEN_NOW
 
 
 def row(**over):

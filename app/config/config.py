@@ -81,7 +81,7 @@ routes = [
     ("gpt-oss", ["open-gpt-oss-120"]),
     ("free", ["open-free", "groq-free", "open-nemotron-ultra"]),
     ("fable", ["open-nemotron-ultra", "open-free", "groq-free"]),
-    ("haiku", ["groq-free","open-nemotron-ultra", "open-free"]),
+    ("haiku", ["groq-free", "open-free", "open-nemotron-ultra"]),
     ("sonnet", ["open-free", "open-nemotron-ultra", "groq-free"]),
     ("opus", ["qwen-local", "open-nemotron-ultra", "open-free"]),
 ]

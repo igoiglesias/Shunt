@@ -74,7 +74,7 @@
       <h2>Provedores</h2>
       <button class="btn btn-primary" hx-get="/admin/config/providers/new" hx-target="#provider-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="providers-list">{{ providers_html | safe }}</div>
+    <div id="providers-list">{% include "_providers.html" %}</div>
     <div id="provider-form"></div>
   </section>
 
@@ -84,7 +84,7 @@
       <h2>Modelos</h2>
       <button class="btn btn-primary" hx-get="/admin/config/models/new" hx-target="#model-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="models-list">{{ models_html | safe }}</div>
+    <div id="models-list">{% include "_models.html" %}</div>
     <div id="model-form"></div>
   </section>
 
@@ -94,7 +94,7 @@
       <h2>Rotas e Fallback</h2>
       <button class="btn btn-primary" hx-get="/admin/config/routes/new" hx-target="#route-form" hx-swap="outerHTML">Nova Rota</button>
     </div>
-    <div id="routes-list">{{ routes_html | safe }}</div>
+    <div id="routes-list">{% include "_routes.html" %}</div>
     <div id="route-form"></div>
   </section>
 
@@ -103,7 +103,7 @@
     <div class="section-header">
       <h2>Modelo Padrão</h2>
     </div>
-    <div id="default-content">{{ default_html | safe }}</div>
+    <div id="default-content">{% include "_default.html" %}</div>
   </section>
 
   <!-- History Section -->
@@ -112,7 +112,7 @@
       <h2>Histórico de Versões</h2>
       <button class="btn" hx-get="/admin/config/history" hx-target="#history-content" hx-swap="innerHTML">Atualizar</button>
     </div>
-    <div id="history-content">{{ history_html | safe }}</div>
+    <div id="history-content">{% include "_history.html" %}</div>
   </section>
 
   <!-- Reload Button -->
@@ -126,18 +126,5 @@
 </main>
 
 <script src="https://unpkg.com/htmx.org@1.9.12"></script>
-<script>
-  // HTMX configuration
-  document.body.addEventListener('htmx:afterSwap', function(evt) {
-    // Re-initialize any form handlers after HTMX swaps
-  });
-
-  // Confirm delete actions
-  document.body.addEventListener('htmx:confirm', function(evt) {
-    if (evt.target.classList.contains('btn-danger')) {
-      return confirm('Tem certeza? Esta ação não pode ser desfeita.');
-    }
-  });
-</script>
 </body>
 </html>

@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 from app.config.settings import load_settings
 from app.core.observability import configure_logging, set_recorder
 from app.core.upstream import UpstreamPool
+from app.routers.admin_config import router as admin_config_router
 from app.routers.audit import router as audit_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.v1 import router as v1_router
@@ -75,6 +76,7 @@ app = FastAPI(lifespan=lifespan)
 app.include_router(v1_router)
 app.include_router(dashboard_router)
 app.include_router(audit_router)
+app.include_router(admin_config_router)
 
 
 @app.get("/health")

@@ -8,14 +8,14 @@
   <th class="n">Ações</th>
 </tr></thead>
 <tbody>
-{% for r in routes %}
+{% for r, candidates in routes %}
 <tr data-route-id="{{ r.id }}">
   <td class="mono">{{ r.pattern }}</td>
   <td class="n">{{ r.order_index }}</td>
   <td>
-    {% if r.candidates %}
+    {% if candidates %}
       <ul style="margin: 0; padding-left: 16px;">
-      {% for c in r.candidates %}
+      {% for c in candidates %}
         <li>{{ c.model_alias }} <span class="mono" style="color: var(--dim);">(ordem {{ c.order_index }})</span></li>
       {% endfor %}
       </ul>
@@ -40,7 +40,7 @@
 <!-- Reorder buttons -->
 <div style="margin-top: 12px; display: flex; gap: 8px;">
   <button class="btn" hx-post="/admin/config/routes/reorder"
-          hx-vals='js:{order: document.querySelectorAll("tbody tr[data-route-id]").length ? Array.from(document.querySelectorAll("tbody tr[data-route-id]")).map((_, i) => i) : []}'
+          hx-vals='js:{order: Array.from(document.querySelectorAll("tbody tr[data-route-id]")).map(el => el.dataset.routeId)}'
           hx-target="#routes-list" hx-swap="outerHTML">
     Aplicar ordem atual da tabela
   </button>
