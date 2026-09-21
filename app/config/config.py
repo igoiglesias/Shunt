@@ -74,6 +74,11 @@ models = {
 }
 
 routes = [
+    ("groq", ["groq-free"]),
+    ("local", ["qwen-local"]),
+    ("nemotron", ["open-nemotron-ultra"]),
+    ("deepseek", ["open-deepseek-v4.1-flash"]),
+    ("gpt-oss", ["open-gpt-oss-120"]),
     ("free", ["open-free", "groq-free", "open-nemotron-ultra"]),
     ("fable", ["open-nemotron-ultra", "open-free", "groq-free"]),
     ("haiku", ["groq-free","open-nemotron-ultra", "open-free"]),

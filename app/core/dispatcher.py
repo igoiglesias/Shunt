@@ -41,7 +41,7 @@ from app.core.attempt import (
     backoff,
     classify,
 )
-from app.core.capabilities import filter_chain, requirements_of
+from app.core.capabilities import requirements_of
 from app.core.observability import RequestLog, log_request
 from app.core.project import project_and_session
 from app.core.resolver import Candidate, Resolution, last_resort, resolve
@@ -385,13 +385,45 @@ def _chain_for(
     """A cadeia que sobra depois do filtro, ou o degrau de baixo.
 
     Devolve tambem as linhas de rastro do que foi descartado, com o motivo.
+    Os descartes de tamanho ficam para o rastro do caminho (não antes),
+    para que o log reflita a ordem real de tentativas.
+    O default_model (último da cadeia) NÃO é descartado por tamanho aqui:
+    é a escolha do operador para "quando nada serve" e deve ser tentado.
     """
-    chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
-    trace = [f"{nome}: {reason}" for nome, reason in dropped]
-    # `resolution.chain` nunca chega vazia aqui -- `Settings` recusa rota com
-    # lista de candidatos vazia -- entao cadeia vazia significa que o filtro
-    # descartou todo mundo, e `dropped` tem pelo menos uma linha.
-    if chain or not all(reason.startswith(SIZE_DROP) for _, reason in dropped):
+    reqs = requirements_of(probe)
+    dropped_non_size: list[tuple[str, str]] = []
+    size_drops: set[str] = set()
+    kept: list[Candidate] = []
+    # default_model é o último da cadeia original (adicionado por last_resort)
+    default_alias = resolution.chain[-1].alias if resolution.chain else None
+    for candidate in resolution.chain:
+        if candidate.transparent or candidate.alias is None:
+            kept.append(candidate)
+            continue
+        model = settings.models[candidate.alias]
+        dropped = False
+        if reqs.tools and not model.supports.tools:
+            dropped_non_size.append((candidate.model, "no tool support"))
+            dropped = True
+        elif reqs.vision and not model.supports.vision:
+            dropped_non_size.append((candidate.model, "no vision support"))
+            dropped = True
+        elif reqs.streaming and not model.supports.streaming:
+            dropped_non_size.append((candidate.model, "no streaming support"))
+            dropped = True
+        elif reqs.input_tokens + reqs.output_tokens > model.context_window:
+            # default_model NÃO é descartado por tamanho aqui: o operador
+            # escolheu como "último recurso" e deve ser tentado
+            if candidate.alias == default_alias:
+                kept.append(candidate)
+                continue
+            size_drops.add(candidate.alias or candidate.model)
+            dropped = True
+        if not dropped:
+            kept.append(candidate)
+    chain = kept
+    trace = [f"{lbl}: {reason}" for lbl, reason in dropped_non_size]
+    if chain or not all(r.startswith(SIZE_DROP) for _, r in dropped_non_size):
         return chain, trace
     ladder = last_resort(str(req.body.get("model", "")), settings)
     if ladder:
@@ -414,6 +446,7 @@ async def _dispatch(
         # capability filter, this is the only evidence the probe ever failed.
         probe = req.body
         probe_note = [f"probe ({first.model}): request translation failed: {err}"]
+    reqs = requirements_of(probe)
     chain, motivos = _chain_for(req, settings, resolution, probe)
     trace = probe_note + motivos
 
@@ -442,6 +475,21 @@ async def _dispatch(
         if missing is not None:
             trace.append(f"{label}: credential {missing} is not set")
             continue
+        # size check inline: mostra no rastro na ordem de execução real
+        default_alias = resolution.chain[-1].alias if resolution.chain else None
+        is_default = candidate.alias == default_alias
+        if candidate.alias is not None:
+            model = settings.models[candidate.alias]
+            if reqs.input_tokens + reqs.output_tokens > model.context_window:
+                if is_default:
+                    trace.append(f"{label}: taken anyway, nothing in the chain fits")
+                else:
+                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")
+                    continue
+        elif candidate.transparent:
+            # transparente SEM default: é o último recurso, tenta mesmo não cabendo
+            # registra o tamanho no rastro
+            trace.append(f"{label}: context window too small (estimate > inferred window)")
         try:
             payload = _payload(req, candidate, settings)
         except Exception as err:  # noqa: BLE001 - one candidate we cannot render
@@ -796,6 +844,7 @@ async def _stream_chain(
         # probe we cannot render is a worse estimate, not a dead request.
         probe = req.body
         probe_note = [f"probe ({first.model}): request translation failed: {err}"]
+    reqs = requirements_of(probe)
     chain, motivos = _chain_for(req, settings, resolution, probe)
     trace = tally.trace
     trace.extend(probe_note)
@@ -817,6 +866,21 @@ async def _stream_chain(
         if missing is not None:
             trace.append(f"{label}: credential {missing} is not set")
             continue
+        # size check inline: mostra no rastro na ordem de execução real
+        default_alias = resolution.chain[-1].alias if resolution.chain else None
+        is_default = candidate.alias == default_alias
+        if candidate.alias is not None:
+            model = settings.models[candidate.alias]
+            if reqs.input_tokens + reqs.output_tokens > model.context_window:
+                if is_default:
+                    trace.append(f"{label}: taken anyway, nothing in the chain fits")
+                else:
+                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")
+                    continue
+        elif candidate.transparent:
+            # transparente SEM default: é o último recurso, tenta mesmo não cabendo
+            # registra o tamanho no rastro
+            trace.append(f"{label}: context window too small (estimate > inferred window)")
         try:
             payload = _payload(req, candidate, settings)
         except Exception as err:  # noqa: BLE001 - one candidate skipped, not a

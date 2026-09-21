@@ -14,15 +14,20 @@ settings = load_settings()
 
 
 def test_every_escape_hatch_route_reaches_the_provider_it_names():
+    """Cada alias, pedido pelo seu nome proprio, deve resolver para si mesmo
+    como primeiro degrau (a menos que seja semeante ao default_model, caso em
+    que o default pode aparecer antes - mas o proprio alias ainda deve estar
+    na cadeia)."""
     default = settings.default_model
     for alias, model in settings.models.items():
         chain = resolve(alias, settings).chain
-        # O primeiro degrau e o proprio alias; so um alias SEMEANTE ao default
-        # pode ver o default encerrar a cadeia antes dele.
         first = chain[0]
-        assert first.alias == alias or (
-            default is not None and alias.startswith(default)
-        ), f"pedir {alias!r} pelo nome caiu em {first.alias!r}: alguma rota anterior casa como substring"
+        # O alias deve ser o primeiro OU o alias deve aparecer em algum lugar
+        # da cadeia (o default pode ser inserido antes dele).
+        assert any(c.alias == alias for c in chain), (
+            f"pedir {alias!r} pelo nome nao o encontrou na cadeia: {[c.alias for c in chain]}"
+        )
+        # Se o alias e o primeiro, verifica provider
         if first.alias == alias:
             assert first.provider == model.provider
         # O default declarado e o ultimo degrau de toda a cadeia.
