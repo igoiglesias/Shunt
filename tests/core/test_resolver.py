@@ -46,7 +46,7 @@ def test_exact_match_wins_over_family():
     settings = build([("claude-opus-4-5", ["qwen"]), ("opus", ["free"])])
     result = resolve("claude-opus-4-5", settings)
     assert result.rule == "exact"
-    assert [c.alias for c in result.chain] == ["qwen"]
+    assert [c.alias for c in result.chain] == ["qwen", None]  # o None e o transparente original
 
 
 def test_family_match_uses_substring():
@@ -61,10 +61,11 @@ def test_first_matching_pattern_wins():
     assert resolve("claude-opus-4-5", settings).chain[0].alias == "qwen"
 
 
-def test_default_model_comes_right_after_the_rule_candidate():
+def test_default_model_closes_the_chain_after_the_route_members():
+    """O `default_model` e o ultimo degrau de toda a cadeia, nao o segundo."""
     settings = build([("opus", ["qwen", "free"])], default_model="cheap")
     chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
-    assert chain == ["qwen", "cheap", "free"]
+    assert chain == ["qwen", "free", "cheap"]
 
 
 def test_no_matching_route_falls_back_to_default_rule():
@@ -74,20 +75,10 @@ def test_no_matching_route_falls_back_to_default_rule():
     assert [c.alias for c in result.chain] == ["cheap"]
 
 
-def test_default_model_not_duplicated_when_route_already_starts_with_it():
-    # This only asserts the observable chain has no duplicate. It still passes
-    # if the insertion guard itself is disabled, because the `seen` set alone
-    # absorbs the duplicate — the guard in isolation is covered by mutation
-    # testing, not by this test.
-    settings = build([("opus", ["cheap", "free"])], default_model="cheap")
-    chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
-    assert chain == ["cheap", "free"]
-
-
 def test_seen_set_dedups_repeated_alias_within_a_route():
     settings = build([("opus", ["free", "cheap", "free"])])
     chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
-    assert chain == ["free", "cheap"]
+    assert chain == ["free", "cheap", None]  # o None e o transparente original
 
 
 def test_no_rule_and_no_default_falls_back_to_transparent():
@@ -206,3 +197,57 @@ def test_last_resort_is_empty_when_no_provider_can_be_guessed():
     devolve o 400 que ja devolvia."""
     settings = build([("opus", ["free"])], default_model=None)
     assert last_resort("um-modelo-qualquer", settings) == []
+
+
+# -- O degrau de baixo fecha toda a cadeia resolvida ---------------------------
+
+
+def test_family_chain_ends_with_the_transparent_original_when_no_default():
+    """Sem `default_model`, o ultimo degrau e o proprio modelo pedido,
+    transparente, com provedor derivado do nome."""
+    settings = build([("haiku", ["qwen"])], default_model=None)
+    chain = resolve("claude-haiku-4-5-20251001", settings).chain
+    assert chain[0].alias == "qwen"
+    last = chain[-1]
+    assert last.transparent is True
+    assert last.alias is None
+    assert last.model == "claude-haiku-4-5-20251001"
+    assert last.provider == "anthropic"
+    assert last.protocol == "anthropic"
+
+
+def test_family_chain_ends_with_the_default_when_declared():
+    """Com `default_model` declarado, ele fecha a cadeia -- nem que nenhum
+    alias da rota seja ele, e nao ocupa lugar no meio."""
+    settings = build([("opus", ["qwen", "free"])], default_model="cheap")
+    chain = resolve("claude-opus-4-5", settings).chain
+    assert [c.alias for c in chain] == ["qwen", "free", "cheap"]
+    last = chain[-1]
+    assert last.provider == "openrouter"
+    assert last.model == "vendor/cheap"
+    assert last.transparent is False
+
+
+def test_default_that_is_a_route_member_moved_to_the_end_without_a_copy():
+    """O default membro da rota aparece UMA vez, no fim: a copia antiga do
+    meio da cadeia some, sem duplicata."""
+    settings = build([("opus", ["cheap", "free"])], default_model="cheap")
+    chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
+    assert chain == ["free", "cheap"]
+    assert chain.count("cheap") == 1
+
+
+def test_chain_unchanged_when_no_default_and_no_provider_can_be_guessed():
+    """Sem default e sem provedor deduzivel do nome, nao ha ultimo degrau:
+    a cadeia da rota sai intacta, sem elemento fantasma."""
+    settings = build([("qualquer", ["qwen"])], default_model=None)
+    chain = [c.alias for c in resolve("um-modelo-qualquer", settings).chain]
+    assert chain == ["qwen"]
+
+
+def test_declared_route_order_is_kept_before_the_tail():
+    """A ordem declarada da rota manda ate o penultimo; so o fim e reservado
+    ao degrau de baixo."""
+    settings = build([("opus", ["free", "qwen"])], default_model="cheap")
+    chain = [c.alias for c in resolve("claude-opus-4-5", settings).chain]
+    assert chain == ["free", "qwen", "cheap"]

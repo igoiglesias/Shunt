@@ -67,7 +67,11 @@ def test_transport_error_retries_then_moves_on(shunt, provider):
 
 
 def test_exhausted_chain_answers_an_anthropic_error_naming_every_candidate(shunt, provider):
+    # Tres candidatos desde que o degrau de baixo entrou na cadeia resolvida:
+    # `qwen`, `free` e o modelo pedido em modo transparente. Um transporte que
+    # cai e repetido `MAX_ATTEMPTS` vezes por candidato.
     provider.queue(
+        Scripted(status=400, json_body={"error": {"message": "nao deu"}}),
         Scripted(status=400, json_body={"error": {"message": "nao deu"}}),
         Scripted(status=400, json_body={"error": {"message": "nao deu"}}),
     )
@@ -76,6 +80,7 @@ def test_exhausted_chain_answers_an_anthropic_error_naming_every_candidate(shunt
     assert body["error"]["type"] == "invalid_request_error"
     assert "qwen" in body["error"]["message"]
     assert "free" in body["error"]["message"]
+    assert "claude-opus-4-5" in body["error"]["message"]
 
 
 def test_error_inside_a_200_stream_falls_back_before_the_client_sees_anything(shunt, provider):
@@ -112,10 +117,17 @@ def test_error_after_the_first_event_is_reported_in_the_anthropic_shape(shunt, p
 
 
 def test_no_capable_candidate_answers_400_saying_why_each_was_dropped(shunt, provider, settings):
+    """O degrau de baixo transparente so existe quando da para deduzir o
+    provedor do nome pedido. Sem isso -- e sem `default_model` -- a cadeia
+    esvaziada pelo filtro continua virando 400 com o motivo de cada descarte."""
     settings.routes = [("opus", ["mudo"])]
     body = shunt.post(
         "/v1/messages",
-        json={**ASK, "tools": [{"name": "read", "input_schema": {"type": "object"}}]},
+        json={
+            **ASK,
+            "model": "acme-super-opus",
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+        },
     ).json()
     assert body["error"]["type"] == "invalid_request_error"
     assert "no tool support" in body["error"]["message"]
@@ -128,7 +140,9 @@ def test_transport_failure_names_the_exception_class_in_the_error(shunt, provide
     e a mensagem de erro chegava ao cliente como `" - tried: qwen-local:  "`,
     sem dizer nada. O nome da classe e o unico pedaco que sempre existe.
     """
-    provider.queue(*[Scripted(raise_transport=True) for _ in range(6)])
+    # Tres candidatos (`qwen`, `free` e o degrau de baixo transparente), cada um
+    # repetido `MAX_ATTEMPTS` = 3 vezes num transporte que cai.
+    provider.queue(*[Scripted(raise_transport=True) for _ in range(9)])
     body = shunt.post("/v1/messages", json=ASK).json()
     assert "ConnectError" in body["error"]["message"]
 

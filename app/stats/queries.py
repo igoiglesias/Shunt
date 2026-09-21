@@ -526,6 +526,11 @@ SEM_CREDENCIAL = "sem credencial"
 SEM_SUPORTE = "sem suporte"
 FALHOU = "falhou na chamada"
 
+# O separador que o dispatcher escreve entre o nome e o motivo
+# (`f"{label}: {motivo}"`). Nome de modelo pode conter ":", entao partir no
+# primeiro dois-pontos trunca o nome e desclassifica o motivo.
+SKIP_DELIMITER = ": "
+
 
 def _skip_reason(motivo: str) -> str | None:
     """A classe do descarte, ou None quando a linha nao e um descarte.
@@ -565,7 +570,13 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 first_try += 1
             continue
         for attempt in attempts:
-            nome, _, motivo = str(attempt).partition(":")
+            # O separador ESCRITO pela linha de rastro e ": " (dois-pontos mais
+            # espaco), nao ":": nome de modelo tem dois-pontos
+            # (`nvidia/nemotron-3-ultra-550b-a55b:free` no catalogo), e cortar
+            # no primeiro deles trunca o nome e deixa um motivo que nao casa
+            # com nenhuma regra -- "sem credencial" e "nao coube" caiam os dois
+            # em "falhou na chamada".
+            nome, _, motivo = str(attempt).partition(SKIP_DELIMITER)
             classe = _skip_reason(motivo)
             if classe is None:
                 continue

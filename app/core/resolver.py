@@ -68,19 +68,26 @@ def _transparent(requested: str, settings: Settings, model: str | None = None) -
 
 
 def _chain(aliases: list[str], settings: Settings, requested: str) -> list[Candidate]:
-    ordered = list(aliases)
-    if settings.default_model:
-        ordered = (
-            ordered[:1]
-            + [settings.default_model]
-            + [a for a in ordered[1:] if a != settings.default_model]
-        )
+    """Cadeia da rota mais o degrau de baixo, que sempre fecha a cadeia.
+
+    O degrau de baixo vem de `last_resort` e aparece UMA vez, no fim: se ele
+    ja esta na rota (com ou sem alias), a copia antiga some do lugar em que
+    estava, em vez de duplicar. Sem default e sem provedor deduzivel do nome,
+    nao ha degrau: a cadeia da rota sai como foi declarada.
+    """
+    tail = last_resort(requested, settings)
+    tail_ids = {(c.alias, c.model) for c in tail}
+    result: list[Candidate] = []
     seen: set[str] = set()
-    result = []
-    for alias in ordered:
-        if alias not in seen:
-            seen.add(alias)
-            result.append(_candidate(alias, settings, requested))
+    for alias in aliases:
+        if alias in seen:
+            continue
+        seen.add(alias)
+        candidate = _candidate(alias, settings, requested)
+        if (candidate.alias, candidate.model) in tail_ids:
+            continue  # o degrau de baixo ja o atende; ele mora no fim
+        result.append(candidate)
+    result.extend(tail)
     return result
 
 

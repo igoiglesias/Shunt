@@ -4,6 +4,7 @@ import respx
 from pydantic import ValidationError
 
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
+from app.core import dispatcher
 from app.core.dispatcher import ShuntRequest, _exception_text, dispatch, outbound_headers
 from app.core.resolver import Candidate
 from app.core.upstream import UpstreamPool
@@ -328,7 +329,7 @@ async def test_endpoint_without_a_path_on_the_provider_protocol_is_skipped():
     assert route.call_count == 0
     assert result.status == 502
     assert "endpoint not supported" in result.body["error"]["message"]
-    assert result.trace == ["fable: endpoint not supported"]
+    assert result.trace == ["claude-fable-5-1: endpoint not supported"]
 
 
 @respx.mock
@@ -428,7 +429,10 @@ async def test_a_chain_emptied_by_the_capability_filter_returns_400_without_call
     assert result.status == 400
     assert result.real_model is None
     assert "no candidate can serve this request" in result.body["error"]["message"]
-    assert result.trace == ["free: no tool support"]
+    # A linha de descarte nomeia pelo MODELO, igual a linha de tentativa
+    # (`label = candidate.model`): nomear pelo alias fazia um candidato so
+    # aparecer como dois modelos no mesmo rastro.
+    assert result.trace == ["vendor/free: no tool support"]
 
 
 class _Clock:
@@ -459,8 +463,8 @@ async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
     finally:
         await pool.aclose()
     assert route.call_count == 1
-    assert "cheap: total deadline exceeded" in result.trace
-    assert "free: 400 (attempt 1)" in result.trace
+    assert "vendor/cheap: total deadline exceeded" in result.trace
+    assert "vendor/free: 400 (attempt 1)" in result.trace
 
 
 @respx.mock
@@ -651,7 +655,7 @@ async def test_a_successful_result_still_reports_what_happened_before_it():
     finally:
         await pool.aclose()
     assert result.real_model == "vendor/backup"
-    assert result.trace == ["free: no tool support", "cheap: 400 (attempt 1)"]
+    assert result.trace == ["vendor/free: no tool support", "vendor/cheap: 400 (attempt 1)"]
 
 
 # --- rodada 1 de correcoes ---------------------------------------------------
@@ -716,7 +720,7 @@ async def test_an_anthropic_image_drops_a_candidate_without_vision():
         await pool.aclose()
     assert route.call_count == 1
     assert result.real_model == "vendor/enxerga"
-    assert result.trace == ["cego: no vision support"]
+    assert result.trace == ["vendor/cego: no vision support"]
 
 
 ANTHROPIC_PAIR = Settings(
@@ -767,7 +771,7 @@ async def test_a_2xx_body_that_is_not_json_falls_through_to_the_next_candidate()
     assert route.call_count == 2
     assert result.status == 200
     assert result.real_model == "claude-b"
-    assert "a: unreadable body (attempt 1)" in result.trace
+    assert "claude-a: unreadable body (attempt 1)" in result.trace
 
 
 @respx.mock
@@ -782,7 +786,10 @@ async def test_every_2xx_body_that_is_not_json_exhausts_the_chain_with_502():
         result = await dispatch(ShuntRequest("anthropic", BODY, {}), ANTHROPIC_PAIR, pool)
     finally:
         await pool.aclose()
-    assert route.call_count == 2
+    # Tres candidatos desde que o degrau de baixo entrou na cadeia resolvida:
+    # `a`, `b` e o modelo pedido em modo transparente. Todos respondem a mesma
+    # coisa, entao a ultima falha e a que sai.
+    assert route.call_count == 3
     assert result.status == 502
     assert "not a usable JSON object" in result.body["error"]["message"]
 
@@ -872,7 +879,7 @@ async def test_a_translator_failure_skips_the_candidate_instead_of_killing_the_c
     assert anthropic_route.call_count == 1
     assert result.status == 200
     assert result.real_model == "claude-a"
-    assert any("openai_um: request translation failed" in line for line in result.trace)
+    assert any("vendor/free: request translation failed" in line for line in result.trace)
 
 
 BLIND_THEN_SEEING = Settings(
@@ -935,8 +942,8 @@ async def test_the_probe_degrades_to_the_untranslated_body_instead_of_raising():
     assert result.real_model == "claude-a"
     # O probe falhou e deixou rastro: sem essa linha, um `chain[0]` descartado
     # depois pelo filtro apagaria toda a evidencia de que ele falhou.
-    assert result.trace[0].startswith("probe (cego): request translation failed:")
-    assert result.trace[1:] == ["cego: no vision support"]
+    assert result.trace[0].startswith("probe (vendor/cego): request translation failed:")
+    assert result.trace[1:] == ["vendor/cego: no vision support"]
 
 
 PATH_SETTINGS = Settings(
@@ -1264,7 +1271,7 @@ async def test_a_2xx_whose_json_is_not_an_object_falls_through_to_the_next_candi
         await pool.aclose()
     assert route.call_count == 2
     assert result.real_model == "vendor/cheap"
-    assert "free: unreadable body (attempt 1)" in result.trace
+    assert "vendor/free: unreadable body (attempt 1)" in result.trace
 
 
 @respx.mock
@@ -1287,7 +1294,8 @@ async def test_a_non_numeric_max_tokens_is_left_for_the_provider_to_reject():
     assert _json.loads(route.calls[0].request.content)["max_tokens"] == "muitos"
     assert result.status == 400
     assert "max_tokens invalido" in result.body["error"]["message"]
-    assert route.call_count == 2
+    # `a`, `b` e o degrau de baixo transparente com o max_tokens do cliente.
+    assert route.call_count == 3
 
 
 def test_a_transparent_candidate_with_an_alias_still_keeps_the_clients_max_tokens():
@@ -1504,7 +1512,12 @@ async def test_a_chain_emptied_by_size_goes_transparent_without_a_default():
     assert route.call_count == 1
     assert result.status == 200
     assert result.real_model == "claude-opus-4-5"
-    assert any("nothing in the chain fits" in line for line in result.trace)
+    # O transparente agora e o ultimo degrau da propria cadeia, e nao um
+    # candidato que a escada do dispatcher inventa depois de esvaziar tudo: o
+    # filtro nunca descarta um transparente, entao ele chega aqui como membro
+    # normal e a nota "taken anyway" nao aparece.
+    assert any("context window too small" in line for line in result.trace)
+    assert not any("taken anyway" in line for line in result.trace)
 
 
 @respx.mock
@@ -1538,3 +1551,128 @@ async def test_a_route_with_no_candidates_is_refused_by_the_configuration():
             routes=[("opus", [])],
             default_model="grande",
         )
+
+
+# --- um candidato, um nome ------------------------------------------------
+#
+# Um alias existe para o operador escrever a rota; o MODELO e o que aparece
+# como resultado. Enquanto o rastro usa um e o resultado usa o outro, o mesmo
+# candidato fisico le como dois modelos diferentes na mesma linha do tempo.
+
+ALIAS_DIFFERS = Settings(
+    providers={
+        "openrouter": ProviderConfig(
+            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+        )
+    },
+    models={
+        "qwen-local": ModelConfig(
+            provider="openrouter",
+            model="qwen3.8-27b",
+            context_window=64000,
+            max_output_tokens=8192,
+        )
+    },
+    routes=[("opus", ["qwen-local"])],
+    default_model=None,
+)
+
+
+@respx.mock
+async def test_the_attempt_label_is_the_model_not_the_alias():
+    """O rotulo canonico e o MODELO. Com o alias, a linha de tentativa diz
+    `qwen-local` e o campo de resultado diz `qwen3.8-27b`: na tela sao dois
+    modelos, e o operador nao consegue ligar o pulo ao candidato que o
+    respondeu."""
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
+    )
+    pool = UpstreamPool(ALIAS_DIFFERS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), ALIAS_DIFFERS, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert result.trace == ["qwen3.8-27b: 400 (attempt 1)"]
+
+
+@respx.mock
+async def test_the_probe_note_names_the_model_not_the_alias(monkeypatch):
+    """A nota do probe nomeia o candidato cujo payload nao pode ser renderizado.
+    Nomeando pelo alias, ela e a linha de tentativa apontam para dois nomes."""
+    settings = ALIAS_DIFFERS.model_copy(
+        update={
+            "models": {
+                **ALIAS_DIFFERS.models,
+                "cego": ModelConfig(
+                    provider="openrouter",
+                    model="vendor/cego",
+                    supports=ModelCaps(vision=False),
+                    context_window=64000,
+                    max_output_tokens=8192,
+                ),
+            },
+            "routes": [("opus", ["qwen-local", "cego"])],
+        }
+    )
+    real = dispatcher._payload
+
+    def explode(req, candidate, settings):
+        if candidate.model == "qwen3.8-27b":
+            raise ValueError("shape estranho")
+        return real(req, candidate, settings)
+
+    monkeypatch.setattr(dispatcher, "_payload", explode)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/cego"))
+    )
+    pool = UpstreamPool(settings)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    assert result.trace[0] == (
+        "probe (qwen3.8-27b): request translation failed: shape estranho"
+    )
+
+
+@respx.mock
+async def test_the_last_resort_note_names_the_model_not_the_alias():
+    """A escada de ultimo recurso entra no mesmo rastro. Apresentando-se pelo
+    alias, o degrau de baixo aparece com um terceiro nome.
+
+    As duas janelas sao apertadas de proposito: com uma delas cabendo, o
+    candidato chega como membro normal da cadeia e a escada nem dispara.
+    """
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={
+            "curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/curto",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "qwen-local": ModelConfig(
+                provider="openrouter",
+                model="qwen3.8-27b",
+                context_window=100,
+                max_output_tokens=16,
+            ),
+        },
+        routes=[("opus", ["curto"])],
+        default_model="qwen-local",
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("qwen3.8-27b"))
+    )
+    pool = UpstreamPool(settings)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BIG_BODY, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    assert result.trace[-1] == "qwen3.8-27b: taken anyway, nothing in the chain fits"

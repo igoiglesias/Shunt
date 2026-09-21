@@ -387,7 +387,7 @@ def _chain_for(
     Devolve tambem as linhas de rastro do que foi descartado, com o motivo.
     """
     chain, dropped = filter_chain(resolution.chain, requirements_of(probe), settings)
-    trace = [f"{alias}: {reason}" for alias, reason in dropped]
+    trace = [f"{nome}: {reason}" for nome, reason in dropped]
     # `resolution.chain` nunca chega vazia aqui -- `Settings` recusa rota com
     # lista de candidatos vazia -- entao cadeia vazia significa que o filtro
     # descartou todo mundo, e `dropped` tem pelo menos uma linha.
@@ -396,7 +396,7 @@ def _chain_for(
     ladder = last_resort(str(req.body.get("model", "")), settings)
     if ladder:
         alvo = ladder[0]
-        trace.append(f"{alvo.alias or alvo.model}: taken anyway, nothing in the chain fits")
+        trace.append(f"{alvo.model}: taken anyway, nothing in the chain fits")
     return ladder, trace
 
 
@@ -413,7 +413,7 @@ async def _dispatch(
         # as-is. It is still recorded: if `chain[0]` is then dropped by the
         # capability filter, this is the only evidence the probe ever failed.
         probe = req.body
-        probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
+        probe_note = [f"probe ({first.model}): request translation failed: {err}"]
     chain, motivos = _chain_for(req, settings, resolution, probe)
     trace = probe_note + motivos
 
@@ -431,7 +431,10 @@ async def _dispatch(
     last_status, last_message = 502, "no candidate answered"
 
     for candidate in chain:
-        label = candidate.alias or candidate.model
+        # O rotulo canonico e o MODELO. Pelo alias, o mesmo candidato fisico
+        # aparece com dois nomes -- `qwen-local` na tentativa e `qwen3.8-27b` no
+        # resultado -- e o operador le dois modelos onde ha um.
+        label = candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
             continue
@@ -792,7 +795,7 @@ async def _stream_chain(
     except Exception as err:  # noqa: BLE001 - same reasoning as `dispatch`: a
         # probe we cannot render is a worse estimate, not a dead request.
         probe = req.body
-        probe_note = [f"probe ({first.alias or first.model}): request translation failed: {err}"]
+        probe_note = [f"probe ({first.model}): request translation failed: {err}"]
     chain, motivos = _chain_for(req, settings, resolution, probe)
     trace = tally.trace
     trace.extend(probe_note)
@@ -805,7 +808,8 @@ async def _stream_chain(
     last_message = "no candidate answered"
 
     for candidate in chain:
-        label = candidate.alias or candidate.model
+        # Mesmo rotulo canonico do caminho bufferizado: o MODELO, nunca o alias.
+        label = candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
             continue

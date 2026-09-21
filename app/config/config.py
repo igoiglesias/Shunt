@@ -11,11 +11,8 @@ remoto e a rede de seguranca.
 """
 
 providers = {
-    # llama.cpp servindo local, dialeto OpenAI. A chave existe porque o
-    # `llama serve` foi subido com `--api-key`, e nao porque haja segredo:
-    # um proxy que fale com ele sem o cabecalho leva 401.
     "local": {
-        "base_url": "http://127.0.0.1:8181/v1",
+        "base_url": "http://127.0.0.1:8080/v1",
         "protocol": "openai",
         "api_key_env": "LOCAL_API_KEY",
     },
@@ -24,13 +21,6 @@ providers = {
         "protocol": "openai",
         "api_key_env": "OPENROUTER_API_KEY",
     },
-    "anthropic": {
-        "base_url": "https://api.anthropic.com",
-        "protocol": "anthropic",
-        "api_key_env": "ANTHROPIC_API_KEY",
-    },
-    # Groq: dialeto OpenAI puro, com tool calling e streaming. O plano gratis
-    # limita por minuto e por dia, e nao pede cartao.
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "protocol": "openai",
@@ -39,14 +29,12 @@ providers = {
 }
 
 models = {
-    # `--alias qwen3.8-27b` no llama.cpp: o nome tem de bater com o que o
-    # servidor anuncia, e nao com o arquivo .gguf.
     "qwen-local": {
         "provider": "local",
         "model": "qwen3.8-27b",
         "supports": {"tools": True, "streaming": True, "vision": True},
-        "context_window": 128512,
-        "max_output_tokens": 8192,
+        "context_window": 163840,
+        "max_output_tokens": 16384,
     },
     "open-free": {
         "provider": "openrouter",
@@ -60,7 +48,21 @@ models = {
         "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
         "supports": {"tools": True, "streaming": True, "vision": False},
         "context_window": 262144,
-        "max_output_tokens": 8192,
+        "max_output_tokens": 16384,
+    },
+    "open-deepseek-v4.1-flash": {
+        "provider": "openrouter",
+        "model": "deepseek/deepseek-v4.1-flash",
+        "supports": {"tools": True, "streaming": True, "vision": True},
+        "context_window": 262144,
+        "max_output_tokens": 16384,
+    },
+    "open-gpt-oss-120": {
+        "provider": "openrouter",
+        "model": "openai/gpt-oss-120b",
+        "supports": {"tools": True, "streaming": True, "vision": False},
+        "context_window": 131072,
+        "max_output_tokens": 16384,
     },
     "groq-free": {
         "provider": "groq",
@@ -71,17 +73,12 @@ models = {
     },
 }
 
-# Os tres nomes que o Claude Code pede. O padrao casa por substring, entao
-# `haiku` pega `claude-haiku-4-5` e qualquer outra versao do mesmo porte.
 routes = [
-    ("groq", ["groq-free"]),
-    ("local", ["qwen-local"]),
-    ("nemotron", ["open-nemotron-ultra"]),
     ("free", ["open-free", "groq-free", "open-nemotron-ultra"]),
     ("fable", ["open-nemotron-ultra", "open-free", "groq-free"]),
     ("haiku", ["groq-free","open-nemotron-ultra", "open-free"]),
     ("sonnet", ["open-free", "open-nemotron-ultra", "groq-free"]),
-    ("opus", ["qwen-local", "open-nemotron-ultra", "open-free", "groq-free"]),
+    ("opus", ["qwen-local", "open-nemotron-ultra", "open-free"]),
 ]
 
-default_model = None
+default_model = "open-gpt-oss-120"

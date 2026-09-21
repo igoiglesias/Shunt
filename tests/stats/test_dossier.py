@@ -70,7 +70,7 @@ def seeded(engine):
                     stream=True,
                     tools_offered=["read", "write"],
                     tools_called=[],
-                    attempts=["groq-free:context window too small (1500 > 1000)"],
+                    attempts=["groq-free: context window too small (1500 > 1000)"],
                     fell_back=True,
                 ),
                 row(
@@ -84,8 +84,8 @@ def seeded(engine):
                     candidate_model="vendor/free",
                     requested_model="claude-haiku-4-5",
                     attempts=[
-                        "groq-free:context window too small (9000 > 1000)",
-                        "local:taken anyway, nothing in the chain fits",
+                        "groq-free: context window too small (9000 > 1000)",
+                        "local: taken anyway, nothing in the chain fits",
                     ],
                 ),
             ]
@@ -177,8 +177,8 @@ def test_mais_lentas_vem_ordenadas_e_carregam_a_cadeia(seeded):
     assert [linha["request_id"] for linha in lentas] == ["c", "b"]
     assert lentas[0]["duration_ms"] == 900
     assert lentas[0]["attempts"] == [
-        "groq-free:context window too small (9000 > 1000)",
-        "local:taken anyway, nothing in the chain fits",
+        "groq-free: context window too small (9000 > 1000)",
+        "local: taken anyway, nothing in the chain fits",
     ]
 
 

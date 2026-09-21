@@ -725,7 +725,7 @@ async def test_an_empty_chain_is_reported_before_any_request_is_made():
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), settings)).decode()
     assert events_of(body) == ["error"]
-    assert "no streaming support" in body
+    assert "vendor/mudo: no streaming support" in body
     assert "no candidate can serve this request" in body
 
 
@@ -950,7 +950,7 @@ async def test_no_candidate_supports_the_endpoint_at_all():
         default_model=None,
     )
     body = (await run(ShuntRequest("openai", OPENAI_BODY, {}, "embeddings"), settings)).decode()
-    assert "native: endpoint not supported" in body
+    assert "claude-real: endpoint not supported" in body
     assert "no candidate answered - tried:" in body
 
 
@@ -991,11 +991,11 @@ async def test_a_probe_that_cannot_be_rendered_is_recorded_before_the_filter(mon
 
     monkeypatch.setattr(dispatcher, "_payload", explode)
     body = (await run(ShuntRequest("anthropic", BODY, {}), settings)).decode()
-    assert "probe (free): request translation failed: shape estranho" in body
+    assert "probe (vendor/free): request translation failed: shape estranho" in body
     # O corpo cru substitui o probe, entao `stream: true` continua sendo
     # exigido e os dois candidatos mudos caem.
-    assert "free: no streaming support" in body
-    assert "cheap: no streaming support" in body
+    assert "vendor/free: no streaming support" in body
+    assert "vendor/cheap: no streaming support" in body
 
 
 @respx.mock
@@ -1489,3 +1489,75 @@ async def test_a_stream_whose_chain_does_not_fit_takes_the_default_model():
         await pool.aclose()
     texto = b"".join(chunks).decode()
     assert "content_block_delta" in texto
+
+
+# --- um candidato, um nome, tambem no streaming ---------------------------
+
+ALIAS_DIFFERS = Settings(
+    providers={
+        "openrouter": ProviderConfig(
+            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+        )
+    },
+    models={
+        "qwen-local": ModelConfig(
+            provider="openrouter",
+            model="qwen3.8-27b",
+            context_window=64000,
+            max_output_tokens=8192,
+            supports=ModelCaps(streaming=True),
+        )
+    },
+    routes=[("opus", ["qwen-local"])],
+    default_model=None,
+)
+
+
+@respx.mock
+async def test_the_stream_attempt_label_is_the_model_not_the_alias():
+    """O rastro do streaming carrega o mesmo rotulo do caminho bufferizado.
+    Pelo alias, o cliente le `qwen-local` no erro e `qwen3.8-27b` no campo de
+    resultado."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), ALIAS_DIFFERS)).decode()
+    assert "qwen3.8-27b: 400 (attempt 1)" in body
+    assert "qwen-local:" not in body
+
+
+@respx.mock
+async def test_the_stream_probe_note_names_the_model_not_the_alias(monkeypatch):
+    """A nota do probe vale para os dois caminhos. Aqui o candidato tambem nao
+    sabe streaming, entao a cadeia esvazia e a nota e a unica evidencia."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={
+            "qwen-local": ModelConfig(
+                provider="openrouter",
+                model="qwen3.8-27b",
+                context_window=64000,
+                max_output_tokens=8192,
+                supports=ModelCaps(streaming=False),
+            )
+        },
+        routes=[("opus", ["qwen-local"])],
+        default_model=None,
+    )
+    real = dispatcher._payload
+
+    def explode(req, candidate, settings):
+        if candidate.model == "qwen3.8-27b":
+            raise ValueError("shape estranho")
+        return real(req, candidate, settings)
+
+    monkeypatch.setattr(dispatcher, "_payload", explode)
+    body = (await run(ShuntRequest("anthropic", BODY, {}), settings)).decode()
+    assert "probe (qwen3.8-27b): request translation failed: shape estranho" in body
+    # A linha de descarte do filtro nomeia pelo MODELO, igual a linha de
+    # tentativa logo acima: `filter_chain` devolve `(model, motivo)`.
+    assert "qwen3.8-27b: no streaming support" in body

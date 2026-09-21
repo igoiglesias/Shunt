@@ -201,7 +201,10 @@ def _chain(rows: list[RequestEvent], limit: int) -> dict:
                 first_try += 1
             continue
         for attempt in row.attempts:
-            name, _, motive = str(attempt).partition(":")
+            # Mesmo separador da consulta do painel: o nome do modelo carrega
+            # dois-pontos, e partir no primeiro trunca o nome e desclassifica
+            # o motivo.
+            name, _, motive = str(attempt).partition(queries.SKIP_DELIMITER)
             reason = queries._skip_reason(motive)
             if reason is None:
                 continue

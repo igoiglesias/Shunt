@@ -14,21 +14,33 @@ settings = load_settings()
 
 
 def test_every_escape_hatch_route_reaches_the_provider_it_names():
+    default = settings.default_model
     for alias, model in settings.models.items():
-        first = resolve(alias, settings).chain[0]
-        assert first.alias == alias, (
-            f"pedir {alias!r} pelo nome caiu em {first.alias!r}: "
-            f"alguma rota anterior casa como substring"
-        )
-        assert first.provider == model.provider
+        chain = resolve(alias, settings).chain
+        # O primeiro degrau e o proprio alias; so um alias SEMEANTE ao default
+        # pode ver o default encerrar a cadeia antes dele.
+        first = chain[0]
+        assert first.alias == alias or (
+            default is not None and alias.startswith(default)
+        ), f"pedir {alias!r} pelo nome caiu em {first.alias!r}: alguma rota anterior casa como substring"
+        if first.alias == alias:
+            assert first.provider == model.provider
+        # O default declarado e o ultimo degrau de toda a cadeia.
+        assert default is not None
+        assert chain[-1].alias == default
+        assert chain[-1].provider == settings.models[default].provider
 
 
 def test_the_claude_code_slots_all_end_on_a_remote_fallback():
-    """Os tres nomes que o harness pede nao podem morrer se o local cair."""
+    """Os tres nomes que o harness pede nao podem morrer se o local cair.
+    O ultimo degrau da cadeia e o `default_model` declarado."""
+    default = settings.default_model
+    assert default is not None
     for slot in ("haiku", "sonnet", "opus"):
         chain = resolve(slot, settings).chain
         assert len(chain) >= 2, slot
         assert {c.provider for c in chain} != {"local"}, slot
+        assert chain[-1].alias == default, slot
 
 
 def test_the_legacy_free_name_lands_on_the_remote_chain_head():
@@ -40,3 +52,6 @@ def test_the_legacy_free_name_lands_on_the_remote_chain_head():
     chain = resolve("free", settings).chain
     assert chain[0].alias == "open-free"
     assert chain[0].provider == "openrouter"
+    default = settings.default_model
+    assert default is not None
+    assert chain[-1].alias == default

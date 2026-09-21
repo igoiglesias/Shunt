@@ -75,6 +75,12 @@ def requirements_of(payload: dict) -> Requirements:
 def filter_chain(
     chain: list[Candidate], req: Requirements, settings: Settings
 ) -> tuple[list[Candidate], list[tuple[str, str]]]:
+    """A cadeia que sobrevive ao filtro, e o motivo de cada descarte.
+
+    O primeiro elemento do descarte e o MODELO, nao o alias: e o mesmo nome que
+    a linha de tentativa usa (`label = candidate.model`), e usar o alias aqui
+    fazia um candidato so aparecer como dois modelos no mesmo rastro.
+    """
     kept: list[Candidate] = []
     dropped: list[tuple[str, str]] = []
     for candidate in chain:
@@ -83,18 +89,18 @@ def filter_chain(
             continue
         model = settings.models[candidate.alias]
         if req.tools and not model.supports.tools:
-            dropped.append((candidate.alias, "no tool support"))
+            dropped.append((candidate.model, "no tool support"))
         elif req.vision and not model.supports.vision:
-            dropped.append((candidate.alias, "no vision support"))
+            dropped.append((candidate.model, "no vision support"))
         elif req.streaming and not model.supports.streaming:
-            dropped.append((candidate.alias, "no streaming support"))
+            dropped.append((candidate.model, "no streaming support"))
         elif req.input_tokens + req.output_tokens > model.context_window:
             # Com os dois numeros no rastro, o operador ve por quanto o pedido
             # passou do teto -- e decide se mexe no catalogo ou no cliente.
             needed = req.input_tokens + req.output_tokens
             dropped.append(
                 (
-                    candidate.alias,
+                    candidate.model,
                     f"context window too small ({needed} > {model.context_window})",
                 )
             )

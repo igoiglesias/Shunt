@@ -9,8 +9,22 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.orm import Session
 
+from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
+from app.core import dispatcher
+from app.core.dispatcher import ShuntRequest
+from app.core.resolver import Candidate, Resolution
 from app.stats import queries
 from app.stats.models import RequestEvent
+
+# O candidato que a rota resolveu para a linha de pulo do teste cruzado.
+NEMOTRON_CHAIN = [
+    Candidate(
+        alias="nemotron",
+        provider="openrouter",
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        protocol="openai",
+    )
+]
 
 NOW = datetime.now(UTC)
 
@@ -516,6 +530,95 @@ def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine, tmp_path):
     chain = queries.chain_health(engine, hours=1)
     assert [(s["candidate"], s["reason"], s["count"]) for s in chain["skips"]] == [
         ("curto", "não coube", 1)
+    ]
+
+
+def test_a_model_name_with_a_colon_is_not_cut_and_still_classifies(make_engine, tmp_path):
+    """A linha e escrita como `<modelo>: <motivo>`, e nome de modelo tem dois-pontos.
+
+    `nvidia/nemotron-3-ultra-550b-a55b:free` (catalogo real) cortado no primeiro
+    dois-pontos vira `nvidia/nemotron-3-ultra-550b-a55b` -- nome truncado -- e o
+    motivo que sobra nao casa com nenhuma regra, entao "sem credencial" e
+    "nao coube" caiam os dois na classe "falhou na chamada". Sao decisoes
+    opostas do operador colapsadas numa contagem so.
+    """
+    modelo = "nvidia/nemotron-3-ultra-550b-a55b:free"
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'dois-pontos.db'}")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(
+                    request_id="a",
+                    attempts=[f"{modelo}: credential OPENROUTER_API_KEY is not set"],
+                ),
+                row(
+                    request_id="b",
+                    attempts=[f"{modelo}: context window too small (300000 > 262144)"],
+                ),
+            ]
+        )
+        session.commit()
+
+    chain = queries.chain_health(engine, hours=1)
+    por_motivo = {(s["candidate"], s["reason"]): s["count"] for s in chain["skips"]}
+
+    assert por_motivo[(modelo, "sem credencial")] == 1
+    assert por_motivo[(modelo, "não coube")] == 1
+
+
+def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_engine, tmp_path):
+    """RED->GREEN cruzado: a linha de pulo REAL, escrita pelo dispatcher.
+
+    Sem o cruzamento, os dois lados passariam a discordar em silencio -- o
+    dispatcher nomeando pelo modelo e a consulta cortando o nome no primeiro
+    dois-pontos.
+    """
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            )
+        },
+        models={
+            "nemotron": ModelConfig(
+                provider="openrouter",
+                model="nvidia/nemotron-3-ultra-550b-a55b:free",
+                supports=ModelCaps(vision=False),
+                context_window=262144,
+                max_output_tokens=8192,
+            )
+        },
+        routes=[("opus", ["nemotron"])],
+        default_model=None,
+    )
+    req = ShuntRequest(
+        "anthropic",
+        {
+            "model": "claude-opus-4-5",
+            "max_tokens": 64,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "x"}}
+                    ],
+                }
+            ],
+        },
+        {},
+    )
+    _cadeia, trace = dispatcher._chain_for(req, settings, Resolution("opus", None, NEMOTRON_CHAIN), req.body)
+
+    assert trace == ["nvidia/nemotron-3-ultra-550b-a55b:free: no vision support"]
+
+    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cruzado.db'}")
+    with Session(engine) as session:
+        session.add(row(request_id="a", attempts=trace))
+        session.commit()
+
+    chain = queries.chain_health(engine, hours=1)
+    assert [(s["candidate"], s["reason"]) for s in chain["skips"]] == [
+        ("nvidia/nemotron-3-ultra-550b-a55b:free", "sem suporte")
     ]
 
 

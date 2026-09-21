@@ -80,7 +80,7 @@ def test_candidate_without_tool_support_is_dropped_with_reason():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
     kept, dropped = filter_chain([cand("sem_tools"), cand("com_tools")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_tools"]
-    assert dropped == [("sem_tools", "no tool support")]
+    assert dropped == [("a", "no tool support")]
 
 
 def test_candidate_with_smaller_context_window_is_dropped():
@@ -126,7 +126,7 @@ def test_candidate_without_vision_support_is_dropped_with_reason():
     )
     kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_vision"]
-    assert dropped == [("sem_vision", "no vision support")]
+    assert dropped == [("d", "no vision support")]
 
 
 def test_request_with_stream_requires_streaming_support():
@@ -142,7 +142,7 @@ def test_candidate_without_streaming_support_is_dropped_with_reason():
     req = requirements_of({"messages": [], "stream": True})
     kept, dropped = filter_chain([cand("sem_streaming"), cand("com_streaming")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_streaming"]
-    assert dropped == [("sem_streaming", "no streaming support")]
+    assert dropped == [("f", "no streaming support")]
 
 
 def test_transparent_candidate_with_none_alias_never_filtered_even_when_unfit():
@@ -163,7 +163,7 @@ def test_estimate_tokens_counts_tools_not_just_messages():
     req = requirements_of(payload)
     kept, dropped = filter_chain([cand("curto"), cand("com_tools")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_tools"]
-    assert dropped[0][0] == "curto"
+    assert dropped[0][0] == "c"
     assert dropped[0][1].startswith("context window too small")
 
 
@@ -171,7 +171,7 @@ def test_kept_is_empty_when_the_only_candidate_is_unfit():
     req = requirements_of({"messages": [], "tools": [{"type": "function"}]})
     kept, dropped = filter_chain([cand("sem_tools")], req, SETTINGS)
     assert kept == []
-    assert dropped == [("sem_tools", "no tool support")]
+    assert dropped == [("a", "no tool support")]
 
 
 def test_context_window_boundary_exact_fit_is_kept():
@@ -188,7 +188,7 @@ def test_context_window_boundary_one_over_is_dropped():
     req = Requirements(tools=False, vision=False, streaming=False, input_tokens=1001)
     kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
     assert kept == []
-    assert dropped[0][0] == "curto"
+    assert dropped[0][0] == "c"
     assert dropped[0][1].startswith("context window too small")
 
 
@@ -250,7 +250,7 @@ def test_candidate_without_vision_is_dropped_for_an_anthropic_image_block():
     )
     kept, dropped = filter_chain([cand("sem_vision"), cand("com_vision")], req, SETTINGS)
     assert [c.alias for c in kept] == ["com_vision"]
-    assert dropped == [("sem_vision", "no vision support")]
+    assert dropped == [("d", "no vision support")]
 
 
 # -- Historia E: o tamanho do pedido escolhe o candidato -----------------------
@@ -267,7 +267,7 @@ def test_the_requested_max_tokens_counts_against_the_window():
     )
     kept, dropped = filter_chain([cand("curto")], req, SETTINGS)
     assert kept == []
-    assert dropped[0][0] == "curto"
+    assert dropped[0][0] == "c"
 
 
 def test_the_drop_reason_carries_the_two_numbers():
@@ -276,7 +276,7 @@ def test_the_drop_reason_carries_the_two_numbers():
         tools=False, vision=False, streaming=False, input_tokens=1200, output_tokens=300
     )
     _, dropped = filter_chain([cand("curto")], req, SETTINGS)
-    assert dropped == [("curto", "context window too small (1500 > 1000)")]
+    assert dropped == [("c", "context window too small (1500 > 1000)")]
 
 
 def test_requirements_reads_the_max_tokens_of_the_payload():
