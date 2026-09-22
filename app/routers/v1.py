@@ -20,15 +20,19 @@ Streaming so existe em `/v1/messages` e `/v1/chat/completions`. `/v1/completions
 e `/v1/embeddings` respondem um unico documento JSON neste proxy.
 """
 
+import hashlib
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from json import JSONDecodeError
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.config.settings import Settings
 from app.core.dispatcher import (
@@ -55,6 +59,7 @@ from app.schemas.openai import (
     OpenAIModel,
     OpenAIModelList,
 )
+from app.stats.models import ApiToken
 
 router = APIRouter(prefix="/v1")
 
@@ -187,7 +192,31 @@ async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool
         _record(route, protocol, 400, started, error_type="invalid_request_error")
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
-    shunt_request = ShuntRequest(protocol, body, dict(request.headers), endpoint=endpoint)
+    # Token Shunt: quando o cliente apresenta um token da area admin, valida
+    # e o proxy injeta a chave configurada do provedor. Sem token, pass-through.
+    shunt_token_used = False
+    # So `x-shunt-token` e o token da area admin. `x-api-key` e a credencial do
+    # CLIENTE, que passa adiante: tratar como token viria toda requisicao
+    # autenticada em uma consulta de banco (e 503 sem banco).
+    shunt_token = request.headers.get("x-shunt-token")
+    if shunt_token:
+        token_hash = hashlib.sha256(shunt_token.encode()).hexdigest()
+        recorder = getattr(request.app.state, "recorder", None)
+        engine = recorder.engine if recorder is not None else None
+        if engine is None:
+            return JSONResponse(status_code=503, content={"detail": "Persistencia desligada"})
+        with Session(engine) as session:
+            row = session.execute(
+                select(ApiToken).where(ApiToken.token_hash == token_hash)
+            ).scalars().first()
+            if row is None:
+                return JSONResponse(status_code=401, content={"detail": "Token Shunt invalido"})
+            if row.expires_at is not None and row.expires_at < datetime.now(UTC):
+                return JSONResponse(status_code=401, content={"detail": "Token Shunt expirado"})
+            row.last_used_at = datetime.now(UTC)
+            session.commit()
+        shunt_token_used = True
+    shunt_request = ShuntRequest(protocol, body, dict(request.headers), endpoint=endpoint, shunt_token=shunt_token_used)
     try:
         resolve(body.get("model", ""), settings)
     except UnknownProviderError as err:

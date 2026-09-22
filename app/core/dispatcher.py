@@ -138,6 +138,9 @@ class ShuntRequest:
     body: dict
     headers: dict[str, str]
     endpoint: str = "messages"  # "messages" | "chat" | "completions" | "embeddings"
+    # True quando a requisicao foi autenticada por um token do painel admin.
+    # Nao confia na transparencia da rota: injeta a chave do provedor configurada.
+    shunt_token: bool = False
 
 
 @dataclass
@@ -150,6 +153,18 @@ class ShuntResult:
 
 
 def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
+    # Se a requisicao veio autenticada por token Shunt, NAO usa modo transparente:
+    # injeta a chave configurada do provedor. Isso garante que o token do admin
+    # controle o acesso e a chave do provedor fique do lado do proxy.
+    if req.shunt_token:
+        key = settings.api_key(candidate.provider)
+        headers = {"content-type": "application/json"}
+        if key and candidate.protocol == "anthropic":
+            headers["x-api-key"] = key
+            headers["anthropic-version"] = "2023-06-01"
+        elif key:
+            headers["authorization"] = f"Bearer {key}"
+        return headers
     if candidate.transparent:
         # The client's own credentials go verbatim to whatever `base_url` this
         # provider entry names. That is the user's declared intent: they wrote
@@ -535,7 +550,12 @@ async def _dispatch(
                 last_status, last_message = response.status_code, _error_message(response)
             else:
                 last_status, last_message = 502, _exception_text(exc)
-            trace.append(f"{label}: {last_status} (attempt {attempt})")
+            # O motivo que o provedor devolveu entra no rastro: o status sozinho
+            # nao diagnostica. Cap em 300 porque um HTML ou validacao gigante
+            # nao pode virar uma linha de log ilegivel.
+            trace.append(
+                f"{label}: {last_status} {last_message[:300]} (attempt {attempt})"
+            )
             if outcome is Outcome.SKIP:
                 break
             if attempt < MAX_ATTEMPTS:
@@ -922,7 +942,10 @@ async def _stream_chain(
             outcome = classify(response.status_code, None, _retry_after(response))
             await response.aread()
             message = _error_message(response)
-            trace.append(f"{label}: {response.status_code} (attempt {attempt})")
+            # Mesmo motivo do caminho bufferizado: o status so nao diagnostica.
+            trace.append(
+                f"{label}: {response.status_code} {message[:300]} (attempt {attempt})"
+            )
             last_message = message
             if outcome is not Outcome.RETRY or attempt >= MAX_ATTEMPTS:
                 break

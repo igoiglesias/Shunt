@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — Usuários</title>
+<link rel="stylesheet" href="/shunt.css">
+{% include "_admin_styles.html" %}
+</head>
+<body>
+<header>
+  <h1>SHU<span>N</span>T</h1>
+  {% include "_nav.html" %}
+</header>
+<main style="padding: 20px; display: grid; gap: 20px; max-width: 900px; margin: 0 auto;">
+  <section class="card">
+    <div class="section-header">
+      <h2>Usuários</h2>
+      <button class="btn btn-primary" hx-get="/admin/users/new" hx-target="#user-form" hx-swap="outerHTML">Novo</button>
+    </div>
+    <div id="user-list">{% include "_user_list.html" %}</div>
+    <div id="user-form"></div>
+  </section>
+</main>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</body>
+</html>

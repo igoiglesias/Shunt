@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — Tokens</title>
+<link rel="stylesheet" href="/shunt.css">
+{% include "_admin_styles.html" %}
+</head>
+<body>
+<header>
+  <h1>SHU<span>N</span>T</h1>
+  {% include "_nav.html" %}
+</header>
+<main style="padding: 20px; display: grid; gap: 20px; max-width: 900px; margin: 0 auto;">
+  {% if new_token %}
+  <section class="card">
+    <h3>Token criado — copie agora, ele não volta a aparecer</h3>
+    <p class="notice">Use-o em <code>Authorization: Bearer &lt;token&gt;</code> nas chamadas à API v1.</p>
+    <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+      <code id="new-token" style="font-family:var(--mono); font-size:12px; background:var(--panel-2); padding:6px 10px; border-radius:2px; word-break:break-all;">{{ new_token }}</code>
+      <button class="btn btn-primary" type="button" onclick="navigator.clipboard?.writeText(document.getElementById('new-token').textContent)">Copiar</button>
+    </div>
+  </section>
+  {% endif %}
+  <section class="card">
+    <div class="section-header">
+      <h2>Tokens da API v1</h2>
+      <button class="btn btn-primary" hx-get="/admin/tokens/new" hx-target="#token-form" hx-swap="outerHTML">Novo</button>
+    </div>
+    <div id="token-list">{% include "_token_list.html" %}</div>
+    <div id="token-form"></div>
+  </section>
+</main>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</body>
+</html>

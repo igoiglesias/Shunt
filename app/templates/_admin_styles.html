@@ -1,0 +1,31 @@
+<style>
+  /* Estilos compartilhados das paginas de administracao (CRUD). */
+  .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+  .form-group input, .form-group select { color: var(--ink); background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px; padding: 6px 10px; font-size: 13px; }
+  .form-group input:focus, .form-group select:focus { outline: 2px solid var(--warning); outline-offset: 2px; }
+
+  .table-container { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 8px 12px 8px 0; text-align: left; border-bottom: 1px solid var(--edge); }
+  th { color: var(--dim); font-weight: 600; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
+  td.mono, th.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  .actions { display: flex; gap: 6px; }
+  .btn { font: inherit; font-size: 12px; padding: 4px 10px; border: 1px solid var(--edge); border-radius: 2px; background: transparent; color: var(--muted); cursor: pointer; min-height: 26px; }
+  .btn:hover { color: var(--ink); border-color: var(--edge-strong); }
+  .btn:focus-visible { outline: 2px solid var(--warning); outline-offset: 2px; }
+  .btn-primary { color: var(--ground); background: var(--ink); border-color: var(--ink); font-weight: 600; }
+  .btn-danger { color: #fff; background: var(--error); border-color: var(--error); }
+  .btn-sm { padding: 2px 8px; font-size: 11.5px; }
+
+  .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+  .section-header h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+
+  .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 2px; padding: 15px 17px 17px; margin-bottom: 20px; }
+
+  .empty-state { color: var(--dim); padding: 20px; text-align: center; }
+  .notice { color: var(--muted); font-size: 12px; line-height: 1.5; }
+</style>

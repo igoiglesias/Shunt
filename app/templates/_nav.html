@@ -1,0 +1,13 @@
+<nav class="admin-nav" aria-label="Administracao">
+  <a href="/admin/painel" {% if active == "painel" %}aria-current="page"{% endif %}>Painel</a>
+  <a href="/admin/requests" {% if active == "requests" %}aria-current="page"{% endif %}>Requisições</a>
+  <a href="/admin/config" {% if active == "config" %}aria-current="page"{% endif %}>Configuração</a>
+  <a href="/admin/users" {% if active == "users" %}aria-current="page"{% endif %}>Usuários</a>
+  <a href="/admin/tokens" {% if active == "tokens" %}aria-current="page"{% endif %}>Tokens</a>
+</nav>
+<style>
+  .admin-nav { display: flex; gap: 8px; flex-wrap: wrap; }
+  .admin-nav a { color: var(--muted); text-decoration: none; padding: 6px 12px; border: 1px solid var(--edge); border-radius: 2px; font-size: 13px; }
+  .admin-nav a:hover { color: var(--ink); border-color: var(--edge-strong); }
+  .admin-nav a[aria-current="page"] { color: var(--ground); background: var(--ink); font-weight: 600; }
+</style>

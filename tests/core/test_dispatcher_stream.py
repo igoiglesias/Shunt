@@ -1522,8 +1522,19 @@ async def test_the_stream_attempt_label_is_the_model_not_the_alias():
         return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
     )
     body = (await run(ShuntRequest("anthropic", BODY, {}), ALIAS_DIFFERS)).decode()
-    assert "qwen3.8-27b: 400 (attempt 1)" in body
+    assert "qwen3.8-27b: 400 nao deu (attempt 1)" in body
     assert "qwen-local:" not in body
+
+
+@respx.mock
+async def test_the_stream_400_trace_line_carries_the_upstream_reason():
+    """O mesmo do caminho bufferizado: o motivo que o provedor devolveu entra no
+    rastro, nao so o status."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "tool unsupported"}})
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), ALIAS_DIFFERS)).decode()
+    assert "tool unsupported" in body
 
 
 @respx.mock

@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.observability import set_recorder
+from app.core.security import issue_jwt
 from app.core.upstream import UpstreamPool
 from app.main import app as shunt_app
 from app.stats.models import Analysis, Base, RequestEvent
@@ -24,6 +25,8 @@ from tests.e2e.conftest import E2E_SETTINGS
 from tests.e2e.fake_provider import ScriptedTransport
 
 NOW = datetime.now(UTC)
+
+ADMIN_SESSION_SECRET = "segredo-de-teste-do-admin"
 
 
 def seed(engine) -> None:
@@ -70,7 +73,12 @@ def shunt_with_history(provider, tmp_path, monkeypatch):
     shunt_app.state.settings = settings
     shunt_app.state.pool = UpstreamPool(settings, transport=ScriptedTransport(provider))
     shunt_app.state.recorder = Recorder(engine, interval=0.01)
+    shunt_app.state.admin_session_secret = ADMIN_SESSION_SECRET
     with TestClient(shunt_app) as client:
+        client.cookies.set(
+            "shunt_admin",
+            issue_jwt(user_id=1, secret=ADMIN_SESSION_SECRET, ttl_seconds=3600),
+        )
         yield client, engine
     del shunt_app.state.recorder
     set_recorder(Recorder(None))

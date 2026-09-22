@@ -1,15 +1,22 @@
 import asyncio
 import logging
+import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Response
-from fastapi.responses import HTMLResponse
+from fastapi import Depends, FastAPI, Response
+from fastapi.responses import RedirectResponse
 
 from app.config.settings import load_settings
+from app.core.auth import LoginRequired, login_redirect, require_admin
 from app.core.observability import configure_logging, set_recorder
 from app.core.upstream import UpstreamPool
+from app.routers.admin_auth import router as admin_auth_router
 from app.routers.admin_config import router as admin_config_router
+from app.routers.admin_dashboard import router as admin_dashboard_router
+from app.routers.admin_tokens import router as admin_tokens_router
+from app.routers.admin_users import router as admin_users_router
 from app.routers.audit import router as audit_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.v1 import router as v1_router
@@ -27,6 +34,13 @@ async def lifespan(app: FastAPI):
         app.state.settings = load_settings()
     if not hasattr(app.state, "pool"):
         app.state.pool = UpstreamPool(app.state.settings)
+    # Segredo que assina o JWT de sessao do admin. Vem do ambiente para sessoes
+    # sobrevivirem a restart; sem ele um segredo aleatorio e gerado no boot, e a
+    # sessao morre quando o processo morre -- aceitavel para um proxy local.
+    if not hasattr(app.state, "admin_session_secret"):
+        app.state.admin_session_secret = (
+            os.environ.get("ADMIN_SESSION_SECRET") or secrets.token_hex(32)
+        )
     # A persistencia e opcional: sem `TURSO_DATABASE_URL` o `Recorder` fica com
     # engine nula e `record()` vira um no-op, sem um `if` sequer no caminho da
     # requisicao.
@@ -43,8 +57,6 @@ async def lifespan(app: FastAPI):
 
 
 TEMPLATES = Path(__file__).parent / "templates"
-DASHBOARD = TEMPLATES / "dashboard.html"
-AUDIT = TEMPLATES / "audit.html"
 ESTILO = TEMPLATES / "shunt.css"
 
 # Prazo para o banco responder no boot. Medido: com a URL apontada para uma
@@ -73,9 +85,22 @@ async def _engine_or_none():
 
 app = FastAPI(lifespan=lifespan)
 
+
+@app.exception_handler(LoginRequired)
+async def _login_required_handler(request, exc):
+    """Converte o sinal de sessao ausente em um redirect para a tela de login."""
+    return login_redirect(request)
+
+
 app.include_router(v1_router)
-app.include_router(dashboard_router)
-app.include_router(audit_router)
+# As duas APIs de dados (stats e auditoria) alimentam o painel e a tela de
+# requisicoes; ambas exigem sessao, igual as paginas que as consomem.
+app.include_router(dashboard_router, dependencies=[Depends(require_admin)])
+app.include_router(audit_router, dependencies=[Depends(require_admin)])
+app.include_router(admin_auth_router)
+app.include_router(admin_dashboard_router)
+app.include_router(admin_users_router)
+app.include_router(admin_tokens_router)
 app.include_router(admin_config_router)
 
 
@@ -94,27 +119,26 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-# As duas paginas sao lidas do disco a cada carga, entao elas mudam sem
-# reiniciar nada -- mas um navegador guarda HTML sem `Cache-Control` pela
-# heuristica dele. Medido: depois de reiniciar o proxy, o servidor ja entregava
-# a pagina nova e o navegador seguia desenhando a antiga, sem botao, sem menu.
+# A pagina CSS continua lida do disco a cada carga, servida com `no-store`:
+# o navegador guarda CSS sem `Cache-Control` pela heuristica dele, e um CSS
+# velho em cache deixaria a tela nova com a cara antiga -- defeito medido.
 NO_STORE = {"cache-control": "no-store, must-revalidate"}
 
 
-@app.get("/", response_class=HTMLResponse)
-async def dashboard() -> HTMLResponse:
-    """O painel de uso, servido do disco a cada carga.
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redireciona a raiz para o painel, dentro do admin.
 
-    Ler o arquivo por requisicao em vez de na importacao custa microssegundos e
-    faz `make dev` recarregar a pagina sem reiniciar o processo. A home era a
-    checagem de vida; ela mudou para `/health`, e o README registra a troca.
+    A home nao e mais a tela: o painel vive em `/admin/painel` e exige sessao.
+    Quem abre `/` sem logar cai no redirect para o painel, que por sua vez vai
+    ao login (o handler de `LoginRequired`). Com sessao, o fluxo e direto.
     """
-    return HTMLResponse(DASHBOARD.read_text(encoding="utf-8"), headers=NO_STORE)
+    return RedirectResponse("/admin/painel", status_code=302)
 
 
 @app.get("/shunt.css")
 async def estilo() -> Response:
-    """A identidade visual das duas telas, num arquivo só.
+    """A identidade visual das telas, num arquivo só.
 
     Servida com `no-store` como as paginas: ela muda junto com elas, e um CSS
     velho em cache deixaria a tela nova com a cara antiga -- o mesmo defeito
@@ -123,9 +147,3 @@ async def estilo() -> Response:
     return Response(
         ESTILO.read_text(encoding="utf-8"), media_type="text/css", headers=NO_STORE
     )
-
-
-@app.get("/requests", response_class=HTMLResponse)
-async def audit_screen() -> HTMLResponse:
-    """A tela de auditoria: buscar, abrir e exportar requisicoes gravadas."""
-    return HTMLResponse(AUDIT.read_text(encoding="utf-8"), headers=NO_STORE)

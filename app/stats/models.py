@@ -12,6 +12,8 @@ provedor nem candidato, e e justamente a que mais se quer contar: obrigar a
 coluna seria perder a linha ou inventar um valor.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 
 from sqlalchemy import (
@@ -241,5 +243,39 @@ class ConfigVersion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    __table_args__ = ()
+
+
+class User(Base):
+    """Administrador do painel. A senha vive so como hash Argon2."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = ()
+
+
+class ApiToken(Base):
+    """Token de acesso a API v1, emitido pelo painel.
+
+    So o SHA-256 do token e persistido; o valor em claro e mostrado uma unica
+    vez no momento da criacao e nunca volta a ser legivel -- quem deixa de
+    copia-lo na hora tem que emitir outro.
+    """
+
+    __tablename__ = "api_tokens"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = ()

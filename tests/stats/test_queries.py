@@ -16,7 +16,6 @@ from app.core.resolver import Candidate, Resolution
 from app.stats import queries
 from app.stats.models import RequestEvent
 
-
 # Congela relógio do módulo queries para evitar flake de janela temporal.
 # _since() usa datetime.now(UTC) inline; os offsets dos testes partem de NOW,
 # então o instante congelado tem de ser o MESMO que NOW, senão as linhas

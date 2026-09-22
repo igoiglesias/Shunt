@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shunt — Login</title>
+<link rel="stylesheet" href="/shunt.css">
+<style>
+  .login-wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+  .login-card { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 16px; }
+  .login-card h1 { font-size: 15px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; margin: 0; }
+  .login-card h1 span { color: var(--warning); }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
+  .field input { color: var(--ink); background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px; padding: 9px 11px; font-size: 14px; }
+  .field input:focus { outline: 2px solid var(--warning); outline-offset: 2px; }
+  .submit { color: var(--ground); background: var(--ink); border: 1px solid var(--ink); border-radius: 2px; padding: 9px 14px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .submit:hover { opacity: 0.88; }
+  .error { color: var(--error); font-size: 13px; }
+  .hint { color: var(--dim); font-size: 12px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="login-wrap">
+  <form class="login-card" method="post" action="/admin/login">
+    <h1>SHU<span>N</span>T</h1>
+    {% if mode == "create" %}
+    <p class="hint">Primeiro acesso. Crie o primeiro administrador.</p>
+    {% endif %}
+    <div class="field">
+      <label for="username">Usuário</label>
+      <input id="username" name="username" type="text" required autocomplete="username">
+    </div>
+    <div class="field">
+      <label for="password">Senha</label>
+      <input id="password" name="password" type="password" required
+             {% if mode == "login" %}autocomplete="current-password"{% else %}autocomplete="new-password"{% endif %}>
+    </div>
+    {% if mode == "create" %}
+    <div class="field">
+      <label for="confirm">Confirmar senha</label>
+      <input id="confirm" name="confirm" type="password" required autocomplete="new-password">
+    </div>
+    {% endif %}
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+    <button class="submit" type="submit">
+      {{ "Entrar" if mode == "login" else "Criar administrador" }}
+    </button>
+  </form>
+</div>
+</body>
+</html>

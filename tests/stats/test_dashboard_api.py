@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.observability import set_recorder
+from app.core.security import issue_jwt
 from app.core.upstream import UpstreamPool
 from app.main import app
 from app.routers.dashboard import stats_stream
@@ -14,6 +15,12 @@ from app.stats import queries
 from app.stats.recorder import Recorder
 from tests.core.test_dispatcher import SETTINGS
 from tests.stats.test_queries import row
+
+ADMIN_SESSION_SECRET = "segredo-de-teste-do-admin"
+
+
+def _cookie(user_id: int = 1) -> dict:
+    return {"shunt_admin": issue_jwt(user_id=user_id, secret=ADMIN_SESSION_SECRET, ttl_seconds=3600)}
 
 
 class _FakeApp:
@@ -52,6 +59,7 @@ def panel(make_engine, tmp_path):
         session.commit()
     app.state.settings = SETTINGS
     app.state.pool = UpstreamPool(SETTINGS)
+    app.state.admin_session_secret = ADMIN_SESSION_SECRET
     app.state.recorder = Recorder(engine, interval=0.01)
     yield app.state.recorder
     del app.state.recorder
@@ -69,7 +77,7 @@ def clear_cache():
 
 def test_the_summary_carries_every_section_and_the_health_footer(panel):
     with TestClient(app) as c:
-        response = c.get("/api/stats")
+        response = c.get("/api/stats", cookies=_cookie())
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/json")
     body = response.json()
@@ -96,8 +104,8 @@ def test_the_second_call_inside_the_cache_window_does_not_query_again(panel, mon
 
     monkeypatch.setattr(queries, "snapshot", counted)
     with TestClient(app) as c:
-        c.get("/api/stats")
-        c.get("/api/stats")
+        c.get("/api/stats", cookies=_cookie())
+        c.get("/api/stats", cookies=_cookie())
     assert calls == [24], "a segunda chamada tinha de vir do cache"
 
 
@@ -118,15 +126,16 @@ def test_the_second_call_inside_the_cache_window_does_not_query_again(panel, mon
 def test_the_window_is_clamped_between_one_minute_and_a_month(panel, raw, expected):
     with TestClient(app) as c:
         url = "/api/stats" if raw is None else f"/api/stats?window={raw}"
-        assert c.get(url).json()["window_hours"] == expected
+        assert c.get(url, cookies=_cookie()).json()["window_hours"] == expected
 
 
 def test_with_no_database_the_panel_answers_an_empty_summary_instead_of_failing():
     app.state.settings = SETTINGS
     app.state.pool = UpstreamPool(SETTINGS)
+    app.state.admin_session_secret = ADMIN_SESSION_SECRET
     app.state.recorder = Recorder(None)
     with TestClient(app) as c:
-        body = c.get("/api/stats").json()
+        body = c.get("/api/stats", cookies=_cookie()).json()
     del app.state.recorder
     assert body["totals"]["requests"] == 0
     assert body["health"]["enabled"] is False
@@ -289,9 +298,10 @@ def test_sem_banco_a_taxa_de_geracao_vem_nula_e_nao_zero():
     """Zero diria "o modelo é lento"; None diz "não houve o que medir"."""
     app.state.settings = SETTINGS
     app.state.pool = UpstreamPool(SETTINGS)
+    app.state.admin_session_secret = ADMIN_SESSION_SECRET
     app.state.recorder = Recorder(None)
     with TestClient(app) as c:
-        totais = c.get("/api/stats").json()["totals"]
+        totais = c.get("/api/stats", cookies=_cookie()).json()["totals"]
     del app.state.recorder
 
     assert totais["tokens_per_second"] is None

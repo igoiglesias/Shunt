@@ -1,0 +1,17 @@
+<form method="post" action="/admin/tokens">
+  <h3>Novo token</h3>
+  <div class="form-grid">
+    <div class="form-group">
+      <label for="name">Nome *</label>
+      <input type="text" id="name" name="name" required placeholder="ex: claude-code-local">
+    </div>
+    <div class="form-group">
+      <label for="expires_days">Expira em (dias, opcional)</label>
+      <input type="number" id="expires_days" name="expires_days" min="1" step="any" placeholder="vazio = nunca">
+    </div>
+  </div>
+  <div style="margin-top: 16px; display: flex; gap: 8px;">
+    <button type="submit" class="btn btn-primary">Emitir</button>
+    <button type="button" class="btn" onclick="this.closest('#token-form').innerHTML=''">Cancelar</button>
+  </div>
+</form>

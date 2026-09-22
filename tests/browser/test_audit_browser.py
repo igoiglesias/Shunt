@@ -133,6 +133,11 @@ def browser():
 
 
 def open_audit(browser, base, width=1500, height=1000, query=""):
+    """Abre a tela de auditoria, fazendo login se necessario.
+
+    O fluxo novo exige autenticacao admin. Se a pagina de login aparecer,
+    cria o primeiro admin (usuario 'test', senha 'test') e prossegue.
+    """
     page = browser.new_page(viewport={"width": width, "height": height})
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
@@ -140,8 +145,18 @@ def open_audit(browser, base, width=1500, height=1000, query=""):
         "console",
         lambda message: problems.append(message.text) if message.type == "error" else None,
     )
-    page.goto(f"{base}/requests{query}", wait_until="networkidle")
-    page.wait_for_selector("#rows tr")
+    page.goto(f"{base}/admin/requests{query}", wait_until="networkidle")
+
+    # Se caiu no login (primeiro acesso ou sessao expirada), cria o admin.
+    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
+        page.fill('input[name="username"]', "test")
+        page.fill('input[name="password"]', "test")
+        page.fill('input[name="confirm"]', "test")
+        page.click('button[type="submit"]')
+        page.wait_for_url(f"{base}/admin/painel**")
+
+    # Agora deve estar na tela de requisicoes
+    page.wait_for_selector("#rows tr", timeout=10000)
     return page, problems
 
 
@@ -401,11 +416,26 @@ def test_a_value_from_an_old_link_stays_selectable(browser, server):
     """Link antigo com um modelo que sumiu do banco nao pode mudar a busca sozinho.
 
     A lista vem vazia de proposito aqui, entao a pagina abre sem esperar linha.
+    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o open_audit
+    lidar com o login se necessario.
     """
     page = browser.new_page(viewport={"width": 1400, "height": 900})
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
-    page.goto(f"{server}/requests?provider=um-provedor-que-sumiu", wait_until="networkidle")
+    page.on(
+        "console",
+        lambda message: problems.append(message.text) if message.type == "error" else None,
+    )
+    page.goto(f"{server}/admin/requests?provider=um-provedor-que-sumiu", wait_until="networkidle")
+
+    # Se caiu no login, cria o admin
+    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
+        page.fill('input[name="username"]', "test")
+        page.fill('input[name="password"]', "test")
+        page.fill('input[name="confirm"]', "test")
+        page.click('button[type="submit"]')
+        page.wait_for_url(f"{server}/admin/painel**")
+
     page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
     chosen = page.input_value("#provider")
     page.close()
@@ -522,15 +552,30 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
 
 
 def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
-    # A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha.
+    """A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha.
+    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o login acontecer.
+    """
     page = browser.new_page(viewport={"width": 1400, "height": 900})
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
+    page.on(
+        "console",
+        lambda message: problems.append(message.text) if message.type == "error" else None,
+    )
     page.goto(
-        f"{server}/requests?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z",
+        f"{server}/admin/requests?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z",
         wait_until="networkidle",
     )
-    page.wait_for_selector("#empty:visible")
+
+    # Se caiu no login, cria o admin
+    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
+        page.fill('input[name="username"]', "test")
+        page.fill('input[name="password"]', "test")
+        page.fill('input[name="confirm"]', "test")
+        page.click('button[type="submit"]')
+        page.wait_for_url(f"{server}/admin/painel**")
+
+    page.wait_for_selector("#empty:visible", timeout=10000)
     mostrado = page.evaluate(
         """() => ({
             period: document.getElementById('period').value,

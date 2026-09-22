@@ -1,16 +1,15 @@
 """API de administracao de configuracao (providers, models, routes, default)."""
 
-import hmac
 import json
-import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings, load_settings_from_db
+from app.core.auth import require_admin
 from app.core.upstream import UpstreamPool
 from app.stats.models import (
     ConfigVersion,
@@ -24,64 +23,6 @@ from app.templates import render
 router = APIRouter(prefix="/admin/config", tags=["admin-config"])
 
 # --- Helpers ---
-
-
-# Nome e alcance do cookie que guarda o token do admin depois do primeiro
-# acesso pelo navegador. O `path` cobre a pagina e todas as rotas HTMX abaixo
-# dela, e nao vaza o cookie para o resto do proxy.
-ADMIN_COOKIE = "shunt_admin"
-ADMIN_COOKIE_PATH = "/admin/config"
-ADMIN_COOKIE_MAX_AGE = 12 * 60 * 60
-
-
-def admin_token_from(request: Request) -> str | None:
-    """O token apresentado, na ordem header, cookie, query string.
-
-    A query string e so a porta de entrada do navegador -- quem digita uma URL
-    nao consegue mandar header. `admin_config_page` troca ela pelo cookie e
-    redireciona, para o token nao ficar no historico nem no log de acesso.
-    """
-    return (
-        request.headers.get("x-admin-token")
-        or request.cookies.get(ADMIN_COOKIE)
-        or request.query_params.get("token")
-    )
-
-
-def require_admin_token(request: Request) -> None:
-    """Protege rotas admin com token simples via env.
-
-    A comparacao e de tempo constante: `!=` em str sai no primeiro byte
-    diferente, e a diferenca de tempo entre um prefixo certo e um errado deixa
-    o token ser descoberto byte a byte.
-    """
-    admin_token = os.environ.get("ADMIN_TOKEN")
-    if not admin_token:
-        raise HTTPException(status_code=404, detail="Admin desabilitado")
-    provided = admin_token_from(request)
-    if not provided or not hmac.compare_digest(provided, admin_token):
-        raise HTTPException(status_code=401, detail="Token invalido")
-
-
-def cookie_handoff(request: Request) -> RedirectResponse:
-    """Guarda o token no cookie e manda o navegador para a URL sem ele.
-
-    303 e nao 302: o metodo vira GET e o navegador troca a URL da barra, que e
-    o ponto -- o token some do historico, do `Referer` e do log de acesso
-    depois de um unico hop. `secure` acompanha o esquema porque o proxy roda em
-    http no localhost, e um cookie `secure` ali nunca seria enviado de volta.
-    """
-    response = RedirectResponse(url=ADMIN_COOKIE_PATH, status_code=303)
-    response.set_cookie(
-        ADMIN_COOKIE,
-        request.query_params["token"],
-        max_age=ADMIN_COOKIE_MAX_AGE,
-        path=ADMIN_COOKIE_PATH,
-        httponly=True,
-        samesite="strict",
-        secure=request.url.scheme == "https",
-    )
-    return response
 
 
 def request_engine(request: Request):
@@ -176,10 +117,8 @@ def create_config_version(session: Session) -> ConfigVersion:
 
 
 @router.get("", response_class=HTMLResponse)
-async def admin_config_page(request: Request, _: None = Depends(require_admin_token)):
+async def admin_config_page(request: Request, _: None = Depends(require_admin)):
     """Pagina principal de administracao de configuracao."""
-    if "token" in request.query_params:
-        return cookie_handoff(request)
     engine = request_engine(request)
     with Session(engine) as session:
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
@@ -201,6 +140,7 @@ async def admin_config_page(request: Request, _: None = Depends(require_admin_to
     return render(
         "admin_config.html",
         request=request,
+        active="config",
         providers=providers,
         models=models,
         routes=routes_with_candidates,
@@ -214,7 +154,7 @@ async def admin_config_page(request: Request, _: None = Depends(require_admin_to
 
 
 @router.get("/providers", response_class=HTMLResponse)
-async def list_providers(request: Request, _: None = Depends(require_admin_token)):
+async def list_providers(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
@@ -228,7 +168,7 @@ async def create_provider(
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
     api_key_env: Annotated[str | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -254,7 +194,7 @@ async def update_provider(
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
     api_key_env: Annotated[str | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -277,7 +217,7 @@ async def update_provider(
 async def delete_provider(
     request: Request,
     name: str,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -296,12 +236,12 @@ async def delete_provider(
 
 
 @router.get("/providers/new", response_class=HTMLResponse)
-async def new_provider_form(request: Request, _: None = Depends(require_admin_token)):
+async def new_provider_form(request: Request, _: None = Depends(require_admin)):
     return render("_provider_form.html", request=request, provider=None, providers=[])
 
 
 @router.get("/providers/{name}/edit", response_class=HTMLResponse)
-async def edit_provider_form(request: Request, name: str, _: None = Depends(require_admin_token)):
+async def edit_provider_form(request: Request, name: str, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         p = session.execute(select(Provider).where(Provider.name == name)).scalar_one_or_none()
@@ -314,7 +254,7 @@ async def edit_provider_form(request: Request, name: str, _: None = Depends(requ
 
 
 @router.get("/models", response_class=HTMLResponse)
-async def list_models(request: Request, _: None = Depends(require_admin_token)):
+async def list_models(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         models = session.execute(select(Model).order_by(Model.alias)).scalars().all()
@@ -344,12 +284,12 @@ async def create_model(
     context_window: Annotated[int, Form()] = 131072,
     max_output_tokens: Annotated[int, Form()] = 8192,
     is_default: Annotated[list[str] | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
-    supports_tools = _flag(supports_tools, True)
-    supports_streaming = _flag(supports_streaming, True)
-    supports_vision = _flag(supports_vision, False)
-    is_default = _flag(is_default, False)
+    tools = _flag(supports_tools, True)
+    streaming = _flag(supports_streaming, True)
+    vision = _flag(supports_vision, False)
+    default_flag = _flag(is_default, False)
     engine = request_engine(request)
     with Session(engine) as session:
         if session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none():
@@ -358,19 +298,19 @@ async def create_model(
         if not prov:
             raise HTTPException(status_code=400, detail="Provider invalido")
         # Se is_default, limpa default anterior
-        if is_default:
+        if default_flag:
             for m in session.execute(select(Model).where(Model.is_default == True)).scalars():
                 m.is_default = False
         m = Model(
             alias=alias,
             provider_id=provider_id,
             upstream_model=upstream_model,
-            supports_tools=supports_tools,
-            supports_streaming=supports_streaming,
-            supports_vision=supports_vision,
+            supports_tools=tools,
+            supports_streaming=streaming,
+            supports_vision=vision,
             context_window=context_window,
             max_output_tokens=max_output_tokens,
-            is_default=is_default,
+            is_default=default_flag,
         )
         session.add(m)
         session.commit()
@@ -392,7 +332,7 @@ async def update_model(
     context_window: Annotated[int | None, Form()] = None,
     max_output_tokens: Annotated[int | None, Form()] = None,
     is_default: Annotated[list[str] | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -402,10 +342,10 @@ async def update_model(
         # Campo ausente preserva o valor atual (o form sempre envia, mas um
         # cliente direto pode omitir; nesse caso nao inventar default). Vale
         # para os flags e para os dois ints: omisso nunca zera nem reseta.
-        supports_tools = _flag(supports_tools, m.supports_tools)
-        supports_streaming = _flag(supports_streaming, m.supports_streaming)
-        supports_vision = _flag(supports_vision, m.supports_vision)
-        is_default = _flag(is_default, m.is_default)
+        tools = _flag(supports_tools, m.supports_tools)
+        streaming = _flag(supports_streaming, m.supports_streaming)
+        vision = _flag(supports_vision, m.supports_vision)
+        default_flag = _flag(is_default, m.is_default)
         if context_window is None:
             context_window = m.context_window
         if max_output_tokens is None:
@@ -413,22 +353,22 @@ async def update_model(
         prov = session.get(Provider, provider_id)
         if not prov:
             raise HTTPException(status_code=400, detail="Provider invalido")
-        if is_default and not m.is_default:
+        if default_flag and not m.is_default:
             for other in session.execute(select(Model).where(Model.is_default == True)).scalars():
                 other.is_default = False
-        elif not is_default and m.is_default:
+        elif not default_flag and m.is_default:
             # Nao permite remover default se for o unico
             defaults = list(session.execute(select(Model).where(Model.is_default == True)).scalars())
             if len(defaults) == 1 and defaults[0].alias == alias:
                 raise HTTPException(status_code=400, detail="Nao pode remover o unico default")
         m.provider_id = provider_id
         m.upstream_model = upstream_model
-        m.supports_tools = supports_tools
-        m.supports_streaming = supports_streaming
-        m.supports_vision = supports_vision
+        m.supports_tools = tools
+        m.supports_streaming = streaming
+        m.supports_vision = vision
         m.context_window = context_window
         m.max_output_tokens = max_output_tokens
-        m.is_default = is_default
+        m.is_default = default_flag
         session.commit()
         create_config_version(session)
         settings = load_settings_from_db(session)
@@ -440,7 +380,7 @@ async def update_model(
 async def delete_model(
     request: Request,
     alias: str,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -461,7 +401,7 @@ async def delete_model(
 
 
 @router.get("/models/new", response_class=HTMLResponse)
-async def new_model_form(request: Request, _: None = Depends(require_admin_token)):
+async def new_model_form(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
@@ -469,7 +409,7 @@ async def new_model_form(request: Request, _: None = Depends(require_admin_token
 
 
 @router.get("/models/{alias}/edit", response_class=HTMLResponse)
-async def edit_model_form(request: Request, alias: str, _: None = Depends(require_admin_token)):
+async def edit_model_form(request: Request, alias: str, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         m = session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none()
@@ -483,7 +423,7 @@ async def edit_model_form(request: Request, alias: str, _: None = Depends(requir
 
 
 @router.get("/routes", response_class=HTMLResponse)
-async def list_routes(request: Request, _: None = Depends(require_admin_token)):
+async def list_routes(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         routes_db = session.execute(select(Route).order_by(Route.order_index)).scalars().all()
@@ -504,7 +444,7 @@ async def create_route(
     request: Request,
     pattern: Annotated[str | None, Form()] = None,
     candidates: Annotated[list[str] | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     if not pattern:
         raise HTTPException(status_code=400, detail="Pattern obrigatorio")
@@ -541,7 +481,7 @@ async def update_route(
     route_id: int,
     pattern: Annotated[str | None, Form()] = None,
     candidates: Annotated[list[str] | None, Form()] = None,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     if not pattern:
         raise HTTPException(status_code=400, detail="Pattern obrigatorio")
@@ -573,7 +513,7 @@ async def update_route(
 async def reorder_routes(
     request: Request,
     order: Annotated[list[int], Form()],
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -598,7 +538,7 @@ async def reorder_routes(
 async def delete_route(
     request: Request,
     route_id: int,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -618,7 +558,7 @@ async def delete_route(
 
 
 @router.get("/routes/new", response_class=HTMLResponse)
-async def new_route_form(request: Request, _: None = Depends(require_admin_token)):
+async def new_route_form(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         models = session.execute(select(Model).order_by(Model.alias)).scalars().all()
@@ -626,7 +566,7 @@ async def new_route_form(request: Request, _: None = Depends(require_admin_token
 
 
 @router.get("/routes/{route_id}/edit", response_class=HTMLResponse)
-async def edit_route_form(request: Request, route_id: int, _: None = Depends(require_admin_token)):
+async def edit_route_form(request: Request, route_id: int, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         route = session.get(Route, route_id)
@@ -645,7 +585,7 @@ async def edit_route_form(request: Request, route_id: int, _: None = Depends(req
 
 
 @router.get("/default-model", response_class=HTMLResponse)
-async def get_default_model(request: Request, _: None = Depends(require_admin_token)):
+async def get_default_model(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         default = session.execute(select(Model).where(Model.is_default == True)).scalar_one_or_none()
@@ -657,7 +597,7 @@ async def get_default_model(request: Request, _: None = Depends(require_admin_to
 async def set_default_model(
     request: Request,
     alias: Annotated[str, Form()],
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -678,7 +618,7 @@ async def set_default_model(
 
 
 @router.post("/reload")
-async def reload_config(request: Request, _: None = Depends(require_admin_token)):
+async def reload_config(request: Request, _: None = Depends(require_admin)):
     """Invalida cache e recarrega settings do banco."""
     engine = request_engine(request)
     with Session(engine) as session:
@@ -691,7 +631,7 @@ async def reload_config(request: Request, _: None = Depends(require_admin_token)
 async def rollback_config(
     request: Request,
     version_id: int,
-    _: None = Depends(require_admin_token),
+    _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -738,7 +678,7 @@ async def rollback_config(
 
 
 @router.get("/history", response_class=HTMLResponse)
-async def config_history(request: Request, _: None = Depends(require_admin_token)):
+async def config_history(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         versions = session.execute(

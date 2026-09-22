@@ -80,6 +80,26 @@ async def test_400_skips_to_the_next_candidate_without_retrying():
 
 
 @respx.mock
+async def test_400_trace_line_carries_the_upstream_reason():
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            400, json={"error": {"message": "max_tokens exceeds the model limit"}}
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 400
+    # a linha de rastro nao pode dizer so "400": o motivo que o provedor devolveu
+    # e o que diagnostica a recusa, e ele ja esta na mao (last_message).
+    joined = " | ".join(result.trace)
+    assert "max_tokens exceeds the model limit" in joined
+    assert any("400" in line and "max_tokens exceeds" in line for line in result.trace)
+
+
+@respx.mock
 async def test_transport_error_retries_the_same_candidate():
     route = respx.post("https://api.test/v1/chat/completions").mock(
         side_effect=[
@@ -464,7 +484,7 @@ async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
         await pool.aclose()
     assert route.call_count == 1
     assert "vendor/cheap: total deadline exceeded" in result.trace
-    assert "vendor/free: 400 (attempt 1)" in result.trace
+    assert "vendor/free: 400 nao deu (attempt 1)" in result.trace
 
 
 @respx.mock
@@ -655,7 +675,7 @@ async def test_a_successful_result_still_reports_what_happened_before_it():
     finally:
         await pool.aclose()
     assert result.real_model == "vendor/backup"
-    assert result.trace == ["vendor/free: no tool support", "vendor/cheap: 400 (attempt 1)"]
+    assert result.trace == ["vendor/free: no tool support", "vendor/cheap: 400 nao deu (attempt 1)"]
 
 
 # --- rodada 1 de correcoes ---------------------------------------------------
@@ -1593,7 +1613,7 @@ async def test_the_attempt_label_is_the_model_not_the_alias():
     finally:
         await pool.aclose()
     assert route.call_count == 1
-    assert result.trace == ["qwen3.8-27b: 400 (attempt 1)"]
+    assert result.trace == ["qwen3.8-27b: 400 nao deu (attempt 1)"]
 
 
 @respx.mock

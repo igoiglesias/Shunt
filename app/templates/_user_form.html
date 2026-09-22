@@ -1,0 +1,25 @@
+{% set editing = user is not none %}
+{% if editing %}
+<form hx-patch="/admin/users/{{ user.username }}" hx-target="#user-list" hx-swap="outerHTML">
+  <h3>Editar usuário: {{ user.username }}</h3>
+{% else %}
+<form hx-post="/admin/users" hx-target="#user-list" hx-swap="outerHTML">
+  <h3>Novo usuário</h3>
+{% endif %}
+<div class="form-grid">
+  <div class="form-group">
+    <label for="username">{{ "Usuário" if not editing else "Nome" }} *</label>
+    <input type="text" id="username" name="{{ 'new_username' if editing else 'username' }}"
+           required value="{{ user.username if editing else '' }}">
+  </div>
+  <div class="form-group">
+    <label for="password">{{ "Nova senha (vazio = manter)" if editing else "Senha *" }}</label>
+    <input type="password" id="password" name="{{ 'new_password' if editing else 'password' }}"
+           {% if not editing %}required{% endif %} autocomplete="new-password">
+  </div>
+</div>
+<div style="margin-top: 16px; display: flex; gap: 8px;">
+  <button type="submit" class="btn btn-primary">{{ "Salvar" if editing else "Criar" }}</button>
+  <button type="button" class="btn" onclick="this.closest('#user-form').innerHTML=''">Cancelar</button>
+</div>
+</form>
