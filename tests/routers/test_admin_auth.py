@@ -79,6 +79,22 @@ def test_login_page_existing_users(tmp_path):
     assert "Primeiro acesso" not in r.text
 
 
+def test_login_page_without_database_offers_login_not_create(tmp_path):
+    """Sem banco a tela e de LOGIN, nao de criacao.
+
+    O POST recusa criar admin sem persistencia (503); oferecer a tela de
+    "criar" quando o banco esta desligado era uma porta que se fecha no envio.
+    """
+    _reset_app_state()  # nao instala recorder
+    if hasattr(app.state, "recorder"):
+        del app.state.recorder
+    with TestClient(app) as c:
+        r = c.get("/admin/login")
+    assert r.status_code == 200
+    assert "Primeiro acesso" not in r.text
+    assert "Entrar" in r.text
+
+
 def test_create_first_admin(tmp_path):
     """POST /admin/login com username+pw+confirm no modo criacao -> 303 /admin/painel, cookie shunt_admin set."""
     with client(tmp_path) as c:
@@ -95,6 +111,42 @@ def test_create_first_admin(tmp_path):
     with Session(app.state.recorder.engine) as s:
         user = s.execute(select(User).where(User.username == "primeiro")).scalar_one()
     assert user is not None
+
+
+def test_first_admin_race_returns_clean_error_not_500(tmp_path, monkeypatch):
+    """Perdeu a corrida do primeiro admin (UNIQUE colidiu) -> 400, nao 500.
+
+    Em `make prod` ha varios workers: dois veem a tabela vazia ao mesmo tempo,
+    e o segundo insert colide com a UNIQUE de `username`. O ramo de perda tem
+    que devolver uma mensagem, nao um stack trace. Simula-se a colidendo no
+    primeiro `commit`, que e exatamente o que o worker perdedor encontra.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    with client(tmp_path):
+        real_session = Session
+
+        def racing_session(bind):
+            real = real_session(bind)
+            state = {"first_commit": True}
+
+            def committing(*args, **kwargs):
+                if state["first_commit"]:
+                    state["first_commit"] = False
+                    raise IntegrityError("colisao", {}, None)
+                return real.commit(*args, **kwargs)
+
+            real.commit = committing
+            return real
+
+        monkeypatch.setattr("app.routers.admin_auth.Session", racing_session)
+        r = TestClient(app).post(
+            "/admin/login",
+            data={"username": "x", "password": "senha123", "confirm": "senha123"},
+            follow_redirects=False,
+        )
+    assert r.status_code == 400
+    assert "Já existe um administrador" in r.text
 
 
 def test_login_success(tmp_path):

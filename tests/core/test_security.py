@@ -112,3 +112,22 @@ class TestDecodeJwt:
         token = issue_jwt(user_id, secret, ttl_seconds=3600)
         payload = decode_jwt(token, "wrong-secret")
         assert payload is None
+
+    def test_decode_non_numeric_sub_returns_none(self):
+        """`sub` que nao e numero: token forjado/de outra app -> nao autenticado.
+
+        Antes da correcao, um `sub` como `"admin"` passava pelo `decode_jwt`
+        e fazia o `require_admin` cair em `int("admin")` -> ValueError -> 500.
+        Agora cai como qualquer decode ruim: `None`.
+        """
+        import jwt as pyjwt
+
+        from app.core.security import _ALGORITHM
+
+        secret = "segredo-de-teste"
+        token = pyjwt.encode(
+            {"sub": "admin", "exp": 9999999999},
+            secret,
+            algorithm=_ALGORITHM,
+        )
+        assert decode_jwt(token, secret) is None

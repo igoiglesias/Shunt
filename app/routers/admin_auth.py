@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import APIRouter, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.auth import ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE, ADMIN_COOKIE_PATH
@@ -41,22 +42,25 @@ def _set_session_cookie(response: RedirectResponse, request: Request, user_id: i
 
 @router.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    """A porta de entrada. Sem usuarios no banco, vira a tela de criar o primeiro.
+    """A porta de entrada.
 
-    O banco pode nao existir no boot (sem Turso) ou falhar; a tela de login/criacao
-    deve responder mesmo assim: se nao ha engine, assume-se modo 'create' (primeiro
-    acesso) e deixa o POST tentar abrir a sessao la.
+    O banco pode nao existir no boot (sem Turso) ou falhar; a tela deve
+    responder mesmo assim. Sem engine o modo e 'login' — o POST recusa
+    criar admin sem persistencia (503), entao oferecer "criar" aqui seria
+    uma porta que se fecha no envio. So quando ha engine E a tabela
+    esta vazia entra o modo 'create' (primeiro acesso).
     """
-    engine = None
     recorder = getattr(request.app.state, "recorder", None)
-    if recorder is not None:
-        engine = recorder.engine
-    mode = "create"
+    engine = recorder.engine if recorder is not None else None
+    # Sem banco nao ha criacao: o POST recusa criar admin sem persistencia
+    # (503), entao mostrar a tela de "criar" aqui seria uma porta que fecha.
+    # Sem banco, ou com banco e usuarios ja criados, a tela e de login.
+    mode = "login"
     if engine is not None:
         with Session(engine) as session:
             count = session.scalar(select(func.count()).select_from(User)) or 0
-        if count > 0:
-            mode = "login"
+        if count == 0:
+            mode = "create"
     return render("login.html", request=request, mode=mode, error=None)
 
 
@@ -83,7 +87,20 @@ async def login_submit(
                 return resp
             user = User(username=username, password_hash=hash_password(password))
             session.add(user)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError:
+                # Dois acessos simultaneos viram uma tabela vazia (multiplos
+                # workers do `make prod`): o primeiro insert ganha, o segundo
+                # colide com a UNIQUE de `username`. Em vez de um 500 com
+                # stack, desfaz e devolve uma mensagem: ja existe admin.
+                session.rollback()
+                resp = render(
+                    "login.html", request=request, mode="create",
+                    error="Já existe um administrador; faça login.",
+                )
+                resp.status_code = 400
+                return resp
             session.refresh(user)
             user_id = user.id
         else:
