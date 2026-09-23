@@ -20,10 +20,17 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from app.config.config import ADMIN_COOKIE
+from app.core.security import issue_jwt
 from app.stats.models import Base, RequestEvent
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import sync_playwright
+
+# Segredo fixo so deste modulo: o painel exige sessao admin, e com o segredo
+# conhecido o teste assina o proprio cookie em vez de passar pela tela de login.
+# So precisa ser estavel dentro do modulo; nao e segredo de producao.
+SESSION_SECRET = "segredo-fixo-do-teste-do-painel"
 
 
 def free_port() -> int:
@@ -81,7 +88,11 @@ def server(tmp_path_factory):
     port = free_port()
     process = subprocess.Popen(
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env={**os.environ, "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}"},
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -117,6 +128,9 @@ def browser():
 
 def open_panel(browser, base, width, height):
     page = browser.new_page(viewport={"width": width, "height": height})
+    page.context.add_cookies(
+        [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
+    )
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
@@ -214,7 +228,13 @@ def test_the_panel_says_so_when_there_is_no_database(browser, tmp_path_factory):
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
         # Vazio, e nao ausente: `load_dotenv` nao sobrescreve variavel ja
         # definida, entao so assim o `.env` do repositorio nao repoe o banco.
-        env={**os.environ, "TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""},
+        # O segredo fixo casa com o cookie que `open_panel` assina.
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
