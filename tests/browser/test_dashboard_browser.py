@@ -126,11 +126,13 @@ def browser():
         instance.close()
 
 
-def open_panel(browser, base, width, height):
+def open_panel(browser, base, width, height, init_script=None):
     page = browser.new_page(viewport={"width": width, "height": height})
     page.context.add_cookies(
         [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
     )
+    if init_script:
+        page.add_init_script(init_script)
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
@@ -654,6 +656,75 @@ def test_the_way_out_of_an_empty_window_is_the_24h_button(browser, server):
             .find(b => b.getAttribute('aria-pressed') === 'true')?.textContent === '24h'"""
     )
     page.close()
+    assert problems == []
+
+
+def pressed_window(page):
+    return page.evaluate(
+        """() => [...document.querySelectorAll('#windows button')]
+            .filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.textContent)"""
+    )
+
+
+def test_the_chosen_window_survives_a_trip_to_another_screen(browser, server):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="1h").click()
+    page.wait_for_timeout(300)
+    page.goto(f"{server}/admin/requests", wait_until="networkidle")
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.goto(f"{server}/admin/painel")
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    pressed = pressed_window(page)
+    page.close()
+    assert "window=1&" in url or url.endswith("window=1"), url
+    assert pressed == ["1h"]
+    assert problems == []
+
+
+@pytest.mark.parametrize("guardado", ["999", "abc", ""])
+def test_a_stored_window_that_is_not_a_button_falls_back_to_24h(browser, server, guardado):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.evaluate(f"() => localStorage.setItem('shunt.painel.hours', {json.dumps(guardado)})")
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.reload()
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    pressed = pressed_window(page)
+    page.close()
+    assert "window=24&" in url or url.endswith("window=24"), url
+    assert pressed == ["24h"]
+    assert problems == []
+
+
+def test_clicking_a_window_stores_its_hours(browser, server):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="7d").click()
+    guardado = page.evaluate("() => localStorage.getItem('shunt.painel.hours')")
+    page.close()
+    assert guardado == "168"
+    assert problems == []
+
+
+def test_the_panel_still_opens_on_24h_when_storage_is_blocked(browser, server):
+    bloqueio = """Object.defineProperty(window, 'localStorage', {
+        get() { throw new DOMException('bloqueado', 'SecurityError'); }
+    });"""
+    page, problems = open_panel(browser, server, 1400, 900, init_script=bloqueio)
+    inicial = pressed_window(page)
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.reload()
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    recarregado = pressed_window(page)
+    page.get_by_role("button", name="1h").click()
+    page.wait_for_timeout(300)
+    pressed = pressed_window(page)
+    page.close()
+    assert inicial == ["24h"]
+    assert recarregado == ["24h"]
+    assert "window=24&" in url or url.endswith("window=24"), url
+    assert pressed == ["1h"]
     assert problems == []
 
 
