@@ -474,3 +474,91 @@ async def test_in_use_survives_an_update_that_changes_nothing_relevant():
     held.release()
     assert pool.in_use("local") == 0
     await pool.aclose()
+
+
+# ---------------------------------------------------------------------------
+# update(): clientes aposentados fecham quando o ultimo uso termina
+# ---------------------------------------------------------------------------
+
+
+def _moved() -> Settings:
+    moved = SETTINGS.model_copy(deep=True)
+    moved.providers["local"].base_url = "http://localhost:9090/v1"
+    return moved
+
+
+async def test_update_with_a_new_base_url_serves_a_new_client_and_closes_the_idle_old_one():
+    pool = UpstreamPool(SETTINGS)
+    old = pool.get("local")
+    await pool.update(_moved())
+    new = pool.get("local")
+    assert new is not old
+    assert str(new.base_url).rstrip("/") == "http://localhost:9090/v1"
+    assert old.is_closed
+    await pool.aclose()
+
+
+async def test_a_retired_client_stays_open_while_a_request_uses_it_and_closes_after():
+    pool = UpstreamPool(SETTINGS)
+    async with pool.client("local") as lent:
+        await pool.update(_moved())
+        assert not lent.is_closed  # em uso: o update nao fecha
+        async with pool.client("local") as fresh:
+            assert fresh is not lent  # requisicao nova ja recebe o endereco novo
+    assert lent.is_closed  # ultimo uso terminou: fechou
+    assert not pool.get("local").is_closed
+    await pool.aclose()
+
+
+async def test_a_retired_client_shared_by_two_requests_closes_only_after_both():
+    pool = UpstreamPool(SETTINGS)
+    first = pool.client("local")
+    second = pool.client("local")
+    a = await first.__aenter__()
+    b = await second.__aenter__()
+    assert a is b
+    await pool.update(_moved())
+    await first.__aexit__(None, None, None)
+    assert not a.is_closed  # o segundo ainda usa
+    await second.__aexit__(None, None, None)
+    assert a.is_closed
+    await pool.aclose()
+
+
+async def test_update_keeps_the_client_when_only_key_or_limit_changes():
+    pool = UpstreamPool(SETTINGS)
+    same = pool.get("local")
+    changed = SETTINGS.model_copy(deep=True)
+    changed.providers["local"].api_key = "nova"
+    changed.providers["local"].max_concurrency = 4
+    await pool.update(changed)
+    assert pool.get("local") is same
+    assert not same.is_closed
+    assert pool.limit("local") == 4
+    await pool.aclose()
+
+
+async def test_update_removing_a_provider_retires_its_client():
+    pool = UpstreamPool(SETTINGS)
+    old = pool.get("local")
+    only_openrouter = Settings(
+        providers={"openrouter": SETTINGS.providers["openrouter"]},
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    await pool.update(only_openrouter)
+    assert old.is_closed
+    with pytest.raises(KeyError):
+        pool.get("local")
+    await pool.aclose()
+
+
+async def test_aclose_closes_retired_clients_still_in_use():
+    pool = UpstreamPool(SETTINGS)
+    lease = pool.client("local")
+    lent = await lease.__aenter__()
+    await pool.update(_moved())
+    await pool.aclose()
+    assert lent.is_closed
+    await lease.__aexit__(None, None, None)  # nao levanta com o cliente ja fechado

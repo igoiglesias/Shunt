@@ -157,6 +157,20 @@ class SlotRequest:
         self.cancel()
 
 
+class _Held:
+    """Um cliente httpx e quantos candidatos o usam agora.
+
+    `retired`: saiu do dicionario ativo num `update` (base_url mudou ou o
+    provedor saiu) e fecha quando o ultimo uso termina -- nunca embaixo de um
+    stream que ainda le por ele.
+    """
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+        self.uses = 0
+        self.retired = False
+
+
 class UpstreamPool:
     """Clientes httpx e slots de concorrencia, por provedor.
 
@@ -171,7 +185,8 @@ class UpstreamPool:
     ) -> None:
         self._settings = settings
         self._transport = transport
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[str, _Held] = {}
+        self._retired: list[_Held] = []
         self._closed = False
         self._gates: dict[str, _Gate] = {
             name: _Gate(config.max_concurrency)
@@ -185,8 +200,23 @@ class UpstreamPool:
         Chamado por `apply_settings` a cada edicao (e pelo vigia de versao):
         recriar o pool cortava streams em voo e zerava `in_use`.
         """
+        old = self._settings
         self._settings = settings
         self._reconcile_gates(settings)
+        await self._reconcile_clients(old, settings)
+
+    async def _reconcile_clients(self, old: Settings, new: Settings) -> None:
+        for name, held in list(self._clients.items()):
+            before = old.providers.get(name)
+            after = new.providers.get(name)
+            if before is not None and after is not None and before.base_url == after.base_url:
+                continue
+            del self._clients[name]
+            held.retired = True
+            if held.uses == 0:
+                await held.client.aclose()
+            else:
+                self._retired.append(held)
 
     def _reconcile_gates(self, settings: Settings) -> None:
         for name, config in settings.providers.items():
@@ -202,8 +232,15 @@ class UpstreamPool:
             self._gates.pop(name).release_all()
 
     def get(self, provider: str) -> httpx.AsyncClient:
+        """O cliente compartilhado do provedor, SEM contagem de uso: quem
+        chama `get()` pode ver o cliente fechar num `update` que troque o
+        `base_url`. O caminho de requisicao usa `client()`; `get()` fica
+        para os testes."""
+        return self._held(provider).client
+
+    def _held(self, provider: str) -> _Held:
         if provider not in self._clients:
-            self._clients[provider] = self._new_client(provider)
+            self._clients[provider] = _Held(self._new_client(provider))
         return self._clients[provider]
 
     def _new_client(self, provider: str) -> httpx.AsyncClient:
@@ -214,21 +251,36 @@ class UpstreamPool:
 
     @asynccontextmanager
     async def client(self, provider: str) -> AsyncIterator[httpx.AsyncClient]:
-        """O cliente do provedor pelo tempo de um candidato.
+        """O cliente do provedor pelo tempo de um candidato, com uso contado.
 
-        Com o pool aberto e o cliente compartilhado de sempre. Com o pool ja
-        fechado -- um `apply_settings` trocou o pool enquanto este pedido ainda
-        esperava um slot nele -- e um cliente so deste uso, fechado na saida:
-        `get()` o criaria dentro de um pool que ninguem mais vai fechar.
+        Com o pool aberto e o cliente compartilhado; se um `update` o
+        aposentar no meio do uso, ele so fecha quando este uso (e os outros
+        em voo) terminarem. Com o pool ja fechado -- o shutdown chegou com
+        este pedido ainda esperando um slot -- e um cliente so deste uso,
+        fechado na saida: `get()` o criaria dentro de um pool que ninguem
+        mais vai fechar.
         """
-        if not self._closed:
-            yield self.get(provider)
+        if self._closed:
+            own = self._new_client(provider)
+            try:
+                yield own
+            finally:
+                await own.aclose()
             return
-        own = self._new_client(provider)
+        held = self._held(provider)
+        held.uses += 1
         try:
-            yield own
+            yield held.client
         finally:
-            await own.aclose()
+            held.uses -= 1
+            if held.retired and held.uses == 0:
+                await self._close_retired(held)
+
+    async def _close_retired(self, held: _Held) -> None:
+        if held in self._retired:
+            self._retired.remove(held)
+        if not held.client.is_closed:
+            await held.client.aclose()
 
     def limit(self, provider: str) -> int | None:
         gate = self._gates.get(provider)
@@ -256,6 +308,7 @@ class UpstreamPool:
 
     async def aclose(self) -> None:
         self._closed = True
-        for client in self._clients.values():
-            await client.aclose()
+        for held in (*self._clients.values(), *self._retired):
+            await held.client.aclose()
         self._clients.clear()
+        self._retired.clear()
