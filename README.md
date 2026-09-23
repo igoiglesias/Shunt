@@ -24,6 +24,7 @@ speaking Anthropic through the same proxy.
 - [What gets translated](#what-gets-translated)
 - [Fallback, retries and timeouts](#fallback-retries-and-timeouts)
 - [Endpoints](#endpoints)
+- [Admin area](#admin-area)
 - [The usage panel](#the-usage-panel)
 - [The request screen](#the-request-screen)
 - [Cache: what the provider reported](#cache-what-the-provider-reported)
@@ -51,28 +52,38 @@ uv sync
 cp .env.sample .env
 ```
 
-Then edit `.env`. It holds one line per provider, and the variable names must
-match the `api_key_env` values in `app/config/config.py`:
+Then edit `.env`. It holds one key per provider of the shipped catalogue, plus
+the database URL:
 
 ```bash
 LOCAL_API_KEY=local                  # same value you passed to llama-server --api-key
 OPENROUTER_API_KEY=sk-or-v1-...
+GROQ_API_KEY=gsk_...
+TURSO_DATABASE_URL=sqlite+pysqlite:///./stats.db
 ```
 
 `.env` is in `.gitignore`. No credential belongs in any file that git tracks.
 
-**3. Describe your provider** in `app/config/config.py`. The shipped catalogue
-points at a llama.cpp server on `127.0.0.1:8181` with OpenRouter behind it as a
-fallback. Change it to yours. The [Configuration](#configuration) section
-explains every field.
+The provider keys are read **once**, on the first boot, when Shunt seeds its
+catalogue into the database. After that the database is the source of truth:
+changing a key in `.env` later changes nothing, so change it on the
+configuration screen instead.
 
-**4. Start the server.**
+**3. Start the server.**
 
 ```bash
 make dev
 ```
 
-That runs uvicorn on port 8000 with reload enabled.
+That runs uvicorn on port 8000 with reload enabled. On the first boot against an
+empty database, Shunt inserts the catalogue from `app/config/seed.py`: a
+llama.cpp server on `127.0.0.1:8080`, with OpenRouter and Groq behind it.
+
+**4. Create the first admin.** Open `http://127.0.0.1:8000/admin/login`. While
+the user table is empty, the login screen is a sign-up screen: the first
+account you create there is the admin. Then go to **Configuração** and point
+the catalogue at your own provider. The [Configuration](#configuration) section
+explains every field.
 
 **5. Check that it is up.**
 
@@ -86,8 +97,8 @@ curl -H 'anthropic-version: 2023-06-01' http://127.0.0.1:8000/v1/models
 
 The health check deliberately touches neither your configuration nor your
 provider, so it answers even when those are broken. That is exactly the
-moment you need it to. It lives at `/health`; the home page is the usage
-panel.
+moment you need it to. It lives at `/health`; the home page redirects to the
+usage panel, behind the login.
 
 **6. Send a real message.**
 
@@ -127,6 +138,27 @@ claude
 Unset `ANTHROPIC_API_KEY` first if you have one in your environment, or it takes
 precedence and Claude Code warns you about it.
 
+### With a Shunt token
+
+A client can also present a token created on the **Tokens** screen, in the
+`x-shunt-token` header:
+
+```bash
+ANTHROPIC_CUSTOM_HEADERS='x-shunt-token: <token>' \
+ANTHROPIC_BASE_URL=http://127.0.0.1:8000 \
+ANTHROPIC_AUTH_TOKEN=local \
+claude
+```
+
+When the header is present, Shunt checks it: an unknown or expired token gets a
+401, and with no database a 503. A valid token makes Shunt use the key stored
+for the provider on every candidate, transparent ones included, so the
+client's own credential never leaves the machine. A request without the header
+is not checked, exactly as above.
+
+The token is shown once, when it is created. Shunt stores only its SHA-256
+hash.
+
 ---
 
 ## How a request travels
@@ -161,75 +193,69 @@ chain. Streaming follows the same path, one SSE event at a time.
 
 ## Configuration
 
-Everything lives in `app/config/config.py`, the only file that changes from
-machine to machine. Four values, each a plain Python literal.
+The catalogue lives in the database: four tables for providers, models, routes
+and the candidates of each route. You edit it on the **Configuração** screen
+(`/admin/config`), and every change applies to the next request, with no
+restart.
 
-### `providers`: where requests can go
+`app/config/seed.py` holds the catalogue Shunt starts from. At boot, when any
+of providers, models or routes is empty, Shunt inserts the parts of that
+catalogue that are missing. It never overwrites a provider or a model you
+already have, so editing `seed.py` does not change a running installation.
 
-```python
-providers = {
-    "local": {
-        "base_url": "http://127.0.0.1:8181/v1",
-        "protocol": "openai",
-        "api_key_env": "LOCAL_API_KEY",
-    },
-}
-```
+Every change on the screen records a version. **Histórico de Versões** lists them,
+and a rollback restores providers, models and routes from that version. The
+history never stores a key: after a rollback each provider keeps its current
+key.
+
+Without a database there is no catalogue: Shunt starts with no providers, no
+models and no routes, and every request that needs one is answered with a 400.
+
+### Providers: where requests can go
 
 | Field | Meaning |
 | --- | --- |
+| name | How models refer to the provider. The transparent rule also looks for the names `anthropic`, `openai` and `openrouter`. |
 | `base_url` | Root the provider serves from. Shunt appends the path itself (`/chat/completions`, `/v1/messages`). |
 | `protocol` | `openai` or `anthropic`. This is what the provider speaks, and it decides which translation runs. |
-| `api_key_env` | **Name** of the environment variable holding the key, never the key itself. Omit it for a provider that needs no credential. |
+| API key | The key itself, stored in the database. Leave it empty for a provider that needs no credential. |
 
-### `models`: what can answer
+### Models: what can answer
 
-```python
-models = {
-    "qwen-local": {
-        "provider": "local",
-        "model": "qwen3.8-27b",
-        "supports": {"tools": True, "streaming": True, "vision": True},
-        "context_window": 32000,
-        "max_output_tokens": 8192,
-    },
-}
-```
+| Field | Meaning |
+| --- | --- |
+| alias | Your name for the model, used in routes (`qwen-local`). |
+| provider | Which provider serves it. |
+| upstream model | The name the provider itself knows. For llama.cpp that is whatever `--alias` was given, not the `.gguf` filename. |
+| capabilities | Tools, streaming, vision: one flag each. |
+| context window, max output tokens | Limits in tokens. |
 
-The key (`qwen-local`) is your alias, used in routes. `model` is the name the
-provider itself knows. For llama.cpp that is whatever `--alias` was given, not
-the `.gguf` filename.
-
-`supports` and `context_window` are how Shunt drops a candidate before wasting a
-round trip on it. A request is skipped past a model that cannot serve it: one
+The capabilities and the context window are how Shunt drops a candidate before
+wasting a round trip on it. A request is skipped past a model that cannot serve it: one
 carrying `tools` skips a model without tool support, one carrying an image
 skips a model without vision, one asking to stream skips a model that cannot,
 and one whose estimated input exceeds `context_window` skips that model too.
 
-### `routes`: which models answer which request
+### Routes: which models answer which request
 
-```python
-routes = [
-    ("free",   ["free"]),
-    ("haiku",  ["qwen-local", "free"]),
-    ("sonnet", ["qwen-local", "free"]),
-    ("opus",   ["qwen-local", "free"]),
-]
-```
+The shipped catalogue has entries such as:
+
+| Pattern | Chain |
+| --- | --- |
+| `haiku` | `groq-free`, `open-free`, `open-nemotron-ultra` |
+| `sonnet` | `open-free`, `open-nemotron-ultra`, `groq-free` |
+| `opus` | `qwen-local`, `open-nemotron-ultra`, `open-free` |
 
 Each entry is a pattern and an ordered chain. The pattern is matched against the
 model name the client asked for; the chain is tried left to right. Because
 matching is by substring, `haiku` catches `claude-haiku-4-5` and every other
-version of that size.
+version of that size. The routes themselves are ordered too, and the first
+matching pattern wins; the screen lets you reorder them.
 
-### `default_model`
+### Default model
 
-```python
-default_model = "qwen-local"
-```
-
-What answers when no route matches. Set it to `None` to enable transparent mode
-instead, described below.
+One model can be marked as the default. It answers when no route matches. With
+no model marked, Shunt uses transparent mode instead, described below.
 
 ---
 
@@ -241,18 +267,19 @@ matches:
 1. **Exact**: the requested name equals a route pattern.
 2. **Family**: a route pattern appears inside the requested name. This is how
    `claude-sonnet-4-5` reaches the `sonnet` route.
-3. **Default**: no pattern matched and `default_model` is set, so that model
+3. **Default**: no pattern matched and a default model is marked, so that model
    answers.
 4. **Transparent**: no pattern matched and there is no default. Shunt guesses
    the provider from the model name and forwards the request carrying **the
-   client's own credential**, contributing no configuration of its own. The
+   client's own credential** (or, with a valid `x-shunt-token`, the key stored
+   for that provider), contributing no configuration of its own. The
    guess reads the prefix: `claude-...` goes to the provider named `anthropic`,
    `gpt-...`/`o1...`/`o3...` to the one named `openai`, and any name containing
    a slash (`deepseek/deepseek-chat`) to the one named `openrouter`. A name
    that fits none of those, or that names a provider you have not declared, is
    answered with a 400 telling you to add the provider or write a route for it.
 
-For the first three rules, `default_model` is inserted as the second candidate
+For the first three rules, the default model is inserted as the second candidate
 of the chain, so a configured fallback exists even for a one-model route. The
 transparent rule builds no chain: it is one candidate, and there is nothing to
 fall back to.
@@ -321,13 +348,26 @@ the next one gets its turn. While that decision is still open, Shunt sends SSE
 comments to keep the connection warm. Comments, not events: a strict client parser
 never sees anything before `message_start`.
 
+Every number above is an environment variable with that default:
+
+| Variable | Default | Bounds |
+| --- | --- | --- |
+| `SHUNT_MAX_ATTEMPTS` | 3 | attempts per candidate |
+| `SHUNT_RETRY_AFTER_BUDGET` | 5 | longest `Retry-After`, in seconds, that Shunt waits out |
+| `SHUNT_FIRST_EVENT_DEADLINE` | 20 | seconds a stream may take to send its first real event |
+| `SHUNT_TOTAL_DEADLINE` | 120 | seconds for the whole chain of a request that does not stream |
+| `SHUNT_TIMEOUT_CONNECT` / `_READ` / `_WRITE` / `_POOL` | 10 / 60 / 30 / 10 | the HTTP client, in seconds |
+
+The remaining `SHUNT_*` knobs (queue sizes, panel limits, cookie lifetime) are
+listed with their defaults in `app/config/config.py`.
+
 ---
 
 ## Endpoints
 
 | Method | Path | Serves |
 | --- | --- | --- |
-| `GET` | `/` | The usage panel. |
+| `GET` | `/` | Redirects to `/admin/painel`. |
 | `GET` | `/health` | Health check. Touches no configuration. |
 | `POST` | `/v1/messages` | Anthropic Messages. Streaming supported. |
 | `POST` | `/v1/messages/count_tokens` | Forwards to an Anthropic provider when there is one; estimates locally otherwise. |
@@ -335,13 +375,29 @@ never sees anything before `message_start`.
 | `POST` | `/v1/completions` | OpenAI legacy completions. No streaming. |
 | `POST` | `/v1/embeddings` | OpenAI embeddings. No streaming. |
 | `GET` | `/v1/models` | Your catalogue, in the dialect the caller speaks. |
+| `GET` | `/v1/models/{model_id}` | One model of the catalogue. |
+| `GET` | `/admin/login` | Login; while there is no user, sign-up of the first admin. |
+| `POST` | `/admin/logout` | Ends the session. |
+| `GET` | `/admin/painel` | The usage panel. |
+| `GET` | `/admin/requests` | The request audit screen. |
+| `GET` | `/admin/config` | Providers, models, routes, default model and version history. |
+| `GET` | `/admin/users` | Admin accounts. |
+| `GET` | `/admin/tokens` | Shunt tokens for `x-shunt-token`. |
 | `GET` | `/api/stats` | The panel's summary as JSON, cached for a few seconds. |
 | `GET` | `/api/stats/stream` | One SSE event per finished request, read from memory. |
 | `POST` | `/api/stats/clear` | Deletes the stored history. Needs `{"confirm": true}`. |
-| `GET` | `/requests` | The request audit screen. |
 | `GET` | `/api/requests` | Search the stored requests. Filters combine; paging is by cursor. |
+| `GET` | `/api/requests/facets` | The values the search filters offer. |
 | `GET` | `/api/requests/export` | The same search as CSV. |
 | `GET` | `/api/requests/{id}` | One request, with its whole chain of attempts. |
+| `GET` | `/api/requests/{id}/body` | The stored conversation of one request, when recording is on. |
+| `POST` | `/api/analysis` | Analyses a period with a model. |
+| `GET` | `/api/analysis` | Stored analyses. |
+| `GET` | `/api/analysis/{id}` | One stored analysis. |
+
+Everything under `/admin` and `/api` needs an admin session. Without one, a
+screen redirects to the login and an `/api` call gets a 401. The `/v1` routes
+and `/health` never ask for it.
 
 `/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
 `x-api-key` or a Claude user agent; OpenAI shape to one sending only
@@ -351,13 +407,39 @@ no signal either way, so whichever parser reads it finds its own fields.
 Errors follow the same rule: the envelope matches the protocol of whoever asked,
 never the protocol of whatever failed.
 
+---
+
+## Admin area
+
+The screens under `/admin` share one login. There are no roles: every account
+is an admin.
+
+- **First access.** While the user table is empty, `/admin/login` creates the
+  first account instead of checking one. Without a database it only offers the
+  login, because there would be nowhere to store the account.
+- **Usuários** adds, edits and removes accounts. Passwords are stored as
+  Argon2 hashes.
+- **Tokens** creates the tokens a client sends in `x-shunt-token`, optionally
+  expiring after a number of days, and revokes them. See
+  [With a Shunt token](#with-a-shunt-token).
+- **Configuração** edits the catalogue. See [Configuration](#configuration).
+
+The session is a signed JWT in an `httponly`, `samesite=strict` cookie that
+lasts 12 hours (`SHUNT_ADMIN_COOKIE_MAX_AGE`, in seconds). It is signed with
+`ADMIN_SESSION_SECRET`. Without that variable Shunt draws a random secret at
+each boot, so every restart logs everyone out, and under `make prod` each worker
+signs with a different secret. Set it for anything beyond a single `make dev`:
+
+```bash
+ADMIN_SESSION_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+```
 
 ---
 
 ## The usage panel
 
-Open `http://127.0.0.1:8000/` and the home page shows what the proxy has been
-doing: which models were asked for against which actually answered, tokens per
+Open `http://127.0.0.1:8000/admin/painel`, log in, and the panel shows what the
+proxy has been doing: which models were asked for against which actually answered, tokens per
 hour, time to first token, how often the first candidate sufficed, which tools
 were offered against which were called, and every error by status. Requests
 appear on the tape as they finish, pushed over SSE.
@@ -395,7 +477,7 @@ visible:
 
 ### The request screen
 
-`http://127.0.0.1:8000/requests` is the other half: the panel says how things
+`http://127.0.0.1:8000/admin/requests` is the other half: the panel says how things
 are going, this says what happened in one request, and how many look like it.
 
 Type into the search box and it matches the request id, either model, the
@@ -535,17 +617,20 @@ rather than believed.
 
 The call goes out **through Shunt itself** — same resolution, same chain, same
 credentials as any request from the harness — so the analysis shows up in the
-panel like any other request, and the tokens it spent are counted there. Pick
-which model reads the period with `default_model`, or send `{"model": "..."}`:
+panel like any other request, and the tokens it spent are counted there. The
+default model reads the period, or send `{"model": "..."}` to pick another. Like
+every `/api` route it needs the admin session, so a terminal call carries the
+`shunt_admin` cookie copied from the browser:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8000/api/analysis?since=2026-09-19T00:00:00Z' \
+  -b 'shunt_admin=<cookie>' \
   -H 'content-type: application/json' -d '{"model": "claude-opus-5"}'
 ```
 
 An analysis is stored with the dossier that produced it and reused for the same
 window — it costs tokens, and nobody wants to pay twice for the same period.
-**Refazer análise**, or `{"refresh": true}`, pays again on purpose. An analysis
+**Refazer**, or `{"refresh": true}`, pays again on purpose. An analysis
 that failed is never cached.
 
 ### Clearing the history
@@ -553,19 +638,24 @@ that failed is never cached.
 The panel's footer has a **Limpar histórico** button. It takes two clicks: the
 first arms it and says how many requests are about to go, the second does it,
 and leaving it alone disarms it after eight seconds. The same thing from a
-terminal, for a script or a cron:
+terminal, with the admin session cookie:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/stats/clear \
+  -b 'shunt_admin=<cookie>' \
   -H 'content-type: application/json' \
   -d '{"confirm": true}'
 # {"deleted": 194, "older_than_hours": null}
 
 # Keep the last hour, drop everything older:
 curl -X POST http://127.0.0.1:8000/api/stats/clear \
+  -b 'shunt_admin=<cookie>' \
   -H 'content-type: application/json' \
   -d '{"confirm": true, "older_than_hours": 1}'
 ```
+
+The cookie expires with the session, so a cron job needs a fresh one every 12
+hours by default.
 
 The `confirm` is required, and a POST without it is refused. Deleting history
 never touches a request in flight: the recorder only inserts, and its queue is
@@ -591,9 +681,11 @@ make browser # the panel in a headless browser
 make prod    # no reload, one worker per core, access log off
 ```
 
-The proxy holds no credentials of its own. For a configured model it reads the
-environment variable your `providers` entry names; for a transparent one it
-forwards the caller's own header.
+For a configured model, Shunt sends the provider key stored in the database.
+For a transparent one it forwards the caller's own header, unless the request
+carries a valid `x-shunt-token`. The keys reach the database from `.env` only
+once, when the catalogue is seeded; after that they change on the
+configuration screen.
 
 ---
 

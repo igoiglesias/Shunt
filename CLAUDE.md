@@ -4,37 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Shunt is a FastAPI proxy that exposes both the OpenAI API surface (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) and the Anthropic Messages surface (`/v1/messages`). Its purpose is to let an Anthropic-protocol client (Claude Code) talk to an OpenAI-compatible provider: the request is translated Anthropic -> OpenAI, forwarded upstream with the caller's own API key, and the response translated OpenAI -> Anthropic on the way back.
+Shunt is a local FastAPI proxy between a coding harness (Claude Code above all) and LLM providers. It exposes both the Anthropic surface (`/v1/messages`, `count_tokens`) and the OpenAI surface (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`), translates between the two protocols in both directions, and routes each request through a configurable chain of provider/model candidates with retry and fallback. It also ships an admin area (login, users, API tokens, catalog config) and a usage panel backed by a database. `README.md` is the user-facing reference for configuration, routing, translation and the panel.
 
 ## Commands
 
 ```bash
-make dev                  # uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-uv sync                   # install/refresh deps from uv.lock
-uv add <package>          # add a dependency (no pinned version)
-uv lock --upgrade         # upgrade all deps to latest
+make dev        # uvicorn with --reload on port 8000
+make test       # uv run pytest -q tests --ignore=tests/e2e
+make e2e        # uv run pytest -q tests/e2e   (app end to end against tests/e2e/fake_provider.py)
+make browser    # uv run pytest -q tests/browser   (Playwright, headless; slow, kept out of `check`)
+make lint       # uv run ruff check app tests
+make type       # uv run mypy app
+make check      # lint + type + suite with coverage (excludes tests/browser)
+make prod       # no reload, one worker per core
+
+uv run pytest -q tests/routers/test_messages.py                  # one file
+uv run pytest -q tests/routers/test_messages.py::test_name       # one test
+uv sync / uv add <pkg> / uv lock --upgrade                       # deps, never pinned
 ```
 
-Python 3.14 (`.python-version`). No test suite, linter, or type checker is configured yet — when adding one, add the corresponding `make` target.
+Python 3.14. `pytest` runs with `asyncio_mode = "auto"`; HTTP to providers is mocked with `respx`. No coverage threshold is configured.
 
 ## Architecture
 
-- `app/main.py` — FastAPI app; mounts `app/routers/v1.py` under prefix `/v1`.
-- `app/routers/v1.py` — all endpoints. The OpenAI-shaped routes currently return hardcoded stub payloads; only `/v1/messages` does real upstream work.
-- `app/schemas/schemas.py` — Pydantic request models for both protocols (`ChatCompletionRequest`, `CompletionRequest`, `EmbeddingRequest`, `AnthropicRequest`).
-- `app/tools/conversors.py` — the protocol bridge, and the piece to touch when Anthropic/OpenAI shapes diverge:
-  - `transform_anthropic_to_openai`: hoists the root-level `system` field into a leading `{"role": "system"}` message, and flattens Anthropic content-block lists into a single string by concatenating `type == "text"` blocks. Non-text blocks (images, `tool_use`, `tool_result`) are silently dropped.
-  - `transform_openai_to_anthropic`: rewrites the `chatcmpl` id prefix to `msg`, maps `finish_reason` -> `stop_reason` (`stop`/`length`/`tool_calls` -> `end_turn`/`max_tokens`/`tool_use`), and renames `prompt_tokens`/`completion_tokens` -> `input_tokens`/`output_tokens`.
-- `app/config/config.py` — `model_sources`, a plain list of `{provider, model, api_key}` dicts backing `GET /v1/models`. `pydantic-settings` and `dotenv` are dependencies but not yet wired up; config should migrate there rather than growing this literal.
+- `app/main.py` — app plus `lifespan` boot: logging, the stats `Recorder`, settings loaded from the database (seeding the catalog on first boot), the `UpstreamPool` (shared httpx client), and `admin_session_secret` (`ADMIN_SESSION_SECRET` or random per boot). Registers `v1`, the admin routers, and `dashboard`/`audit` behind `require_admin`.
+- **Persistence is optional.** `app/stats/engine.py` builds a SQLAlchemy engine on libsql/Turso from `TURSO_DATABASE_URL` (+ `TURSO_AUTH_TOKEN`); schema comes from `Base.metadata.create_all` (no migration tool). Without the URL the proxy still boots with an empty catalog, and anything that needs the DB (Shunt tokens, admin, history) answers 503 instead of crashing.
+- **Catalog lives in the DB.** `app/config/seed.py::CATALOG` is inserted only when the DB is empty (`seed_catalog_if_empty`); after that `app/config/settings.py::load_settings_from_db` is the source of truth (providers with raw `api_key` column, models with `ModelCaps`, routes with ordered candidates). Edit it through the admin config screens, not by growing `CATALOG`.
+- **Runtime knobs** are `SHUNT_*` env vars read with `os.environ` in `app/config/config.py` (timeouts, retries, deadlines, queue sizes, panel limits), plus `SHUNT_STORE_BODIES` (`app/stats/bodies.py`) and `SHUNT_LOG_LEVEL` (`app/core/observability.py`).
 
-Auth on `/v1/messages` is pass-through: the key arrives via `x-api-key` or `Authorization: Bearer`, and is forwarded upstream unchanged. The proxy holds no credentials of its own.
+### Request path (`/v1/*`)
 
-## Known gaps
+1. `app/routers/v1.py` — `detect_protocol` picks the caller's dialect from headers; the body is parsed and validated by `REQUEST_SCHEMAS[(protocol, endpoint)]` (`app/schemas/`); malformed or non-object JSON becomes a 400 in the caller's error envelope (`error_body`).
+2. Auth: an `x-shunt-token` header is looked up (sha256) in the `ApiToken` table; when valid, the proxy injects the provider key from the catalog. Without it, the caller's own credentials pass through for transparent providers (`outbound_headers` in `app/core/dispatcher.py`).
+3. `app/core/resolver.py::resolve` turns the requested model (alias, prefix hint, transparent fallback) into a candidate chain. It runs **before** choosing between JSON and SSE, so an unknown model is still a 400 rather than an error after the stream header is sent.
+4. `app/core/dispatcher.py` (`dispatch` / `dispatch_stream`, with `attempt.py`, `capabilities.py`, `upstream.py`) filters candidates by capability, picks the upstream path from (provider protocol, logical endpoint), retries or falls back, and records the result.
+5. `app/translate/` holds the protocol bridge: request translation (`to_openai.py`, `to_anthropic_request.py`), response translation (`to_anthropic.py`), SSE translation (`sse_parse.py`, `sse_to_anthropic.py`, `sse_to_openai.py`), plus `usage.py` and `ids.py` (tool-call ids survive the round trip). Golden fixtures for the tool loop live in `tests/golden/`.
 
-- `TARGET_PROVIDER_URL` is referenced in `create_anthropic_message` but never defined or imported — `/v1/messages` raises `NameError` at runtime. Define it (from config/env) before testing that route.
-- The package directories have no `__init__.py`; imports work as namespace packages, so run from the repo root.
-- Streaming is unimplemented: `AnthropicRequest.stream` is accepted and forwarded upstream, but the response path only handles non-streaming JSON. `/v1/chat/completions` returns a fake two-chunk SSE stream.
+Streaming exists only on `/v1/messages` and `/v1/chat/completions`; `/v1/completions` and `/v1/embeddings` always return one JSON document.
+
+### Admin and panel
+
+- Admin session is a JWT in the `shunt_admin` cookie (`app/core/security.py`, `app/core/auth.py::require_admin`). `is_api_request` decides between a login redirect (HTML) and a 401 (API/HTMX).
+- UI is server-rendered Jinja2 in `app/templates/` with HTMX partials (`_*.html` are fragments swapped into full pages).
+- `app/stats/` holds the ORM models, the async `Recorder`, and the queries/analysis/dossier code behind the usage panel.
+
+## Tests
+
+`tests/` mirrors `app/` (`core/`, `config/`, `routers/`, `stats/`, `translate/`), with shared fixtures in `tests/conftest.py`. `tests/e2e/` runs the whole app against a scripted fake provider; `tests/browser/` drives the panel with headless Playwright. Never run the browser suite headed.
+
+## Workflow
+
+Work in this repo goes through the available agents and skills, never done by hand in the main thread: `codebase-explorer` before reading unfamiliar code, `superpowers:brainstorming` before a behavior change, an implementer subagent with TDD, `strict-code-reviewer` before calling anything done, `frontend-validator` + `visual-qa` for any screen (including `/docs`), `mutation-sweep` before DONE, and `service-resilience` / `metrics-and-data-integrity` when touching the dispatcher, retries, timeouts or panel numbers. Audits, QA and root-cause investigations count as work too. Subagent reports are claims until verified (`verify-subagent-claims`).
 
 ## Conventions
 
-Docstrings and inline comments are written in Portuguese; keep that when editing existing modules.
+- Docstrings and comments are in Portuguese (no accents in code comments); keep that when editing. Module docstrings record *why* a decision was made, often with what was measured — read them before changing behavior.
+- Plans and specs: `docs/superpowers/plans/`, `docs/superpowers/specs/`. Per-task execution history (briefs, reviews, diffs, progress ledger): `.superpowers/sdd/`.
