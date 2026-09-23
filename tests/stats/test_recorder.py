@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.stats.models import RequestEvent
+from app.stats.models import ApiToken, RequestEvent
 from app.stats.recorder import Recorder
 
 
@@ -248,3 +248,28 @@ async def test_a_recorder_with_no_reconnect_never_tries_to_reopen():
     recorder._try_reconnect()
     assert recorder.reconnects == 0
     assert recorder.enabled is False
+
+
+async def test_token_touch_is_written_by_the_worker_not_the_caller(make_engine, tmp_path):
+    """`last_used_at` e gravado pelo worker, nunca no caminho da requisicao."""
+    engine = engine_for(make_engine, tmp_path)
+    with Session(engine) as s:
+        s.add(ApiToken(id=3, name="t", token_hash="h" * 64))
+        s.commit()
+    recorder = Recorder(engine, interval=0.01)
+    await recorder.start()
+    recorder.touch_token(3)
+    with Session(engine) as s:
+        assert s.get(ApiToken, 3).last_used_at is None, "o chamador nao pode ter gravado"
+    await recorder.aclose()
+    with Session(engine) as s:
+        assert s.get(ApiToken, 3).last_used_at is not None
+    assert count(engine) == 0, "um toque de token nao e um RequestEvent"
+
+
+async def test_a_token_touch_never_reaches_the_panel_bus(make_engine):
+    """Evento interno do gravador nao vira linha ao vivo no painel."""
+    recorder = Recorder(None)
+    queue = recorder.subscribe()
+    recorder.touch_token(1)
+    assert queue.empty()

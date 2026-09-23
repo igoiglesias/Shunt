@@ -21,8 +21,9 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 
-from sqlalchemy import Engine
+from sqlalchemy import Engine, update
 from sqlalchemy.orm import Session
 
 from app.config.config import (
@@ -33,7 +34,7 @@ from app.config.config import (
     RECONNECT_SECONDS,
     SUBSCRIBER_QUEUE,
 )
-from app.stats.models import RequestBody, RequestEvent
+from app.stats.models import ApiToken, RequestBody, RequestEvent
 
 logger = logging.getLogger("shunt")
 
@@ -127,23 +128,32 @@ class Recorder:
             self.reconnects += 1
             logger.info("stats: banco reaberto depois de %d tentativa(s)", self.reconnects)
 
-    def record(self, event: dict) -> None:
-        """Empilha o evento. Nunca espera, nunca levanta.
+    def _enqueue(self, event: dict) -> None:
+        """O lado que escreve no banco. Nunca espera, nunca levanta.
 
         A unica coisa que pode acontecer de ruim aqui e o evento ser descartado,
         e isso e deliberado: ver o contador de descarte subir e melhor do que
         ver a latencia da API subir.
-
-        O barramento do painel e servido mesmo sem banco: quem so quer olhar o
-        proxy correndo nao precisa configurar Turso nenhum.
         """
-        self._publish(event)
         if self._engine is None and self._reconnect is None:
             return
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
             self.dropped += 1
+
+    def record(self, event: dict) -> None:
+        """Anuncia o evento ao painel e o empilha para o banco.
+
+        O barramento do painel e servido mesmo sem banco: quem so quer olhar o
+        proxy correndo nao precisa configurar Turso nenhum.
+        """
+        self._publish(event)
+        self._enqueue(event)
+
+    def touch_token(self, token_id: int) -> None:
+        """`last_used_at` do token vai pela fila: nunca uma escrita no caminho da requisicao."""
+        self._enqueue({"kind": "token_used", "token_id": token_id, "at": datetime.now(UTC)})
 
     async def start(self) -> None:
         if not self.configured or self._task is not None:
@@ -186,6 +196,16 @@ class Recorder:
         try:
             with Session(self._engine) as session:
                 for event in batch:
+                    # Evento interno: atualiza o ultimo uso do token sem passar
+                    # pela tabela de eventos -- o painel de uso da API nao precisa
+                    # ver cada toque, e um UPDATE nao custa linha nova.
+                    if event.get("kind") == "token_used":
+                        session.execute(
+                            update(ApiToken)
+                            .where(ApiToken.id == event["token_id"])
+                            .values(last_used_at=event["at"])
+                        )
+                        continue
                     # O texto da conversa viaja junto do evento e vai para a
                     # OUTRA tabela: a busca da auditoria le centenas de linhas
                     # por vez e nao pode arrastar megabytes atras.
