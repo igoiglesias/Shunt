@@ -165,8 +165,16 @@ class _Held:
     stream que ainda le por ele.
     """
 
-    def __init__(self, client: httpx.AsyncClient) -> None:
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
         self.client = client
+        # O base_url com que ESTE cliente foi criado -- nao o do `Settings`
+        # de quando `update` rodou. Dois `update()` concorrentes cada um
+        # captura o `Settings` "antigo" no seu proprio inicio; com pools
+        # compartilhados, esse "antigo" pode ja estar defasado quando a
+        # reconciliacao roda (ver `_reconcile_clients`). Comparar contra o
+        # base_url gravado no proprio Held e o unico jeito de decidir certo
+        # sem depender de quem correu primeiro.
+        self.base_url = base_url
         self.uses = 0
         self.retired = False
 
@@ -174,10 +182,11 @@ class _Held:
 class UpstreamPool:
     """Clientes httpx e slots de concorrencia, por provedor.
 
-    O pool nunca e recriado: `update` reconcilia os gates no lugar a cada
-    edicao de configuracao, preservando `in_use` e as esperas em fila (ver
-    `update`/`_reconcile_gates`). O limite e por processo: com varios workers
-    do uvicorn, cada um conta os seus.
+    O pool nunca e recriado: `update` reconcilia os gates e os clientes no
+    lugar a cada edicao de configuracao, preservando `in_use` e as esperas em
+    fila (ver `update`/`_reconcile_gates`/`_reconcile_clients`), e aposentando
+    clientes cujo `base_url` mudou ou cujo provedor saiu do catalogo. O limite
+    e por processo: com varios workers do uvicorn, cada um conta os seus.
     """
 
     def __init__(
@@ -197,26 +206,47 @@ class UpstreamPool:
     async def update(self, settings: Settings) -> None:
         """Reconcilia o pool com um catalogo novo, sem trocar de identidade.
 
-        Chamado por `apply_settings` a cada edicao (e pelo vigia de versao):
-        recriar o pool cortava streams em voo e zerava `in_use`.
+        Chamado por `apply_settings` a cada edicao (e pelo vigia de versao) --
+        de dois lugares do mesmo worker, entao dois `update()` podem correr
+        concorrentes no mesmo pool. Recriar o pool cortava streams em voo e
+        zerava `in_use`.
         """
-        old = self._settings
         self._settings = settings
         self._reconcile_gates(settings)
-        await self._reconcile_clients(old, settings)
+        await self._reconcile_clients(settings)
 
-    async def _reconcile_clients(self, old: Settings, new: Settings) -> None:
+    async def _reconcile_clients(self, new: Settings) -> None:
+        """Aposenta clientes cujo provedor saiu ou cujo `base_url` mudou.
+
+        Duas fases, sem nenhum `await` na primeira: com dois `update()`
+        concorrentes, cada um so cede o loop dentro do `aclose` (fase 2) --
+        nunca no meio de decidir/mutar `_clients` (fase 1). Assim a fase 1 de
+        uma chamada roda do inicio ao fim sem outra intercalar no meio dela.
+
+        A decisao compara contra `held.base_url` (gravado no proprio Held
+        quando foi criado), nao contra um `Settings` "antigo" capturado no
+        inicio deste `update()`: esse "antigo" e uma leitura de um atributo
+        compartilhado (`self._settings`) e pode ja estar defasado se outro
+        `update()` correu por cima antes deste comecar. O guard `is not held`
+        cobre o caso em que, mesmo assim, o nome já aponta para outro Held
+        quando a fase 2 roda (por exemplo um `client()` concorrente recriou o
+        provedor enquanto este `update()` esperava a vez).
+        """
+        to_close: list[_Held] = []
         for name, held in list(self._clients.items()):
-            before = old.providers.get(name)
             after = new.providers.get(name)
-            if before is not None and after is not None and before.base_url == after.base_url:
+            if after is not None and held.base_url == after.base_url:
+                continue
+            if self._clients.get(name) is not held:
                 continue
             del self._clients[name]
             held.retired = True
             if held.uses == 0:
-                await held.client.aclose()
+                to_close.append(held)
             else:
                 self._retired.append(held)
+        for held in to_close:
+            await held.client.aclose()
 
     def _reconcile_gates(self, settings: Settings) -> None:
         for name, config in settings.providers.items():
@@ -240,7 +270,8 @@ class UpstreamPool:
 
     def _held(self, provider: str) -> _Held:
         if provider not in self._clients:
-            self._clients[provider] = _Held(self._new_client(provider))
+            base_url = self._settings.providers[provider].base_url
+            self._clients[provider] = _Held(self._new_client(provider), base_url)
         return self._clients[provider]
 
     def _new_client(self, provider: str) -> httpx.AsyncClient:

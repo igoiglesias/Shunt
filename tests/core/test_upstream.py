@@ -1,8 +1,10 @@
+import asyncio
+
 import httpx
 import pytest
 
 from app.config.settings import ProviderConfig, Settings
-from app.core.upstream import UpstreamPool
+from app.core.upstream import TIMEOUT, UpstreamPool
 
 SETTINGS = Settings(
     providers={
@@ -506,6 +508,7 @@ async def test_a_retired_client_stays_open_while_a_request_uses_it_and_closes_af
         async with pool.client("local") as fresh:
             assert fresh is not lent  # requisicao nova ja recebe o endereco novo
     assert lent.is_closed  # ultimo uso terminou: fechou
+    assert pool._retired == []
     assert not pool.get("local").is_closed
     await pool.aclose()
 
@@ -522,6 +525,29 @@ async def test_a_retired_client_shared_by_two_requests_closes_only_after_both():
     assert not a.is_closed  # o segundo ainda usa
     await second.__aexit__(None, None, None)
     assert a.is_closed
+    assert pool._retired == []
+    await pool.aclose()
+
+
+async def test_an_exception_inside_a_retired_lease_still_closes_it_and_clears_uses():
+    # Uma excecao dentro do `async with` (desconexao do cliente no meio de um
+    # stream, `dispatcher.py:535`) tem de passar pelo mesmo `finally` que o
+    # caminho feliz: sem isso `uses` fica inflado para sempre e um cliente
+    # aposentado nunca fecha.
+    pool = UpstreamPool(SETTINGS)
+    lent = None
+    with pytest.raises(RuntimeError, match="stream quebrou"):
+        async with pool.client("local") as leased:
+            lent = leased
+            await pool.update(_moved())
+            assert not lent.is_closed
+            raise RuntimeError("stream quebrou no meio")
+    assert lent is not None
+    assert lent.is_closed
+    assert pool._retired == []
+    # uses voltou a 0: um novo lease do provedor novo funciona normalmente.
+    async with pool.client("local") as fresh:
+        assert not fresh.is_closed
     await pool.aclose()
 
 
@@ -561,4 +587,74 @@ async def test_aclose_closes_retired_clients_still_in_use():
     await pool.update(_moved())
     await pool.aclose()
     assert lent.is_closed
+    assert pool._retired == []  # aclose esvaziou tambem os aposentados
     await lease.__aexit__(None, None, None)  # nao levanta com o cliente ja fechado
+
+
+# ---------------------------------------------------------------------------
+# update() concorrente: dois updates() no mesmo pool nao podem corromper
+# o mapa de clientes (admin + vigia de versao chamam update() do mesmo pool)
+# ---------------------------------------------------------------------------
+
+
+class _GatedCloseClient(httpx.AsyncClient):
+    """Cliente cujo `aclose` so libera quando o teste manda -- imita uma
+    conexao pool ada de verdade cedendo o loop (o revisor mediu: `aclose`
+    com conexao pool ada cede; uma ociosa nao). Um `asyncio.Event` controlado
+    pelo teste torna a corrida entre dois `update()` reproduzivel sem
+    depender da ordem de agendamento do loop."""
+
+    gate: asyncio.Event
+
+    async def aclose(self) -> None:
+        await self.gate.wait()
+        await super().aclose()
+
+
+class _GatedClosePool(UpstreamPool):
+    def __init__(self, settings: Settings, gate: asyncio.Event) -> None:
+        super().__init__(settings)
+        self._gate = gate
+
+    def _new_client(self, provider: str) -> httpx.AsyncClient:
+        config = self._settings.providers[provider]
+        client = _GatedCloseClient(
+            base_url=config.base_url, timeout=TIMEOUT, transport=self._transport
+        )
+        client.gate = self._gate
+        return client
+
+
+async def test_two_concurrent_updates_do_not_corrupt_the_client_map():
+    # Corrida medida no review: duas chamadas a update() concorrentes no
+    # mesmo pool (admin + vigia de versao). A primeira aposenta "local" e
+    # cede o loop dentro do aclose (aqui, um gate controlado pelo teste, no
+    # lugar de depender de haver uma conexao pool ada de verdade). Enquanto
+    # ela esta suspensa, a segunda aposenta "openrouter" -- E TAMBEM cede.
+    # Quando a primeira retoma e tenta aposentar "openrouter" usando o
+    # snapshot QUE ELA MESMA tirou antes da corrida, o item ja sumiu do
+    # dict: `del self._clients[name]` sem checar se ainda e o mesmo Held
+    # levanta KeyError.
+    gate = asyncio.Event()
+    pool = _GatedClosePool(SETTINGS, gate)
+    pool.get("local")
+    pool.get("openrouter")
+
+    settings_a = SETTINGS.model_copy(deep=True)
+    settings_a.providers["local"].base_url = "http://localhost:9090/v1"
+    settings_a.providers["openrouter"].base_url = "https://openrouter-a.test/v1"
+
+    settings_b = SETTINGS.model_copy(deep=True)
+    settings_b.providers["openrouter"].base_url = "https://openrouter-b.test/v1"
+
+    task_a = asyncio.ensure_future(pool.update(settings_a))
+    await asyncio.sleep(0)  # task_a aposenta "local" e suspende no aclose
+    task_b = asyncio.ensure_future(pool.update(settings_b))
+    await asyncio.sleep(0)  # task_b aposenta "openrouter" e suspende tambem
+    gate.set()  # libera os dois aclose() de uma vez
+
+    await asyncio.gather(task_a, task_b)  # nao pode levantar
+
+    assert pool._clients == {}
+    assert pool._retired == []
+    await pool.aclose()
