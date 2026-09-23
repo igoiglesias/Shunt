@@ -355,6 +355,35 @@ async def test_update_raising_the_limit_wakes_waiters_up_to_the_new_capacity():
     await pool.aclose()
 
 
+async def test_update_raising_the_limit_with_no_waiters_does_not_raise():
+    # `resize` so deve tentar tirar da fila enquanto ela tiver gente: sem
+    # ninguem esperando, subir o limite nao pode estourar a deque vazia.
+    pool = UpstreamPool(_limited(local=1))
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+async def test_update_raising_the_limit_with_fewer_waiters_than_new_capacity_serves_them_without_raising():
+    # Capacidade nova (3) maior que o total de candidatos a receber lugar (1
+    # em uso + 1 esperando = 2): o loop tem de parar quando a fila esvazia,
+    # nao quando a capacidade enche.
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert pool.in_use("local") == 2
+    got = await waiting.wait(0)
+    assert got is not None
+    got.release()
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
 async def test_update_lowering_the_limit_keeps_in_flight_and_holds_new_requests():
     pool = UpstreamPool(_limited(local=2))
     a = pool.try_slot("local")
