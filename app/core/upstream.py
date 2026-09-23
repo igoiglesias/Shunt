@@ -227,17 +227,12 @@ class UpstreamPool:
         quando foi criado), nao contra um `Settings` "antigo" capturado no
         inicio deste `update()`: esse "antigo" e uma leitura de um atributo
         compartilhado (`self._settings`) e pode ja estar defasado se outro
-        `update()` correu por cima antes deste comecar. O guard `is not held`
-        cobre o caso em que, mesmo assim, o nome já aponta para outro Held
-        quando a fase 2 roda (por exemplo um `client()` concorrente recriou o
-        provedor enquanto este `update()` esperava a vez).
+        `update()` correu por cima antes deste comecar.
         """
         to_close: list[_Held] = []
         for name, held in list(self._clients.items()):
             after = new.providers.get(name)
             if after is not None and held.base_url == after.base_url:
-                continue
-            if self._clients.get(name) is not held:
                 continue
             del self._clients[name]
             held.retired = True

@@ -599,8 +599,8 @@ async def test_aclose_closes_retired_clients_still_in_use():
 
 class _GatedCloseClient(httpx.AsyncClient):
     """Cliente cujo `aclose` so libera quando o teste manda -- imita uma
-    conexao pool ada de verdade cedendo o loop (o revisor mediu: `aclose`
-    com conexao pool ada cede; uma ociosa nao). Um `asyncio.Event` controlado
+    conexao poolada de verdade cedendo o loop (o revisor mediu: `aclose`
+    com conexao poolada cede; uma ociosa nao). Um `asyncio.Event` controlado
     pelo teste torna a corrida entre dois `update()` reproduzivel sem
     depender da ordem de agendamento do loop."""
 
@@ -627,18 +627,19 @@ class _GatedClosePool(UpstreamPool):
 
 async def test_two_concurrent_updates_do_not_corrupt_the_client_map():
     # Corrida medida no review: duas chamadas a update() concorrentes no
-    # mesmo pool (admin + vigia de versao). A primeira aposenta "local" e
-    # cede o loop dentro do aclose (aqui, um gate controlado pelo teste, no
-    # lugar de depender de haver uma conexao pool ada de verdade). Enquanto
-    # ela esta suspensa, a segunda aposenta "openrouter" -- E TAMBEM cede.
-    # Quando a primeira retoma e tenta aposentar "openrouter" usando o
-    # snapshot QUE ELA MESMA tirou antes da corrida, o item ja sumiu do
-    # dict: `del self._clients[name]` sem checar se ainda e o mesmo Held
-    # levanta KeyError.
+    # mesmo pool (admin + vigia de versao). Um `asyncio.Event` controlado
+    # pelo teste segura o aclose das duas chamadas ate ambas ficarem
+    # suspensas -- no lugar de depender de haver uma conexao poolada de
+    # verdade cedendo o loop. Com as duas presas, uma requisicao de verdade
+    # pede "openrouter" de novo (`fresh`): esse cliente novo nao pode se
+    # perder -- nem por um `del`/`pop` que apague quem esta la agora usando
+    # a decisao de um snapshot antigo (o bug que a corrida original
+    # reproduzia como `KeyError`), nem por um fechamento parcial que so
+    # fecha o primeiro cliente aposentado da lista.
     gate = asyncio.Event()
     pool = _GatedClosePool(SETTINGS, gate)
-    pool.get("local")
-    pool.get("openrouter")
+    local_before = pool.get("local")
+    openrouter_before = pool.get("openrouter")
 
     settings_a = SETTINGS.model_copy(deep=True)
     settings_a.providers["local"].base_url = "http://localhost:9090/v1"
@@ -648,13 +649,27 @@ async def test_two_concurrent_updates_do_not_corrupt_the_client_map():
     settings_b.providers["openrouter"].base_url = "https://openrouter-b.test/v1"
 
     task_a = asyncio.ensure_future(pool.update(settings_a))
-    await asyncio.sleep(0)  # task_a aposenta "local" e suspende no aclose
+    await asyncio.sleep(0)  # task_a aposenta local+openrouter e suspende no primeiro aclose
     task_b = asyncio.ensure_future(pool.update(settings_b))
-    await asyncio.sleep(0)  # task_b aposenta "openrouter" e suspende tambem
-    gate.set()  # libera os dois aclose() de uma vez
+    await asyncio.sleep(0)  # task_b roda ate onde conseguir, com as duas chamadas ainda presas
 
+    fresh = pool.get("openrouter")  # uma requisicao de verdade, no meio da corrida
+    assert "openrouter" in pool._clients
+    assert pool._clients["openrouter"].client is fresh
+    assert not fresh.is_closed
+
+    gate.set()  # libera os aclose() presos
     await asyncio.gather(task_a, task_b)  # nao pode levantar
 
+    assert local_before.is_closed
+    assert openrouter_before.is_closed
+    # o fresh sobrevive a corrida: ninguem o tocou, ele nao e um dos clientes
+    # que as duas chamadas estavam aposentando.
+    assert "openrouter" in pool._clients
+    assert pool._clients["openrouter"].client is fresh
+    assert not fresh.is_closed
+
+    await pool.aclose()
+    assert fresh.is_closed
     assert pool._clients == {}
     assert pool._retired == []
-    await pool.aclose()
