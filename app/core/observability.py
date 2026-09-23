@@ -19,7 +19,7 @@ import logging
 import os
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from app.stats.recorder import Recorder
 
@@ -121,10 +121,14 @@ def as_event(entry: RequestLog) -> dict:
 
     `fell_back` e derivado em vez de guardado: houve fallback quando alguem
     respondeu DEPOIS de alguma tentativa ter entrado no rastro.
+
+    `started_at` e o INICIO: esta funcao roda quando a requisicao ja terminou,
+    entao o instante e o agora menos a duracao medida. Gravar `now()` cru poria
+    o fim numa coluna que a janela `since`, a fita e o dossie leem como inicio.
     """
     return {
         "request_id": entry.request_id,
-        "started_at": datetime.now(UTC),
+        "started_at": datetime.now(UTC) - timedelta(milliseconds=entry.duration_ms),
         "route": entry.route,
         "dialect": entry.dialect,
         "stream": entry.stream,

@@ -7,10 +7,12 @@ fallback silencioso exige reproduzir a requisicao.
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import respx
 
+from app.core import observability
 from app.core.dispatcher import ShuntRequest, dispatch, dispatch_stream
 from app.core.observability import RequestLog, configure_logging, log_request, redact
 from app.core.upstream import UpstreamPool
@@ -386,3 +388,44 @@ def test_the_line_does_not_also_reach_the_root_logger():
         root.removeHandler(counter)
 
     assert seen == []
+
+
+# --------------------------------------------------------------------------
+# as_event: started_at e o INICIO da requisicao
+# --------------------------------------------------------------------------
+
+_FROZEN_END = datetime(2026, 9, 23, 12, 0, 0, 500000, tzinfo=UTC)
+
+
+class _FrozenDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        # Honra o `tz`: um `now()` sem fuso devolve instante ingenuo, como o real.
+        return _FROZEN_END.astimezone(tz) if tz else _FROZEN_END.replace(tzinfo=None)
+
+
+def test_started_at_is_the_end_minus_the_duration(monkeypatch):
+    """`as_event` roda quando a requisicao ja TERMINOU.
+
+    Gravar `now()` cru poria o fim na coluna que todo consumidor le como
+    inicio: a janela `since`, a fita ao vivo e o dossie. O inicio e o fim
+    menos a duracao medida.
+    """
+    monkeypatch.setattr(observability, "datetime", _FrozenDatetime)
+    event = observability.as_event(
+        RequestLog(request_id="r", requested_model="m", rule="exact", matched=None,
+                   candidate=None, duration_ms=1500)
+    )
+    assert event["started_at"] == _FROZEN_END - timedelta(milliseconds=1500)
+    assert event["started_at"] == datetime(2026, 9, 23, 11, 59, 59, tzinfo=UTC)
+
+
+def test_a_request_without_measured_duration_started_when_it_ended(monkeypatch):
+    """Duracao padrao 0 -- a listagem de modelos -- nao desloca o instante."""
+    monkeypatch.setattr(observability, "datetime", _FrozenDatetime)
+    event = observability.as_event(
+        RequestLog(request_id="r", requested_model="m", rule="exact", matched=None,
+                   candidate=None)
+    )
+    assert event["started_at"] == _FROZEN_END
+    assert event["started_at"].tzinfo is UTC
