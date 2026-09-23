@@ -1,7 +1,10 @@
 """Tests for admin_config router + load_settings_from_db."""
 
+import json
+import re
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -885,3 +888,249 @@ def test_load_settings_from_db(monkeypatch, tmp_path):
     assert settings.models["g-fast"] == ModelConfig(provider="groq", model="groq/llama", supports=ModelCaps(tools=False, streaming=True, vision=False), context_window=4096, max_output_tokens=512)
     assert settings.routes == [("chat", ["g-free", "g-fast"])]
     assert settings.default_model == "g-free"
+
+
+# ---- Limite de concorrencia por provedor -----------------------------------
+
+
+def test_provider_config_defaults_to_no_concurrency_limit():
+    assert ProviderConfig(base_url="u", protocol="openai").max_concurrency is None
+
+
+def test_provider_config_refuses_a_limit_below_one():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        ProviderConfig(base_url="u", protocol="openai", max_concurrency=0)
+    assert ProviderConfig(base_url="u", protocol="openai", max_concurrency=1).max_concurrency == 1
+
+
+def test_load_settings_from_db_carries_the_concurrency_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path):
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="local", base_url="http://l", protocol="openai", max_concurrency=2))
+            s.add(Provider(name="cloud", base_url="http://c", protocol="openai"))
+            s.commit()
+        with Session(app.state.recorder.engine) as s:
+            settings = load_settings_from_db(s)
+    assert settings.providers["local"].max_concurrency == 2
+    assert settings.providers["cloud"].max_concurrency is None
+
+
+MAX_CONCURRENCY_ERROR = "Maximo de requisicoes simultaneas deve ser um inteiro entre 1 e 10000"
+
+
+def test_create_provider_with_a_concurrency_limit_reaches_db_settings_and_pool(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers",
+            data={"name": "local", "base_url": "http://l", "protocol": "openai", "max_concurrency": "2"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "local")).scalar_one()
+    assert p.max_concurrency == 2
+    assert app.state.settings.providers["local"].max_concurrency == 2
+    # O pool reconstruido ja conhece o limite novo.
+    assert app.state.pool.limit("local") == 2
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_create_provider_with_an_empty_limit_is_unlimited(monkeypatch, tmp_path, raw):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers",
+            data={"name": "cloud", "base_url": "http://c", "protocol": "openai", "max_concurrency": raw},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "cloud")).scalar_one()
+    assert p.max_concurrency is None
+    assert app.state.pool.limit("cloud") is None
+
+
+@pytest.mark.parametrize(
+    "raw",
+    # "99999999999999999999" estourava o INTEGER do SQLite no commit (500);
+    # "1_000" e digitos arabe-indicos passavam pelo `int()` do Python.
+    # "9" * 5000 passa no isdigit() e o int() do Python recusa com ValueError
+    # (limite de 4300 digitos) -> era 500.
+    ["abc", "0", "-3", "1.5", "99999999999999999999", "10001", "1_000", "\u0661\u0662", "+5", pytest.param("9" * 5000, id="5000-digitos")],
+)
+def test_create_provider_with_an_invalid_limit_is_refused(monkeypatch, tmp_path, raw):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers",
+            data={"name": "bad", "base_url": "u", "protocol": "openai", "max_concurrency": raw},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"] == MAX_CONCURRENCY_ERROR
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Provider).where(Provider.name == "bad")).scalar_one_or_none() is None
+
+
+def test_patch_provider_sets_then_clears_the_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai"))
+            s.commit()
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u", "protocol": "openai", "max_concurrency": "3"},
+            cookies=COOKIE,
+        )
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            assert s.execute(select(Provider)).scalar_one().max_concurrency == 3
+        assert app.state.pool.limit("p1") == 3
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u", "protocol": "openai", "max_concurrency": ""},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Provider)).scalar_one().max_concurrency is None
+    assert app.state.pool.limit("p1") is None
+
+
+def test_patch_provider_with_an_invalid_limit_is_refused_and_changes_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", max_concurrency=2))
+            s.commit()
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u2", "protocol": "openai", "max_concurrency": "0"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"] == MAX_CONCURRENCY_ERROR
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider)).scalar_one()
+    assert (p.base_url, p.max_concurrency) == ("u", 2)
+
+
+def test_snapshot_and_rollback_carry_the_limit(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", max_concurrency=2))
+            s.commit()
+            cv = create_config_version(s)
+            cv_id = cv.id
+            assert json.loads(cv.snapshot_json)["providers"][0]["max_concurrency"] == 2
+        c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u", "protocol": "openai", "max_concurrency": "5"},
+            cookies=COOKIE,
+        )
+        r = c.post(f"/admin/config/rollback/{cv_id}", cookies=COOKIE)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Provider)).scalar_one().max_concurrency == 2
+    assert app.state.settings.providers["p1"].max_concurrency == 2
+
+
+def test_rollback_of_an_old_snapshot_without_the_limit_restores_unlimited(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", max_concurrency=4))
+            s.flush()
+            old = {
+                "providers": [{"name": "p1", "base_url": "u", "protocol": "openai", "api_key": False}],
+                "models": [],
+                "routes": [],
+                "default_model": None,
+            }
+            cv = ConfigVersion(snapshot_json=json.dumps(old))
+            s.add(cv)
+            s.commit()
+            cv_id = cv.id
+        r = c.post(f"/admin/config/rollback/{cv_id}", cookies=COOKIE)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Provider)).scalar_one().max_concurrency is None
+
+
+def test_the_provider_form_offers_the_limit_field(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        new = c.get("/admin/config/providers/new", cookies=COOKIE)
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", max_concurrency=2))
+            s.commit()
+        edit = c.get("/admin/config/providers/p1/edit", cookies=COOKIE)
+    assert 'name="max_concurrency"' in new.text
+    assert 'type="number"' in new.text and 'min="1"' in new.text
+    assert "Máximo de requisições simultâneas" in new.text
+    assert "Vazio = sem limite" in new.text
+    assert 'value="2"' in edit.text
+
+
+def test_the_providers_list_shows_the_limit_or_a_dash(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="lim", base_url="u", protocol="openai", api_key="sk-abcd", max_concurrency=7))
+            s.add(Provider(name="sem", base_url="u", protocol="openai", api_key="sk-wxyz"))
+            s.commit()
+        r = c.get("/admin/config/providers", cookies=COOKIE)
+    assert "Simultâneas" in r.text
+    rows = {m.group(1): m.group(0) for m in re.finditer(r"<tr>\s*<td><b>(\w+)</b>.*?</tr>", r.text, re.DOTALL)}
+    assert re.search(r'<td class="n">7</td>', rows["lim"])
+    assert re.search(r'<td class="n">—</td>', rows["sem"])
+
+
+def test_the_limit_accepts_the_ceiling_and_surrounding_spaces(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers",
+            data={"name": "big", "base_url": "u", "protocol": "openai", "max_concurrency": " 10000 "},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Provider)).scalar_one().max_concurrency == 10000
+
+
+def test_patch_provider_that_omits_the_limit_keeps_it(monkeypatch, tmp_path):
+    """Cliente direto que manda so base_url/protocol nao pode apagar o limite
+    -- o mesmo contrato da chave. Presente e vazio (o form) ainda limpa."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", max_concurrency=2))
+            s.commit()
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u2", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider)).scalar_one()
+    assert (p.base_url, p.max_concurrency) == ("u2", 2)
+    assert app.state.pool.limit("p1") == 2
+
+
+def test_patch_unknown_provider_with_an_invalid_limit_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.patch(
+            "/admin/config/providers/nao-existe",
+            data={"base_url": "u", "protocol": "openai", "max_concurrency": "0"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 404

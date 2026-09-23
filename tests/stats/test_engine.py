@@ -219,3 +219,40 @@ def test_um_banco_em_uso_ganha_as_colunas_de_projeto_no_boot(tmp_path):
         assert linha == ("antiga", None)
     finally:
         engine.dispose()
+
+
+def test_uma_tabela_de_provedores_antiga_ganha_o_limite_de_concorrencia(tmp_path):
+    """Banco criado antes do limite por provedor: `providers` sem
+    `max_concurrency`. O boot acrescenta a coluna e a linha antiga fica com
+    NULL, que e "sem limite" -- o comportamento de antes."""
+    import sqlite3
+
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql
+
+    from app.stats.engine import add_missing_columns
+
+    caminho = tmp_path / "provedores-antigos.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE providers (id INTEGER PRIMARY KEY, name VARCHAR(64),"
+        " base_url VARCHAR(512), protocol VARCHAR(16), api_key VARCHAR(512),"
+        " created_at DATETIME, updated_at DATETIME)"
+    )
+    antigo.execute(
+        "INSERT INTO providers (name, base_url, protocol) VALUES ('local', 'http://l', 'openai')"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        colunas = {c["name"] for c in inspect(engine).get_columns("providers")}
+        assert "max_concurrency" in colunas
+        assert add_missing_columns(engine) == []
+        with engine.connect() as conexao:
+            linha = conexao.execute(sql("SELECT name, max_concurrency FROM providers")).one()
+        assert linha == ("local", None)
+    finally:
+        engine.dispose()

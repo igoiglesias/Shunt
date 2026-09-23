@@ -1,3 +1,6 @@
+<!-- A ancora #providers-list via no proprio fragmento: o swap outerHTML dos
+     botoes de acao re-insere o div, mantendo o alvo vivo apos cada troca. -->
+<div id="providers-list">
 {% if providers %}
 <div class="table-container">
 <table>
@@ -6,6 +9,7 @@
   <th>Base URL</th>
   <th>Protocolo</th>
   <th>API Key</th>
+  <th class="n">Simultâneas</th>
   <th class="n">Ações</th>
 </tr></thead>
 <tbody>
@@ -15,6 +19,7 @@
   <td class="mono">{{ p.base_url }}</td>
   <td><span class="chip" aria-pressed="true">{{ p.protocol }}</span></td>
   <td class="mono">{% if p.api_key %}••••{{ p.api_key[-4:] }}{% else %}—{% endif %}</td>
+  <td class="n">{{ p.max_concurrency if p.max_concurrency else '—' }}</td>
   <td class="n">
     <div class="actions">
       <button class="btn btn-sm" hx-get="/admin/config/providers/{{ p.name }}/edit" hx-target="#provider-form" hx-swap="outerHTML">Editar</button>
@@ -31,3 +36,4 @@
 {% else %}
 <p class="empty-state">Nenhum provedor cadastrado.</p>
 {% endif %}
+</div>

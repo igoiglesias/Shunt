@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -492,7 +494,8 @@ async def test_the_total_deadline_cuts_the_chain_short(monkeypatch):
     finally:
         await pool.aclose()
     assert route.call_count == 1
-    assert "vendor/cheap: total deadline exceeded" in result.trace
+    # `cheap` nunca foi chamado: o rastro diz isso, nao que ele estourou prazo.
+    assert "vendor/cheap: not tried, deadline exceeded" in result.trace
     assert "vendor/free: 400 nao deu (attempt 1)" in result.trace
 
 
@@ -1702,3 +1705,170 @@ async def test_the_last_resort_note_names_the_model_not_the_alias():
     finally:
         await pool.aclose()
     assert result.trace[-1] == "qwen3.8-27b: taken anyway, nothing in the chain fits"
+
+
+# --- prazo: um servidor saturado nao pode consumir a cadeia inteira ----------
+
+
+@respx.mock
+async def test_a_read_timeout_moves_to_the_next_candidate_without_retrying(monkeypatch):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=[
+            httpx.ReadTimeout(""),
+            httpx.Response(200, json=ok_payload("vendor/cheap")),
+        ]
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 2
+    assert result.real_model == "vendor/cheap"
+    # O rastro nomeia o motivo, nao so o status: um ReadTimeout tem str() vazio.
+    assert result.trace[0] == "vendor/free: 502 ReadTimeout (attempt 1)"
+
+
+async def _timeout_of_first_call(monkeypatch, *clock):
+    monkeypatch.setattr(dispatcher, "TOTAL_DEADLINE", 5.0)
+    monkeypatch.setattr(dispatcher, "time", _Clock(*clock))
+    with respx.mock:
+        route = respx.post("https://api.test/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json=ok_payload("vendor/free"))
+        )
+        pool = UpstreamPool(SETTINGS)
+        try:
+            await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        finally:
+            await pool.aclose()
+    return route.calls[0].request.extensions["timeout"]
+
+
+async def test_the_read_timeout_of_an_attempt_is_bounded_by_the_remaining_deadline(monkeypatch):
+    from app.config.config import TIMEOUT_CONNECT, TIMEOUT_POOL, TIMEOUT_WRITE
+
+    # log, limite (0 + 5), tentativa em 2.0 -> sobram 3s de prazo.
+    timeout = await _timeout_of_first_call(monkeypatch, 0.0, 0.0, 2.0)
+    assert timeout == {
+        "connect": TIMEOUT_CONNECT,
+        "read": 3.0,
+        "write": TIMEOUT_WRITE,
+        "pool": TIMEOUT_POOL,
+    }
+
+
+async def test_the_read_timeout_never_exceeds_the_configured_one(monkeypatch):
+    from app.config.config import TIMEOUT_READ
+
+    monkeypatch.setattr(dispatcher, "TOTAL_DEADLINE", TIMEOUT_READ * 10)
+    monkeypatch.setattr(dispatcher, "time", _Clock(0.0))
+    with respx.mock:
+        route = respx.post("https://api.test/v1/chat/completions").mock(
+            return_value=httpx.Response(200, json=ok_payload("vendor/free"))
+        )
+        pool = UpstreamPool(SETTINGS)
+        try:
+            await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        finally:
+            await pool.aclose()
+    assert route.calls[0].request.extensions["timeout"]["read"] == TIMEOUT_READ
+
+
+async def test_the_read_timeout_keeps_a_floor_when_the_deadline_is_exactly_now(monkeypatch):
+    # tentativa exatamente no limite (5.0): o `>` deixa passar, e zero nao
+    # pode chegar ao httpx (read=0 estoura na hora).
+    timeout = await _timeout_of_first_call(monkeypatch, 0.0, 0.0, 5.0)
+    assert timeout["read"] == dispatcher.READ_FLOOR
+    assert dispatcher.READ_FLOOR > 0
+
+
+async def _dispatch_503_then_ok(monkeypatch, wait):
+    """Primeira resposta 503 (RETRY), a seguinte 200. Prazo 5s, relogio em 1.0."""
+    slept: list[float] = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(dispatcher, "TOTAL_DEADLINE", 5.0)
+    monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 0.0, 1.0))
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: wait)
+    monkeypatch.setattr(dispatcher.asyncio, "sleep", fake_sleep)
+    with respx.mock:
+        route = respx.post("https://api.test/v1/chat/completions").mock(
+            side_effect=[
+                httpx.Response(503, json={"error": {"message": "ocupado"}}),
+                httpx.Response(200, json=ok_payload("vendor/free")),
+            ]
+        )
+        pool = UpstreamPool(SETTINGS)
+        try:
+            result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        finally:
+            await pool.aclose()
+    sent = [json.loads(call.request.content)["model"] for call in route.calls]
+    return result, sent, slept
+
+
+async def test_a_backoff_that_would_pass_the_deadline_is_not_slept(monkeypatch):
+    # 1.0 + 10.0 > 5.0: dormir so para acordar depois do prazo gasta o tempo
+    # que o proximo candidato ainda tinha.
+    result, sent, slept = await _dispatch_503_then_ok(monkeypatch, 10.0)
+    assert slept == []
+    assert sent == ["vendor/free", "vendor/cheap"]
+    assert "vendor/free: retry skipped, backoff would pass the deadline" in result.trace
+
+
+async def test_a_backoff_that_ends_exactly_at_the_deadline_is_still_slept(monkeypatch):
+    # 1.0 + 4.0 == 5.0: nao passa do prazo, entao a espera acontece e o
+    # mesmo candidato e tentado de novo.
+    result, sent, slept = await _dispatch_503_then_ok(monkeypatch, 4.0)
+    assert slept == [4.0]
+    assert sent == ["vendor/free", "vendor/free"]
+    assert not any("retry skipped" in line for line in result.trace)
+
+
+@respx.mock
+async def test_the_trace_separates_a_candidate_cut_mid_retry_from_one_never_tried(monkeypatch):
+    # log, limite (0 + 120), 1a tentativa em 1.0, checagem do backoff em 1.0,
+    # 2a tentativa ja fora do prazo -- e o proximo candidato tambem.
+    monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 0.0, 1.0, 1.0, 10_000.0))
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(503, json={"error": {"message": "ocupado"}})
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    assert result.trace == [
+        "vendor/free: 503 ocupado (attempt 1)",
+        "vendor/free: total deadline exceeded",
+        "vendor/cheap: not tried, deadline exceeded",
+    ]
+
+
+async def test_the_floor_does_not_raise_a_remaining_deadline_above_it(monkeypatch):
+    # O lado do clamp que NAO corta: sobram 0.8s (acima do piso), e e isso que
+    # vai para o httpx -- o piso so entra quando o que sobra e menor que ele.
+    timeout = await _timeout_of_first_call(monkeypatch, 0.0, 0.0, 4.2)
+    assert timeout["read"] == pytest.approx(0.8)
+
+
+@respx.mock
+async def test_the_buffered_backoff_grows_with_the_attempt_number(monkeypatch):
+    seen: list[int] = []
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: seen.append(attempt) or 0.0)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("recusou")
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+    # Dois candidatos, cada um com esperas 1, 2, ... ate MAX_ATTEMPTS - 1.
+    per_candidate = list(range(1, dispatcher.MAX_ATTEMPTS))
+    assert seen == per_candidate * 2

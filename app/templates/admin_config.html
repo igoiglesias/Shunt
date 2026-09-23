@@ -13,9 +13,12 @@
   .admin-nav a[aria-current="page"] { color: var(--ground); background: var(--ink); font-weight: 600; }
 
   .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  /* min-width:0 nos itens: sem isso o min-content do select (o option mais
+     longo) estoura a track e cria scroll horizontal no mobile. */
+  .form-grid > * { min-width: 0; }
+  .form-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
   .form-group label { font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--dim); }
-  .form-group input, .form-group select { color: var(--ink); background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px; padding: 6px 10px; font-size: 13px; }
+  .form-group input, .form-group select { color: var(--ink); background: var(--panel-2); border: 1px solid var(--edge); border-radius: 2px; padding: 6px 10px; font-size: 13px; min-width: 0; max-width: 100%; }
   .form-group input:focus, .form-group select:focus { outline: 2px solid var(--warning); outline-offset: 2px; }
   .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
   .form-row .form-group { flex: 1; min-width: 150px; }
@@ -94,7 +97,7 @@
       <h2>Provedores</h2>
       <button class="btn btn-primary" hx-get="/admin/config/providers/new" hx-target="#provider-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="providers-list">{% include "_providers.html" %}</div>
+    {% include "_providers.html" %}
     <div id="provider-form"></div>
   </section>
 
@@ -104,7 +107,7 @@
       <h2>Modelos</h2>
       <button class="btn btn-primary" hx-get="/admin/config/models/new" hx-target="#model-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="models-list">{% include "_models.html" %}</div>
+    {% include "_models.html" %}
     <div id="model-form"></div>
   </section>
 
@@ -114,7 +117,7 @@
       <h2>Rotas e Fallback</h2>
       <button class="btn btn-primary" hx-get="/admin/config/routes/new" hx-target="#route-form" hx-swap="outerHTML">Nova Rota</button>
     </div>
-    <div id="routes-list">{% include "_routes.html" %}</div>
+    {% include "_routes.html" %}
     <div id="route-form"></div>
   </section>
 
@@ -123,7 +126,7 @@
     <div class="section-header">
       <h2>Modelo Padrão</h2>
     </div>
-    <div id="default-content">{% include "_default.html" %}</div>
+    {% include "_default.html" %}
   </section>
 
   <!-- History Section -->

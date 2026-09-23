@@ -1,3 +1,7 @@
+<!-- A ancora #provider-form via junto no fragmento: o swap outerHTML dos
+     botoes re-insere o div a cada troca, entao Novo/Editar/Cancelar em
+     sequencia funcionam sem recarregar a pagina. -->
+<div id="provider-form">
 {% if provider %}
 <form hx-patch="/admin/config/providers/{{ provider.name }}" hx-target="#providers-list" hx-swap="outerHTML">
   <h3>Editar Provedor: {{ provider.name }}</h3>
@@ -29,9 +33,17 @@
            placeholder="{% if provider and provider.api_key %}deixe vazio para manter a chave atual{% else %}chave do provedor (opcional){% endif %}"
            value="">
   </div>
+  <div class="form-group">
+    <label for="max_concurrency">Máximo de requisições simultâneas</label>
+    <input type="number" id="max_concurrency" name="max_concurrency" min="1" step="1"
+           inputmode="numeric" aria-describedby="max_concurrency-help"
+           value="{{ provider.max_concurrency if provider and provider.max_concurrency else '' }}">
+    <small id="max_concurrency-help" class="notice">Vazio = sem limite</small>
+  </div>
 </div>
 <div style="margin-top: 16px; display: flex; gap: 8px;">
   <button type="submit" class="btn btn-primary">{% if provider %}Salvar{% else %}Criar{% endif %}</button>
-  <button type="button" class="btn" hx-get="/admin/config/providers" hx-target="#provider-form" hx-swap="outerHTML">Cancelar</button>
+  <button type="button" class="btn" hx-get="/admin/config/sections/provider/form-reset" hx-target="#provider-form" hx-swap="outerHTML">Cancelar</button>
 </div>
 </form>
+</div>

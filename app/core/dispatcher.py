@@ -37,6 +37,10 @@ from app.config.config import (
     FIRST_EVENT_DEADLINE,
     MAX_ATTEMPTS,
     PING_INTERVAL,
+    TIMEOUT_CONNECT,
+    TIMEOUT_POOL,
+    TIMEOUT_READ,
+    TIMEOUT_WRITE,
     TOTAL_DEADLINE,
 )
 from app.config.settings import Settings
@@ -71,6 +75,11 @@ PATHS = {
     ("anthropic", "messages"): "/v1/messages",
     ("anthropic", "chat"): "/v1/messages",
 }
+
+# Piso do read timeout de uma tentativa bufferizada. A checagem de prazo usa
+# `>`, entao uma tentativa pode comecar com zero segundos sobrando; zero no
+# httpx estoura na hora, sem dar ao provedor nem a chance de responder.
+READ_FLOOR = 0.5
 
 # `host` names the wrong destination once we re-address the request; the other
 # four all describe the inbound body, which we re-serialise before sending.
@@ -473,7 +482,10 @@ async def _dispatch(
         )
 
     deadline = time.monotonic() + TOTAL_DEADLINE
-    last_status, last_message = 502, "no candidate answered"
+    tally = _Buffered()
+    # O primeiro candidato pulado por estar cheio, com o payload ja montado:
+    # e nele que o ultimo recurso espera, se ninguem mais for tentado.
+    first_busy: tuple[Candidate, dict] | None = None
 
     for candidate in chain:
         # O rotulo canonico e o MODELO. Pelo alias, o mesmo candidato fisico
@@ -509,57 +521,143 @@ async def _dispatch(
             # next one may speak the client's protocol and need no translation.
             trace.append(f"{label}: request translation failed: {err}")
             continue
-        client = pool.get(candidate.provider)
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            if time.monotonic() > deadline:
-                trace.append(f"{label}: total deadline exceeded")
-                break
-            response, exc = None, None
-            try:
-                response = await client.post(
-                    PATHS[(candidate.protocol, req.endpoint)],
-                    json=payload,
-                    headers=outbound_headers(req, candidate, settings),
+        # Provedor cheio e pulado NA HORA: esperar na fila dele e o que segurava
+        # a requisicao ate o ReadTimeout. O slot vale para todas as tentativas
+        # deste candidato e sai em todo caminho, inclusive excecao.
+        slot = pool.try_slot(candidate.provider)
+        if slot is None:
+            trace.append(f"{label}: {_busy(pool, candidate.provider)}")
+            if first_busy is None:
+                first_busy = (candidate, payload)
+            continue
+        tally.tried = True
+        with slot:
+            async with pool.client(candidate.provider) as client:
+                result = await _attempts(
+                    req, settings, client, candidate, payload, deadline, trace, tally
                 )
-            except httpx.HTTPError as err:
-                exc = err
-            outcome = classify(
-                response.status_code if response else None, exc, _retry_after(response)
-            )
-            if outcome is Outcome.OK and response is not None:
-                try:
-                    data = _translate_response(response.json(), req, candidate)
-                except Exception:  # noqa: BLE001 - a 2xx we cannot read or cannot
-                    # shape is this candidate's failure, not the request's. Not
-                    # JSON at all (an HTML page from an interposed gateway, a
-                    # truncated response) and JSON of the wrong shape (a list, a
-                    # scalar, `null`) fail in different places and mean the same
-                    # thing to the caller. The error path was already lenient
-                    # about exactly this; the success path was not.
-                    last_status = 502
-                    last_message = "upstream 2xx body is not a usable JSON object"
-                    trace.append(f"{label}: unreadable body (attempt {attempt})")
-                    break
-                return ShuntResult(
-                    response.status_code, data, candidate.model, trace, candidate.provider
-                )
-            if response is not None:
-                last_status, last_message = response.status_code, _error_message(response)
-            else:
-                last_status, last_message = 502, _exception_text(exc)
-            # O motivo que o provedor devolveu entra no rastro: o status sozinho
-            # nao diagnostica. Cap em 300 porque um HTML ou validacao gigante
-            # nao pode virar uma linha de log ilegivel.
-            trace.append(
-                f"{label}: {last_status} {last_message[:300]} (attempt {attempt})"
-            )
-            if outcome is Outcome.SKIP:
-                break
-            if attempt < MAX_ATTEMPTS:
-                await asyncio.sleep(backoff(attempt))
+        if result is not None:
+            return result
 
-    message = f"{last_message} - tried: " + "; ".join(trace)
-    return ShuntResult(last_status, error_body(req.protocol, last_status, message), None, trace)
+    if first_busy is not None and not tally.tried:
+        # Ultimo recurso: todo candidato estava cheio ou inelegivel. Antes de
+        # devolver erro, espera o slot do PRIMEIRO cheio ate o prazo total --
+        # um slot que vaga em segundos vale mais que um 502 imediato.
+        candidate, payload = first_busy
+        slot = await pool.wait_slot(candidate.provider, deadline - time.monotonic())
+        if slot is None:
+            trace.append(f"{candidate.model}: still busy at the deadline")
+        else:
+            with slot:
+                async with pool.client(candidate.provider) as client:
+                    result = await _attempts(
+                        req, settings, client, candidate, payload, deadline, trace, tally
+                    )
+            if result is not None:
+                return result
+
+    message = f"{tally.last_message} - tried: " + "; ".join(trace)
+    return ShuntResult(
+        tally.last_status, error_body(req.protocol, tally.last_status, message), None, trace
+    )
+
+
+def _busy(pool: UpstreamPool, provider: str) -> str:
+    return f"busy ({pool.in_use(provider)}/{pool.limit(provider)} in use)"
+
+
+@dataclass
+class _Buffered:
+    """O que o laco bufferizado carrega de um candidato para o proximo."""
+
+    last_status: int = 502
+    last_message: str = "no candidate answered"
+    tried: bool = False  # algum candidato chegou a ter slot e laco de tentativas
+
+
+async def _attempts(
+    req: ShuntRequest,
+    settings: Settings,
+    client: httpx.AsyncClient,
+    candidate: Candidate,
+    payload: dict,
+    deadline: float,
+    trace: list[str],
+    tally: _Buffered,
+) -> ShuntResult | None:
+    """As tentativas de UM candidato; o resultado se ele respondeu, ou None
+    para a cadeia seguir. Quem chama segura o slot durante tudo isto."""
+    label = candidate.model
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        now = time.monotonic()
+        if now > deadline:
+            # Quem nunca foi chamado nao "estourou" prazo nenhum: o rastro
+            # tem que dizer que o candidato nem chegou a ser tentado.
+            if attempt == 1:
+                trace.append(f"{label}: not tried, deadline exceeded")
+            else:
+                trace.append(f"{label}: total deadline exceeded")
+            return None
+        # O read timeout de cada tentativa e limitado pelo prazo que sobra:
+        # sem isso, um servidor saturado segura a tentativa por TIMEOUT_READ
+        # inteiro mesmo quando o prazo total ja esta quase no fim.
+        timeout = httpx.Timeout(
+            connect=TIMEOUT_CONNECT,
+            read=max(min(TIMEOUT_READ, deadline - now), READ_FLOOR),
+            write=TIMEOUT_WRITE,
+            pool=TIMEOUT_POOL,
+        )
+        response, exc = None, None
+        try:
+            response = await client.post(
+                PATHS[(candidate.protocol, req.endpoint)],
+                json=payload,
+                headers=outbound_headers(req, candidate, settings),
+                timeout=timeout,
+            )
+        except httpx.HTTPError as err:
+            exc = err
+        outcome = classify(
+            response.status_code if response else None, exc, _retry_after(response)
+        )
+        if outcome is Outcome.OK and response is not None:
+            try:
+                data = _translate_response(response.json(), req, candidate)
+            except Exception:  # noqa: BLE001 - a 2xx we cannot read or cannot
+                # shape is this candidate's failure, not the request's. Not
+                # JSON at all (an HTML page from an interposed gateway, a
+                # truncated response) and JSON of the wrong shape (a list, a
+                # scalar, `null`) fail in different places and mean the same
+                # thing to the caller. The error path was already lenient
+                # about exactly this; the success path was not.
+                tally.last_status = 502
+                tally.last_message = "upstream 2xx body is not a usable JSON object"
+                trace.append(f"{label}: unreadable body (attempt {attempt})")
+                return None
+            return ShuntResult(
+                response.status_code, data, candidate.model, trace, candidate.provider
+            )
+        if response is not None:
+            tally.last_status, tally.last_message = response.status_code, _error_message(response)
+        else:
+            tally.last_status, tally.last_message = 502, _exception_text(exc)
+        # O motivo que o provedor devolveu entra no rastro: o status sozinho
+        # nao diagnostica. Cap em 300 porque um HTML ou validacao gigante
+        # nao pode virar uma linha de log ilegivel.
+        trace.append(
+            f"{label}: {tally.last_status} {tally.last_message[:300]} (attempt {attempt})"
+        )
+        if outcome is Outcome.SKIP:
+            return None
+        if attempt < MAX_ATTEMPTS:
+            wait = backoff(attempt)
+            # Dormir para acordar depois do prazo so gasta o tempo que o
+            # proximo candidato ainda tinha: desiste deste e segue.
+            if time.monotonic() + wait > deadline:
+                trace.append(f"{label}: retry skipped, backoff would pass the deadline")
+                return None
+            await asyncio.sleep(wait)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -871,6 +969,10 @@ async def _stream_chain(
         return
 
     last_message = "no candidate answered"
+    # Mesma regra do caminho bufferizado: o primeiro candidato cheio e guardado
+    # para o ultimo recurso, que so vale se nenhum outro chegou a ser tentado.
+    first_busy: tuple[Candidate, dict] | None = None
+    tried = False
 
     for candidate in chain:
         # Mesmo rotulo canonico do caminho bufferizado: o MODELO, nunca o alias.
@@ -903,136 +1005,227 @@ async def _stream_chain(
             # dead chain: the next may speak the client's protocol untranslated.
             trace.append(f"{label}: request translation failed: {err}")
             continue
-        client = pool.get(candidate.provider)
-        # Retry belongs here and only here: no byte of this candidate has been
-        # emitted, so a transient connect error is exactly the buffered case
-        # `classify` already answers RETRY for. Past this point the response
-        # exists and a stream cannot be replayed.
-        request = client.build_request(
-            "POST",
-            PATHS[(candidate.protocol, req.endpoint)],
-            json=payload,
-            headers=outbound_headers(req, candidate, settings),
-        )
-        response = None
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            try:
-                response = await client.send(request, stream=True)
-            except httpx.HTTPError as err:
-                trace.append(f"{label}: {_exception_text(err)} (attempt {attempt})")
-                last_message = _exception_text(err)
-                response = None
-                if classify(None, err, None) is not Outcome.RETRY:
-                    break
-                if attempt < MAX_ATTEMPTS:
-                    await asyncio.sleep(backoff(attempt))
-                continue
-            if response.status_code < 400:
-                break
-            # A 429/503/etc. arriving in the response headers, before any byte
-            # of the body reached the client, is exactly the buffered case:
-            # `classify` already knows which statuses are worth a retry.
-            # `aread()` materialises the streamed body, which is what makes
-            # `_error_message` (shared with `dispatch`) usable on it -- and it
-            # closes the response on its way out, so no `aclose()` follows.
-            outcome = classify(response.status_code, None, _retry_after(response))
-            await response.aread()
-            message = _error_message(response)
-            # Mesmo motivo do caminho bufferizado: o status so nao diagnostica.
-            trace.append(
-                f"{label}: {response.status_code} {message[:300]} (attempt {attempt})"
-            )
-            last_message = message
-            if outcome is not Outcome.RETRY or attempt >= MAX_ATTEMPTS:
-                break
-            await asyncio.sleep(backoff(attempt))
-        if response is None:
+        slot = pool.try_slot(candidate.provider)
+        if slot is None:
+            trace.append(f"{label}: {_busy(pool, candidate.provider)}")
+            if first_busy is None:
+                first_busy = (candidate, payload)
             continue
-
-        if response.status_code >= 400:
-            continue
-
-        if candidate.protocol == req.protocol:
-            passthrough.happened = True
-            tally.candidate = candidate.model
-            tally.provider = candidate.provider
-            try:
-                async for raw in response.aiter_bytes():
-                    yield raw
-            finally:
-                await response.aclose()
+        tried = True
+        leg = _Leg()
+        # O slot vale pelo stream INTEIRO, inclusive depois de entregar bytes
+        # ao cliente: o provedor segue gerando ate a resposta fechar. `with`
+        # em volta do `aclosing` libera tambem quando o cliente vai embora --
+        # o GeneratorExit fecha o gerador interno (que fecha a resposta) e so
+        # entao sai do `with`.
+        with slot:
+            async with (
+                pool.client(candidate.provider) as client,
+                aclosing(
+                    _stream_candidate(
+                        req, settings, client, candidate, payload, passthrough, tally, leg
+                    )
+                ) as legs,
+            ):
+                async for chunk in legs:
+                    yield chunk
+        if leg.last_message is not None:
+            last_message = leg.last_message
+        if leg.done:
             return
 
-        decoder = SSEDecoder()
-        translator = _stream_translator(req)
-        state = _Reading()
-        started_at = _now()
-        last_ping = started_at
-        try:
-            async for raw in response.aiter_bytes():
-                now = _now()
-                if not state.started:
-                    if now - started_at > FIRST_EVENT_DEADLINE:
-                        state.failed = f"no valid event within {FIRST_EVENT_DEADLINE}s"
-                        break
-                    if now - last_ping > PING_INTERVAL:
-                        last_ping = now
-                        yield _keepalive()
-                for payload_bytes in _drain(req, translator, decoder.feed(raw), state):
-                    yield payload_bytes
-                if state.committed or state.failed is not None:
-                    break
-            else:
-                # Only when the body ended on its own terms. A provider that
-                # closes without the final blank line leaves its last event in
-                # the decoder, and dropping it does more than lose an event:
-                # `started` would stay False and a working provider would be
-                # recorded as having answered nothing.
-                for payload_bytes in _drain(req, translator, decoder.flush(), state):
-                    yield payload_bytes
-        except httpx.HTTPError as err:
-            # The response already existed, so the `send` handler above never
-            # sees this: a read timeout in mid-generation, a provider dropping
-            # the connection. Whether it is a fallback or an error on the wire
-            # is decided by the same thing everything else here is decided by.
-            if state.started:
-                # The error event, and then NOTHING else here: leaving
-                # `committed` unset drops through to the normal close below,
-                # so a stream cut in mid-flight still gets its `_finish()` and
-                # the client's parser releases its buffer. That is the case
-                # Task 17 made `finish()` idempotent for. An in-band
-                # `{"error": ...}` deliberately gets no such close: that is the
-                # provider terminating its own stream in its own protocol
-                # (Anthropic's API does exactly that), and a `message_stop`
-                # after it would tell the client the message completed.
-                yield _stream_error(req, _exception_text(err))
-            else:
-                state.failed = _exception_text(err)
-        finally:
-            await response.aclose()
-
-        if state.committed:
-            tally.candidate = candidate.model
-            tally.usage = translator.usage()
-            _absorb(tally, translator, candidate)
-            return
-        if state.failed is None and not state.started:
-            state.failed = "stream ended before the first valid event"
-        if state.failed is not None:
-            trace.append(f"{label}: {state.failed}")
-            last_message = state.failed
-            continue
-
-        tally.candidate = candidate.model
-        for chunk_bytes in _finish(req, translator):
-            yield chunk_bytes
-        tally.usage = translator.usage()
-        _absorb(tally, translator, candidate)
-        return
+    if first_busy is not None and not tried:
+        # Ultimo recurso do streaming: nao ha TOTAL_DEADLINE aqui (ver o
+        # comentario do bloco), entao a espera pelo slot do primeiro candidato
+        # cheio usa FIRST_EVENT_DEADLINE -- e o mesmo tanto que o cliente ja
+        # aceita esperar pelo primeiro evento. Enquanto espera, o mesmo
+        # keep-alive de comentario SSE mantem a conexao do cliente viva.
+        candidate, payload = first_busy
+        label = candidate.model
+        # Uma espera so, na fila do provedor do inicio ao fim: entre os pings
+        # (e durante o `yield`) ela continua na vez dela. Sair do `with` sem
+        # slot -- prazo ou cliente embora -- desiste da vez sem perder um
+        # lugar que tenha chegado no mesmo tique.
+        waiting_until = _now() + FIRST_EVENT_DEADLINE
+        with pool.request_slot(candidate.provider) as request:
+            slot = await request.wait(min(PING_INTERVAL, waiting_until - _now()))
+            while slot is None and _now() < waiting_until:
+                yield _keepalive()
+                slot = await request.wait(min(PING_INTERVAL, waiting_until - _now()))
+        if slot is None:
+            trace.append(f"{label}: still busy at the deadline")
+        else:
+            leg = _Leg()
+            with slot:
+                async with (
+                    pool.client(candidate.provider) as client,
+                    aclosing(
+                        _stream_candidate(
+                            req, settings, client, candidate, payload, passthrough, tally, leg
+                        )
+                    ) as legs,
+                ):
+                    async for chunk in legs:
+                        yield chunk
+            if leg.last_message is not None:
+                last_message = leg.last_message
+            if leg.done:
+                return
 
     tally.status = 502
     tally.error_type = "api_error"
     yield _stream_error(req, f"{last_message} - tried: " + "; ".join(trace))
+
+
+@dataclass
+class _Leg:
+    """O que UM candidato do streaming decidiu, para o laco da cadeia."""
+
+    done: bool = False  # a requisicao terminou aqui (sucesso ou erro ja no fio)
+    last_message: str | None = None  # motivo da falha, quando a cadeia segue
+
+
+async def _stream_candidate(
+    req: ShuntRequest,
+    settings: Settings,
+    client: httpx.AsyncClient,
+    candidate: Candidate,
+    payload: dict,
+    passthrough: _Passthrough,
+    tally: _Tally,
+    leg: _Leg,
+) -> AsyncGenerator[bytes]:
+    """Conecta, le e traduz o stream de UM candidato. Quem chama segura o slot
+    enquanto este gerador vive."""
+    label = candidate.model
+    trace = tally.trace
+    # Retry belongs here and only here: no byte of this candidate has been
+    # emitted, so a transient connect error is exactly the buffered case
+    # `classify` already answers RETRY for. Past this point the response
+    # exists and a stream cannot be replayed.
+    request = client.build_request(
+        "POST",
+        PATHS[(candidate.protocol, req.endpoint)],
+        json=payload,
+        headers=outbound_headers(req, candidate, settings),
+    )
+    response = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = await client.send(request, stream=True)
+        except httpx.HTTPError as err:
+            trace.append(f"{label}: {_exception_text(err)} (attempt {attempt})")
+            leg.last_message = _exception_text(err)
+            response = None
+            if classify(None, err, None) is not Outcome.RETRY:
+                break
+            if attempt < MAX_ATTEMPTS:
+                await asyncio.sleep(backoff(attempt))
+            continue
+        if response.status_code < 400:
+            break
+        # A 429/503/etc. arriving in the response headers, before any byte
+        # of the body reached the client, is exactly the buffered case:
+        # `classify` already knows which statuses are worth a retry.
+        # `aread()` materialises the streamed body, which is what makes
+        # `_error_message` (shared with `dispatch`) usable on it -- and it
+        # closes the response on its way out, so no `aclose()` follows.
+        outcome = classify(response.status_code, None, _retry_after(response))
+        await response.aread()
+        message = _error_message(response)
+        # Mesmo motivo do caminho bufferizado: o status so nao diagnostica.
+        trace.append(
+            f"{label}: {response.status_code} {message[:300]} (attempt {attempt})"
+        )
+        leg.last_message = message
+        if outcome is not Outcome.RETRY or attempt >= MAX_ATTEMPTS:
+            break
+        await asyncio.sleep(backoff(attempt))
+    if response is None:
+        return
+
+    if response.status_code >= 400:
+        return
+
+    if candidate.protocol == req.protocol:
+        passthrough.happened = True
+        tally.candidate = candidate.model
+        tally.provider = candidate.provider
+        try:
+            async for raw in response.aiter_bytes():
+                yield raw
+        finally:
+            await response.aclose()
+        leg.done = True
+        return
+
+    decoder = SSEDecoder()
+    translator = _stream_translator(req)
+    state = _Reading()
+    started_at = _now()
+    last_ping = started_at
+    try:
+        async for raw in response.aiter_bytes():
+            now = _now()
+            if not state.started:
+                if now - started_at > FIRST_EVENT_DEADLINE:
+                    state.failed = f"no valid event within {FIRST_EVENT_DEADLINE}s"
+                    break
+                if now - last_ping > PING_INTERVAL:
+                    last_ping = now
+                    yield _keepalive()
+            for payload_bytes in _drain(req, translator, decoder.feed(raw), state):
+                yield payload_bytes
+            if state.committed or state.failed is not None:
+                break
+        else:
+            # Only when the body ended on its own terms. A provider that
+            # closes without the final blank line leaves its last event in
+            # the decoder, and dropping it does more than lose an event:
+            # `started` would stay False and a working provider would be
+            # recorded as having answered nothing.
+            for payload_bytes in _drain(req, translator, decoder.flush(), state):
+                yield payload_bytes
+    except httpx.HTTPError as err:
+        # The response already existed, so the `send` handler above never
+        # sees this: a read timeout in mid-generation, a provider dropping
+        # the connection. Whether it is a fallback or an error on the wire
+        # is decided by the same thing everything else here is decided by.
+        if state.started:
+            # The error event, and then NOTHING else here: leaving
+            # `committed` unset drops through to the normal close below,
+            # so a stream cut in mid-flight still gets its `_finish()` and
+            # the client's parser releases its buffer. That is the case
+            # Task 17 made `finish()` idempotent for. An in-band
+            # `{"error": ...}` deliberately gets no such close: that is the
+            # provider terminating its own stream in its own protocol
+            # (Anthropic's API does exactly that), and a `message_stop`
+            # after it would tell the client the message completed.
+            yield _stream_error(req, _exception_text(err))
+        else:
+            state.failed = _exception_text(err)
+    finally:
+        await response.aclose()
+
+    if state.committed:
+        tally.candidate = candidate.model
+        tally.usage = translator.usage()
+        _absorb(tally, translator, candidate)
+        leg.done = True
+        return
+    if state.failed is None and not state.started:
+        state.failed = "stream ended before the first valid event"
+    if state.failed is not None:
+        trace.append(f"{label}: {state.failed}")
+        leg.last_message = state.failed
+        return
+
+    tally.candidate = candidate.model
+    for chunk_bytes in _finish(req, translator):
+        yield chunk_bytes
+    tally.usage = translator.usage()
+    _absorb(tally, translator, candidate)
+    leg.done = True
 
 
 async def dispatch_stream(

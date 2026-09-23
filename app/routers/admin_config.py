@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import Settings, load_settings_from_db
 from app.core.auth import require_admin
 from app.core.upstream import UpstreamPool
+from app.routers._openapi_docs import ADMIN_SESSION as _SESSION
 from app.stats.models import (
     ConfigVersion,
     Model,
@@ -20,7 +21,10 @@ from app.stats.models import (
 )
 from app.templates import render
 
-router = APIRouter(prefix="/admin/config", tags=["admin-config"])
+# Sem tag no router: as telas HTML ficam fora do /docs, e a unica rota
+# publicada (`/reload`) declara a sua propria tag.
+router = APIRouter(prefix="/admin/config")
+
 
 # --- Helpers ---
 
@@ -54,6 +58,40 @@ async def apply_settings(app, settings: Settings) -> None:
     app.state.pool = UpstreamPool(settings)
 
 
+# Teto do limite por provedor. Nenhum provedor real atende dez mil pedidos
+# simultaneos num processo so; o teto existe para que um numero absurdo vire
+# 400 aqui em vez de OverflowError (500) no commit do SQLite.
+MAX_CONCURRENCY_CEILING = 10000
+
+
+def _max_concurrency(raw: str | None) -> int | None:
+    """Le o limite de concorrencia do form: vazio = sem limite (NULL).
+
+    So digitos ASCII, de 1 ate o teto. `int()` sozinho aceitava `1_000`,
+    `+5` e digitos arabe-indicos, e nao tinha teto. Qualquer outra coisa e 400
+    antes de commitar: gravado, o valor quebraria `ProviderConfig` em todo
+    reload seguinte.
+    """
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    # O comprimento vem antes do `int()`: acima de 4300 digitos o Python
+    # recusa a conversao com ValueError, e o pedido virava 500.
+    if (
+        not (text.isascii() and text.isdigit())
+        or len(text) > len(str(MAX_CONCURRENCY_CEILING))
+        or not 1 <= int(text) <= MAX_CONCURRENCY_CEILING
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Maximo de requisicoes simultaneas deve ser um inteiro entre 1 e "
+                f"{MAX_CONCURRENCY_CEILING}"
+            ),
+        )
+    return int(text)
+
+
 def snapshot_current_settings(session: Session) -> dict:
     """Gera snapshot JSON da configuracao atual."""
     providers = session.execute(select(Provider).order_by(Provider.id)).scalars().all()
@@ -79,6 +117,9 @@ def snapshot_current_settings(session: Session) -> dict:
                 # auditoria fica com a credencial em claro. Registramos
                 # apenas se ela existe; o valor real so muda no providers.
                 "api_key": bool(p.api_key),
+                # Snapshot antigo nao tem a chave: `Provider(**pdata)` no
+                # rollback cai no default da coluna, NULL = sem limite.
+                "max_concurrency": p.max_concurrency,
             }
             for p in providers
         ],
@@ -120,7 +161,7 @@ def create_config_version(session: Session) -> ConfigVersion:
 # --- Pages ---
 
 
-@router.get("", response_class=HTMLResponse)
+@router.get("", response_class=HTMLResponse, include_in_schema=False)
 async def admin_config_page(request: Request, _: None = Depends(require_admin)):
     """Pagina principal de administracao de configuracao."""
     engine = request_engine(request)
@@ -157,7 +198,7 @@ async def admin_config_page(request: Request, _: None = Depends(require_admin)):
 # --- Providers ---
 
 
-@router.get("/providers", response_class=HTMLResponse)
+@router.get("/providers", response_class=HTMLResponse, include_in_schema=False)
 async def list_providers(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -165,15 +206,17 @@ async def list_providers(request: Request, _: None = Depends(require_admin)):
     return render("_providers.html", request=request, providers=providers)
 
 
-@router.post("/providers", response_class=HTMLResponse)
+@router.post("/providers", response_class=HTMLResponse, include_in_schema=False)
 async def create_provider(
     request: Request,
     name: Annotated[str, Form()],
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
     api_key: Annotated[str | None, Form()] = None,
+    max_concurrency: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
+    limit = _max_concurrency(max_concurrency)
     engine = request_engine(request)
     with Session(engine) as session:
         if session.execute(select(Provider).where(Provider.name == name)).scalar_one_or_none():
@@ -182,7 +225,13 @@ async def create_provider(
             # Sem isso o valor invalido commita e load_settings_from_db levanta
             # ValidationError depois -> 500 em toda mutacao ate a linha sair.
             raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
-        p = Provider(name=name, base_url=base_url, protocol=protocol, api_key=api_key)
+        p = Provider(
+            name=name,
+            base_url=base_url,
+            protocol=protocol,
+            api_key=api_key,
+            max_concurrency=limit,
+        )
         session.add(p)
         session.commit()
         create_config_version(session)
@@ -191,15 +240,19 @@ async def create_provider(
     return await list_providers(request)
 
 
-@router.patch("/providers/{name}", response_class=HTMLResponse)
+@router.patch("/providers/{name}", response_class=HTMLResponse, include_in_schema=False)
 async def update_provider(
     request: Request,
     name: str,
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
     api_key: Annotated[str | None, Form()] = None,
+    max_concurrency: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
+    # O FastAPI entrega ausente e vazio como o mesmo None; aqui eles
+    # significam coisas diferentes, entao a presenca vem do form cru.
+    limit_sent = "max_concurrency" in await request.form()
     engine = request_engine(request)
     with Session(engine) as session:
         p = session.execute(select(Provider).where(Provider.name == name)).scalar_one_or_none()
@@ -207,8 +260,14 @@ async def update_provider(
             raise HTTPException(status_code=404, detail="Provider nao encontrado")
         if protocol not in ("openai", "anthropic"):
             raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
+        limit = _max_concurrency(max_concurrency)
         p.base_url = base_url
         p.protocol = protocol
+        # Campo AUSENTE preserva o limite (cliente direto que so mexe na URL,
+        # mesmo contrato da chave). Presente e vazio SIGNIFICA sem limite: e
+        # assim que o form, que sempre envia o campo, remove o limite.
+        if limit_sent:
+            p.max_concurrency = limit
         # Campo vazio (ausente no form chega como None, presente vazio como
         # None tambem no FastAPI) significa "nao mude a chave": so um valor
         # nao vazio sobrescreve. Assim o Salvar do formulario, que envia o
@@ -222,7 +281,7 @@ async def update_provider(
     return await list_providers(request)
 
 
-@router.delete("/providers/{name}", response_class=HTMLResponse)
+@router.delete("/providers/{name}", response_class=HTMLResponse, include_in_schema=False)
 async def delete_provider(
     request: Request,
     name: str,
@@ -244,12 +303,12 @@ async def delete_provider(
     return await list_providers(request)
 
 
-@router.get("/providers/new", response_class=HTMLResponse)
+@router.get("/providers/new", response_class=HTMLResponse, include_in_schema=False)
 async def new_provider_form(request: Request, _: None = Depends(require_admin)):
     return render("_provider_form.html", request=request, provider=None, providers=[])
 
 
-@router.get("/providers/{name}/edit", response_class=HTMLResponse)
+@router.get("/providers/{name}/edit", response_class=HTMLResponse, include_in_schema=False)
 async def edit_provider_form(request: Request, name: str, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -259,10 +318,24 @@ async def edit_provider_form(request: Request, name: str, _: None = Depends(requ
     return render("_provider_form.html", request=request, provider=p, providers=[])
 
 
+# --- Forms ---
+
+# Ancoras de form por secao: o botao "Cancelar" troca o form aberto por esta
+# ancora vazia via swap outerHTML, fechando o form sem recarregar a pagina.
+_FORM_SECTIONS = ("provider", "model", "route")
+
+
+@router.get("/sections/{name}/form-reset", response_class=HTMLResponse, include_in_schema=False)
+async def form_reset(name: str, _: None = Depends(require_admin)):
+    if name not in _FORM_SECTIONS:
+        raise HTTPException(status_code=404, detail="Secao desconhecida")
+    return HTMLResponse(f'<div id="{name}-form"></div>')
+
+
 # --- Models ---
 
 
-@router.get("/models", response_class=HTMLResponse)
+@router.get("/models", response_class=HTMLResponse, include_in_schema=False)
 async def list_models(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -281,7 +354,7 @@ def _flag(values: list[str] | None, default: bool) -> bool:
     return default if values is None else ("true" in values)
 
 
-@router.post("/models", response_class=HTMLResponse)
+@router.post("/models", response_class=HTMLResponse, include_in_schema=False)
 async def create_model(
     request: Request,
     alias: Annotated[str, Form()],
@@ -329,7 +402,7 @@ async def create_model(
     return await list_models(request)
 
 
-@router.patch("/models/{alias}", response_class=HTMLResponse)
+@router.patch("/models/{alias}", response_class=HTMLResponse, include_in_schema=False)
 async def update_model(
     request: Request,
     alias: str,
@@ -385,7 +458,7 @@ async def update_model(
     return await list_models(request)
 
 
-@router.delete("/models/{alias}", response_class=HTMLResponse)
+@router.delete("/models/{alias}", response_class=HTMLResponse, include_in_schema=False)
 async def delete_model(
     request: Request,
     alias: str,
@@ -409,7 +482,7 @@ async def delete_model(
     return await list_models(request)
 
 
-@router.get("/models/new", response_class=HTMLResponse)
+@router.get("/models/new", response_class=HTMLResponse, include_in_schema=False)
 async def new_model_form(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -417,7 +490,7 @@ async def new_model_form(request: Request, _: None = Depends(require_admin)):
     return render("_model_form.html", request=request, model=None, providers=providers)
 
 
-@router.get("/models/{alias}/edit", response_class=HTMLResponse)
+@router.get("/models/{alias}/edit", response_class=HTMLResponse, include_in_schema=False)
 async def edit_model_form(request: Request, alias: str, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -431,7 +504,7 @@ async def edit_model_form(request: Request, alias: str, _: None = Depends(requir
 # --- Routes ---
 
 
-@router.get("/routes", response_class=HTMLResponse)
+@router.get("/routes", response_class=HTMLResponse, include_in_schema=False)
 async def list_routes(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -448,7 +521,7 @@ async def list_routes(request: Request, _: None = Depends(require_admin)):
     return render("_routes.html", request=request, routes=routes_with_candidates, models=models)
 
 
-@router.post("/routes", response_class=HTMLResponse)
+@router.post("/routes", response_class=HTMLResponse, include_in_schema=False)
 async def create_route(
     request: Request,
     pattern: Annotated[str | None, Form()] = None,
@@ -484,7 +557,7 @@ async def create_route(
     return await list_routes(request)
 
 
-@router.patch("/routes/{route_id}", response_class=HTMLResponse)
+@router.patch("/routes/{route_id}", response_class=HTMLResponse, include_in_schema=False)
 async def update_route(
     request: Request,
     route_id: int,
@@ -518,7 +591,7 @@ async def update_route(
     return await list_routes(request)
 
 
-@router.post("/routes/reorder", response_class=HTMLResponse)
+@router.post("/routes/reorder", response_class=HTMLResponse, include_in_schema=False)
 async def reorder_routes(
     request: Request,
     order: Annotated[list[int], Form()],
@@ -543,7 +616,7 @@ async def reorder_routes(
     return await list_routes(request)
 
 
-@router.delete("/routes/{route_id}", response_class=HTMLResponse)
+@router.delete("/routes/{route_id}", response_class=HTMLResponse, include_in_schema=False)
 async def delete_route(
     request: Request,
     route_id: int,
@@ -566,7 +639,7 @@ async def delete_route(
     return await list_routes(request)
 
 
-@router.get("/routes/new", response_class=HTMLResponse)
+@router.get("/routes/new", response_class=HTMLResponse, include_in_schema=False)
 async def new_route_form(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -574,7 +647,7 @@ async def new_route_form(request: Request, _: None = Depends(require_admin)):
     return render("_route_form.html", request=request, route=None, models=models)
 
 
-@router.get("/routes/{route_id}/edit", response_class=HTMLResponse)
+@router.get("/routes/{route_id}/edit", response_class=HTMLResponse, include_in_schema=False)
 async def edit_route_form(request: Request, route_id: int, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -593,7 +666,7 @@ async def edit_route_form(request: Request, route_id: int, _: None = Depends(req
 # --- Default Model ---
 
 
-@router.get("/default-model", response_class=HTMLResponse)
+@router.get("/default-model", response_class=HTMLResponse, include_in_schema=False)
 async def get_default_model(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -602,7 +675,7 @@ async def get_default_model(request: Request, _: None = Depends(require_admin)):
     return render("_default.html", request=request, default=default, models=models)
 
 
-@router.post("/default-model", response_class=HTMLResponse)
+@router.post("/default-model", response_class=HTMLResponse, include_in_schema=False)
 async def set_default_model(
     request: Request,
     alias: Annotated[str, Form()],
@@ -626,7 +699,42 @@ async def set_default_model(
 # --- Reload & Rollback ---
 
 
-@router.post("/reload")
+@router.post(
+    "/reload",
+    tags=["Admin"],
+    summary="Reload configuration from the database",
+    description=(
+        "Rebuilds the providers, models and routes from the database and applies them "
+        "to the running process, without a restart. Use it after changing the "
+        "configuration tables directly."
+    ),
+    responses={
+        "200": {
+            "description": "Configuration reloaded.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "status": {"type": "string", "enum": ["reloaded"]},
+                            "default_model": {"type": ["string", "null"]},
+                        },
+                    }
+                }
+            },
+        },
+        "303": {
+            "description": "No valid session and the client is a browser: redirect to "
+            "the login page."
+        },
+        "401": {
+            "description": "No valid session and the client sent `Accept: "
+            "application/json` or `HX-Request: true`."
+        },
+        "503": {"description": "Persistence is off, so there is no configuration to load."},
+    },
+    openapi_extra={"security": _SESSION},
+)
 async def reload_config(request: Request, _: None = Depends(require_admin)):
     """Invalida cache e recarrega settings do banco."""
     engine = request_engine(request)
@@ -636,7 +744,7 @@ async def reload_config(request: Request, _: None = Depends(require_admin)):
     return JSONResponse({"status": "reloaded", "default_model": settings.default_model})
 
 
-@router.post("/rollback/{version_id}", response_class=HTMLResponse)
+@router.post("/rollback/{version_id}", response_class=HTMLResponse, include_in_schema=False)
 async def rollback_config(
     request: Request,
     version_id: int,
@@ -693,7 +801,7 @@ async def rollback_config(
     return await admin_config_page(request)
 
 
-@router.get("/history", response_class=HTMLResponse)
+@router.get("/history", response_class=HTMLResponse, include_in_schema=False)
 async def config_history(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:

@@ -95,3 +95,21 @@ def test_backoff_floor_is_exactly_the_exponential_base(monkeypatch):
     assert backoff(3) == 4.0
     # The cap: attempt 10 would be 2**9 uncapped, but `min(..., 4.0)` holds it.
     assert backoff(10) == 4.0
+
+
+def test_read_timeout_skips_instead_of_retrying_the_saturated_server():
+    # Medido em producao: um llama.cpp saturado estoura o TIMEOUT_READ; a
+    # segunda tentativa no MESMO servidor repete a mesma espera e consome o
+    # prazo total de toda a cadeia.
+    assert classify(None, httpx.ReadTimeout(""), None) is Outcome.SKIP
+
+
+def test_other_transport_errors_are_still_retried():
+    for exc in (
+        httpx.ConnectError("recusou"),
+        httpx.ConnectTimeout("connect"),
+        httpx.PoolTimeout("pool"),
+        httpx.RemoteProtocolError("caiu"),
+        httpx.WriteTimeout("write"),
+    ):
+        assert classify(None, exc, None) is Outcome.RETRY, type(exc).__name__

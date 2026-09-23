@@ -1,3 +1,5 @@
+<!-- Ancora re-inserida a cada swap outerHTML (ver _provider_form.html). -->
+<div id="route-form">
 {% if route %}
 <form hx-patch="/admin/config/routes/{{ route.id }}" hx-target="#routes-list" hx-swap="outerHTML">
   <h3>Editar Rota: {{ route.pattern }}</h3>
@@ -74,6 +76,7 @@
 
 <div style="margin-top: 16px; display: flex; gap: 8px;">
   <button type="submit" class="btn btn-primary">{% if route %}Salvar{% else %}Criar{% endif %}</button>
-  <button type="button" class="btn" hx-get="/admin/config/routes" hx-target="#route-form" hx-swap="outerHTML">Cancelar</button>
+  <button type="button" class="btn" hx-get="/admin/config/sections/route/form-reset" hx-target="#route-form" hx-swap="outerHTML">Cancelar</button>
 </div>
 </form>
+</div>

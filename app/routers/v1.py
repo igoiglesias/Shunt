@@ -27,12 +27,14 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from json import JSONDecodeError
 
+import anyio
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.types import Receive, Scope, Send
 
 from app.config.settings import Settings
 from app.core.dispatcher import (
@@ -47,19 +49,56 @@ from app.core.observability import RequestLog, log_request
 from app.core.resolver import UnknownProviderError, resolve
 from app.core.tokens import estimate_input_tokens
 from app.schemas.anthropic import (
+    AnthropicErrorResponse,
     AnthropicModel,
     AnthropicModelList,
     AnthropicRequest,
     CountTokensRequest,
+    CountTokensResponse,
 )
 from app.schemas.openai import (
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
+    OpenAIErrorResponse,
     OpenAIModel,
     OpenAIModelList,
 )
 from app.stats.models import ApiToken
+
+# Teto do fechamento do gerador do stream quando o pedido termina. O
+# fechamento e blindado contra cancelamento (e ele que devolve o slot do
+# provedor), mas blindado sem prazo prende o pedido para sempre se o provedor
+# nunca terminar de fechar a conexao. Passado o teto, desiste: o cancelamento
+# atravessa os `finally` do dispatcher e o slot volta mesmo assim.
+STREAM_CLOSE_BOUND = 5.0
+
+
+class ClosingStreamingResponse(StreamingResponse):
+    """`StreamingResponse` que SEMPRE fecha o gerador do corpo ao terminar.
+
+    Medido com o Starlette 1.6: quando o cliente desconecta com o gerador
+    parado num `yield`, nem o caminho ASGI 2.0 (cancelamento no `send`) nem o
+    2.4 (`OSError` -> `ClientDisconnect`) chamam `aclose()` no gerador. O
+    `finally` do dispatcher -- que fecha a resposta upstream e devolve o slot
+    de concorrencia do provedor -- ficava esperando o finalizador do gerador,
+    e o limite do provedor ficava comido ate la.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                # Blindado: o cancelamento de um escopo anyio em volta do
+                # pedido (o mecanismo do Starlette) nao interrompe justamente o
+                # fechamento que libera o slot. Medido: um `task.cancel()`
+                # nativo do asyncio atravessa esta blindagem (so acontece num
+                # desligamento forcado). Com teto: ver STREAM_CLOSE_BOUND.
+                with anyio.move_on_after(STREAM_CLOSE_BOUND, shield=True):
+                    await aclose()
+
 
 router = APIRouter(prefix="/v1")
 
@@ -142,6 +181,152 @@ REQUEST_SCHEMAS: dict[tuple[str, str], type[BaseModel]] = {
     ("openai", "completions"): CompletionRequest,
     ("openai", "embeddings"): EmbeddingRequest,
 }
+
+
+# --- Documentacao OpenAPI -------------------------------------------------
+# As rotas POST leem o corpo na mao (`_json_object`) para que um corpo
+# invalido vire 400 no envelope do dialeto, e nao o 422 do FastAPI. O custo
+# e que o FastAPI nao enxerga corpo nenhum para documentar. O que segue so
+# DESCREVE a superficie: nada aqui e lido no caminho da requisicao.
+
+# Modelos que as rotas citam por `$ref` sem que o FastAPI os veja como
+# parametro. `app.main` registra cada um em `components/schemas`.
+DOCUMENTED_MODELS: tuple[type[BaseModel], ...] = (
+    AnthropicRequest,
+    CountTokensRequest,
+    CountTokensResponse,
+    AnthropicErrorResponse,
+    ChatCompletionRequest,
+    CompletionRequest,
+    EmbeddingRequest,
+    OpenAIErrorResponse,
+    AnthropicModel,
+    AnthropicModelList,
+    OpenAIModel,
+    OpenAIModelList,
+)
+
+
+def _ref(model: type[BaseModel]) -> dict:
+    return {"$ref": f"#/components/schemas/{model.__name__}"}
+
+
+# `{}` e a alternativa sem credencial: o Shunt nao exige autenticacao do
+# cliente. So `x-shunt-token` e conferido; as outras duas seguem adiante.
+PROXY_SECURITY: list[dict[str, list[str]]] = [
+    {"anthropicApiKey": []},
+    {"bearerAuth": []},
+    {"shuntToken": []},
+    {},
+]
+# `count_tokens` nao le `x-shunt-token`.
+COUNT_TOKENS_SECURITY: list[dict[str, list[str]]] = [
+    {"anthropicApiKey": []},
+    {"bearerAuth": []},
+    {},
+]
+
+_DETAIL = {
+    "type": "object",
+    "properties": {"detail": {"type": "string"}},
+    "required": ["detail"],
+}
+
+
+def _request_body(model: type[BaseModel]) -> dict:
+    return {
+        "required": True,
+        "content": {"application/json": {"schema": _ref(model)}},
+    }
+
+
+def _proxy_responses(error: type[BaseModel], streaming: bool) -> dict:
+    ok_content: dict = {"application/json": {"schema": {"type": "object"}}}
+    ok = (
+        "The provider's answer, translated into this route's dialect."
+    )
+    if streaming:
+        ok_content["text/event-stream"] = {"schema": {"type": "string"}}
+        ok += (
+            " With `\"stream\": true` in the body, the answer arrives as "
+            "server-sent events in the same dialect. In that mode a failure "
+            "(including \"no candidate can serve this request\") arrives inside the "
+            "stream, because the 200 has already been sent: an Anthropic stream gets "
+            "an `event: error` with the Anthropic error envelope, an OpenAI stream "
+            "gets a `data:` chunk carrying the OpenAI error envelope."
+        )
+    return {
+        200: {
+            "description": ok,
+            "content": ok_content,
+            "headers": {
+                "x-shunt-model": {
+                    "description": (
+                        "The model that actually answered. The body's `model` field "
+                        "still echoes the one you asked for. Sent on JSON answers only, "
+                        "not on streams."
+                    ),
+                    "schema": {"type": "string"},
+                }
+            },
+        },
+        400: {
+            "description": (
+                "The body is not a JSON object, fails validation, names a model no "
+                "route resolves, or no candidate can serve this request (every "
+                "candidate lacks a capability it needs). A provider's own 400 is also "
+                "passed through. The error envelope follows this route's dialect."
+            ),
+            "content": {"application/json": {"schema": _ref(error)}},
+        },
+        401: {
+            "description": (
+                "Either the `x-shunt-token` is unknown or expired (body `detail`), or "
+                "the provider rejected the credential and its 401 is passed through "
+                "in this route's error envelope."
+            ),
+            "content": {"application/json": {"schema": {"anyOf": [_DETAIL, _ref(error)]}}},
+        },
+        502: {
+            "description": (
+                "No candidate returned a usable answer. The message lists every "
+                "candidate tried and why it failed. When the last candidate answered "
+                "with an error of its own, that status is returned instead."
+            ),
+            "content": {"application/json": {"schema": _ref(error)}},
+        },
+        503: {
+            "description": (
+                "Either an `x-shunt-token` was sent but Shunt has no database to check "
+                "it (body `detail`), or the provider answered 503 and it is passed "
+                "through in this route's error envelope."
+            ),
+            "content": {"application/json": {"schema": {"anyOf": [_DETAIL, _ref(error)]}}},
+        },
+        "default": {
+            "description": (
+                "Any other error status the last provider answered (403, 429, 500...), "
+                "passed through in this route's error envelope."
+            ),
+            "content": {"application/json": {"schema": _ref(error)}},
+        },
+    }
+
+
+def _proxy_route(
+    model: type[BaseModel], error: type[BaseModel], streaming: bool, tag: str
+) -> dict:
+    return {
+        "tags": [tag],
+        "responses": _proxy_responses(error, streaming),
+        "openapi_extra": {"requestBody": _request_body(model), "security": PROXY_SECURITY},
+    }
+
+
+_ROUTING = (
+    " Shunt resolves `model` against its routes and tries each candidate in order, "
+    "translating between dialects when the provider speaks the other one."
+)
 
 
 def _record(
@@ -230,7 +415,7 @@ async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool
         )
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     if streaming and body.get("stream"):
-        return StreamingResponse(
+        return ClosingStreamingResponse(
             dispatch_stream(shunt_request, settings, pool), media_type="text/event-stream"
         )
     result = await dispatch(shunt_request, settings, pool)
@@ -242,27 +427,82 @@ async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool
     return JSONResponse(status_code=result.status, content=result.body, headers=headers)
 
 
-@router.post("/messages")
+@router.post(
+    "/messages",
+    summary="Create a message (Anthropic Messages API)",
+    description="Anthropic Messages request, answered in Anthropic's shape." + _ROUTING,
+    **_proxy_route(AnthropicRequest, AnthropicErrorResponse, True, "Anthropic"),
+)
 async def create_message(request: Request):
     return await _serve(request, "anthropic", "messages", streaming=True)
 
 
-@router.post("/chat/completions")
+@router.post(
+    "/chat/completions",
+    summary="Create a chat completion (OpenAI)",
+    description="OpenAI Chat Completions request, answered in OpenAI's shape." + _ROUTING,
+    **_proxy_route(ChatCompletionRequest, OpenAIErrorResponse, True, "OpenAI"),
+)
 async def create_chat_completion(request: Request):
     return await _serve(request, "openai", "chat", streaming=True)
 
 
-@router.post("/completions")
+@router.post(
+    "/completions",
+    summary="Create a text completion (OpenAI legacy)",
+    description=(
+        "OpenAI legacy Completions request. Always answered as one JSON document."
+        + _ROUTING
+        + " Anthropic providers are skipped: their API has no equivalent."
+    ),
+    **_proxy_route(CompletionRequest, OpenAIErrorResponse, False, "OpenAI"),
+)
 async def create_completion(request: Request):
     return await _serve(request, "openai", "completions", streaming=False)
 
 
-@router.post("/embeddings")
+@router.post(
+    "/embeddings",
+    summary="Create embeddings (OpenAI)",
+    description=(
+        "OpenAI Embeddings request, answered as one JSON document."
+        + _ROUTING
+        + " Anthropic providers are skipped: their API has no equivalent."
+    ),
+    **_proxy_route(EmbeddingRequest, OpenAIErrorResponse, False, "OpenAI"),
+)
 async def create_embeddings(request: Request):
     return await _serve(request, "openai", "embeddings", streaming=False)
 
 
-@router.post("/messages/count_tokens")
+@router.post(
+    "/messages/count_tokens",
+    summary="Count input tokens (Anthropic)",
+    description=(
+        "Counts the input tokens of an Anthropic Messages request. When the first "
+        "candidate for `model` speaks Anthropic, its own count is returned; otherwise, "
+        "or when it fails, Shunt returns a local estimate. `x-shunt-token` is not read "
+        "on this route."
+    ),
+    tags=["Anthropic"],
+    responses={
+        200: {
+            "description": "The provider's count, or Shunt's local estimate.",
+            "content": {"application/json": {"schema": _ref(CountTokensResponse)}},
+        },
+        400: {
+            "description": (
+                "The body is not a JSON object, fails validation, or names a model "
+                "no route resolves."
+            ),
+            "content": {"application/json": {"schema": _ref(AnthropicErrorResponse)}},
+        },
+    },
+    openapi_extra={
+        "requestBody": _request_body(CountTokensRequest),
+        "security": COUNT_TOKENS_SECURITY,
+    },
+)
 async def count_tokens(request: Request):
     """Encaminha quando da, estima quando nao da.
 
@@ -340,6 +580,14 @@ async def count_tokens(request: Request):
     return estimated
 
 
+_DIALECT = (
+    " The answer's shape follows the caller: an `anthropic-version` or `x-api-key` "
+    "header, or a Claude Code / Anthropic SDK User-Agent, gets Anthropic's shape; "
+    "an `Authorization` header without those gets OpenAI's; no signal gets a superset "
+    "carrying the fields of both. No credential is required."
+)
+
+
 def _model_entries(settings: Settings) -> list[dict]:
     """A uniao dos dois formatos. Cada dialeto e uma projecao deste registro."""
     return [
@@ -356,7 +604,35 @@ def _model_entries(settings: Settings) -> list[dict]:
     ]
 
 
-@router.get("/models/{model_id}")
+@router.get(
+    "/models/{model_id}",
+    summary="Get one model",
+    description="One configured model alias." + _DIALECT,
+    tags=["Models"],
+    responses={
+        200: {
+            "description": "The model, without the list wrapper.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "anyOf": [_ref(AnthropicModel), _ref(OpenAIModel), {"type": "object"}]
+                    }
+                }
+            },
+        },
+        404: {
+            "description": (
+                "No model is configured under this alias. The error envelope follows "
+                "the caller's dialect."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {"anyOf": [_ref(AnthropicErrorResponse), _ref(OpenAIErrorResponse)]}
+                }
+            },
+        },
+    },
+)
 async def get_model(model_id: str, request: Request):
     """Um modelo pelo alias, no dialeto de quem perguntou.
 
@@ -386,7 +662,28 @@ async def get_model(model_id: str, request: Request):
     return entry
 
 
-@router.get("/models")
+@router.get(
+    "/models",
+    summary="List models",
+    description="Every configured model alias." + _DIALECT,
+    tags=["Models"],
+    responses={
+        200: {
+            "description": "The catalog in the caller's dialect.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "anyOf": [
+                            _ref(AnthropicModelList),
+                            _ref(OpenAIModelList),
+                            {"type": "object"},
+                        ]
+                    }
+                }
+            },
+        },
+    },
+)
 async def list_models(request: Request):
     """O catalogo no dialeto de quem perguntou.
 

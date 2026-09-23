@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,9 @@ class ProviderConfig(BaseModel):
     # Chave bruta do provedor. Vem do banco (coluna providers.api_key); o seed
     # a popula uma vez, a partir da variavel de ambiente, no primeiro boot.
     api_key: str | None = None
+    # Requisicoes simultaneas que o provedor aceita; None = sem limite. Quando
+    # cheio, o candidato e pulado na hora em vez de esperar na fila do provedor.
+    max_concurrency: int | None = Field(default=None, ge=1)
 
 
 class ModelCaps(BaseModel):
@@ -70,6 +73,7 @@ def load_settings_from_db(session: Session) -> Settings:
             base_url=p.base_url,
             protocol=p.protocol,  # type: ignore[arg-type]
             api_key=p.api_key,
+            max_concurrency=p.max_concurrency,
         )
         for p in providers_db
     }

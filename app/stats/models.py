@@ -178,6 +178,10 @@ class Provider(Base):
     # ambiente); agora a chave e persistida no banco. O seed a popula uma vez
     # a partir da variavel de ambiente no primeiro boot.
     api_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Quantas requisicoes o provedor atende ao mesmo tempo. NULL = sem limite.
+    # Um llama.cpp com 2 slots enfileira a terceira em silencio ate estourar o
+    # read timeout; com o limite, o proxy sabe que ele esta cheio e segue.
+    max_concurrency: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

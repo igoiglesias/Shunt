@@ -1,4 +1,5 @@
 import httpx
+import pytest
 
 from app.config.settings import ProviderConfig, Settings
 from app.core.upstream import UpstreamPool
@@ -98,3 +99,219 @@ async def test_injected_transport_is_actually_used_by_the_client():
         assert response.json() == {"via": "fake-transport"}
     finally:
         await pool.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Slots de concorrencia por provedor
+# ---------------------------------------------------------------------------
+
+LIMITED = Settings(
+    providers={
+        "local": ProviderConfig(
+            base_url="http://localhost:8080/v1", protocol="openai", max_concurrency=2
+        ),
+        "cloud": ProviderConfig(base_url="https://cloud.test/v1", protocol="openai"),
+    },
+    models={},
+    routes=[],
+    default_model=None,
+)
+
+
+async def test_a_limited_provider_hands_out_slots_up_to_its_limit():
+    pool = UpstreamPool(LIMITED)
+    assert pool.limit("local") == 2
+    first = pool.try_slot("local")
+    second = pool.try_slot("local")
+    assert first is not None and second is not None
+    assert pool.in_use("local") == 2
+    # Cheio: a terceira nao espera, volta None na hora.
+    assert pool.try_slot("local") is None
+    assert pool.in_use("local") == 2
+    first.release()
+    assert pool.in_use("local") == 1
+    third = pool.try_slot("local")
+    assert third is not None
+    assert pool.in_use("local") == 2
+    second.release()
+    third.release()
+    assert pool.in_use("local") == 0
+
+
+async def test_releasing_a_slot_twice_frees_only_one_place():
+    pool = UpstreamPool(LIMITED)
+    slot = pool.try_slot("local")
+    other = pool.try_slot("local")
+    assert slot is not None and other is not None
+    slot.release()
+    slot.release()
+    assert pool.in_use("local") == 1
+    # Se a segunda liberacao tivesse devolvido lugar, caberiam dois agora.
+    assert pool.try_slot("local") is not None
+    assert pool.try_slot("local") is None
+
+
+async def test_an_unlimited_provider_never_runs_out_of_slots():
+    pool = UpstreamPool(LIMITED)
+    assert pool.limit("cloud") is None
+    slots = [pool.try_slot("cloud") for _ in range(50)]
+    assert all(slot is not None for slot in slots)
+    for slot in slots:
+        assert slot is not None
+        slot.release()
+    assert pool.in_use("cloud") == 0
+
+
+async def test_a_slot_is_a_context_manager_that_releases_on_exit():
+    pool = UpstreamPool(LIMITED)
+    slot = pool.try_slot("local")
+    assert slot is not None
+    try:
+        with slot:
+            assert pool.in_use("local") == 1
+            raise RuntimeError("falhou no meio")
+    except RuntimeError:
+        pass
+    assert pool.in_use("local") == 0
+
+
+async def test_wait_slot_gets_the_place_that_frees_before_the_timeout():
+    import asyncio
+
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    asyncio.get_running_loop().call_later(0.02, held[0].release)
+    slot = await pool.wait_slot("local", 2.0)
+    assert slot is not None
+    assert pool.in_use("local") == 2
+    slot.release()
+    held[1].release()
+    assert pool.in_use("local") == 0
+
+
+async def test_wait_slot_gives_up_at_the_timeout_without_taking_a_place():
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    assert await pool.wait_slot("local", 0.02) is None
+    assert pool.in_use("local") == 2
+    for slot in held:
+        slot.release()
+    # A espera que desistiu nao ficou na fila: se ficasse, uma das duas
+    # liberacoes iria para ela e um lugar sumiria para sempre.
+    assert pool.in_use("local") == 0
+    assert pool.try_slot("local") is not None
+
+
+async def test_wait_slot_on_an_unlimited_provider_returns_at_once():
+    pool = UpstreamPool(LIMITED)
+    assert await pool.wait_slot("cloud", 0.0) is not None
+
+
+async def test_a_waiter_in_line_is_served_before_a_newcomer():
+    """Quem esperou pelo ultimo recurso nao perde o lugar para um pedido novo
+    que chega no mesmo instante em que o slot libera."""
+    import asyncio
+
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    waiter = asyncio.ensure_future(pool.wait_slot("local", 2.0))
+    await asyncio.sleep(0)
+    held[0].release()
+    assert pool.try_slot("local") is None
+    slot = await waiter
+    assert slot is not None
+    slot.release()
+    held[1].release()
+
+
+async def test_wait_slot_takes_a_free_place_at_once():
+    # O lugar pode vagar entre o "cheio" do dispatcher e o inicio da espera.
+    pool = UpstreamPool(LIMITED)
+    slot = await pool.wait_slot("local", 0.0)
+    assert slot is not None
+    assert pool.in_use("local") == 1
+    slot.release()
+
+
+async def test_a_waiter_cancelled_after_the_place_reached_it_gives_the_place_back():
+    """O cliente desconecta no mesmo tique em que o slot chegou: a espera sai
+    com CancelledError, e o lugar que ja era dela nao pode ficar preso."""
+    import asyncio
+
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    waiter = asyncio.ensure_future(pool.wait_slot("local", 5.0))
+    await asyncio.sleep(0)
+    held[0].release()  # o lugar e transferido para a espera...
+    waiter.cancel()  # ...que e cancelada antes de rodar de novo
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert pool.in_use("local") == 1
+    held[1].release()
+    assert pool.in_use("local") == 0
+
+
+async def test_a_waiter_cancelled_before_any_place_frees_does_not_swallow_the_next_release():
+    import asyncio
+
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    waiter = asyncio.ensure_future(pool.wait_slot("local", 5.0))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    # Liberado antes de a espera cancelada rodar o `finally`: o lugar tem de
+    # voltar ao pool, nao ir para uma espera que ja desistiu.
+    held[0].release()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert pool.in_use("local") == 1
+    held[1].release()
+    assert pool.in_use("local") == 0
+
+
+async def test_a_place_granted_at_once_returns_if_the_request_is_abandoned_unused():
+    # O lugar veio no construtor (provedor tinha vaga) e o `with` saiu sem
+    # `wait()` -- cliente foi embora antes: o lugar tem de voltar.
+    pool = UpstreamPool(LIMITED)
+    with pool.request_slot("local"):
+        assert pool.in_use("local") == 1
+    assert pool.in_use("local") == 0
+
+
+async def test_a_request_hands_out_its_place_only_once():
+    pool = UpstreamPool(LIMITED)
+    with pool.request_slot("local") as request:
+        first = await request.wait(0.0)
+        second = await request.wait(0.0)
+    assert first is not None
+    assert second is None
+    assert pool.in_use("local") == 1
+    first.release()
+    assert pool.in_use("local") == 0
+
+
+async def test_a_queued_request_hands_out_its_place_only_once():
+    pool = UpstreamPool(LIMITED)
+    held = [pool.try_slot("local"), pool.try_slot("local")]
+    with pool.request_slot("local") as request:
+        held[0].release()
+        first = await request.wait(1.0)
+        second = await request.wait(0.0)
+    assert first is not None
+    assert second is None
+    assert pool.in_use("local") == 2
+    first.release()
+    held[1].release()
+    assert pool.in_use("local") == 0
+
+
+async def test_cancelling_an_unused_request_twice_returns_its_place_once():
+    pool = UpstreamPool(LIMITED)
+    other = pool.try_slot("local")
+    request = pool.request_slot("local")
+    assert pool.in_use("local") == 2
+    request.cancel()
+    request.cancel()
+    assert pool.in_use("local") == 1
+    assert other is not None
+    other.release()

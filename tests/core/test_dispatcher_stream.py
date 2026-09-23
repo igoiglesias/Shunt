@@ -1570,3 +1570,24 @@ async def test_the_stream_probe_note_names_the_model_not_the_alias(monkeypatch):
     # A linha de descarte do filtro nomeia pelo MODELO, igual a linha de
     # tentativa logo acima: `filter_chain` devolve `(model, motivo)`.
     assert "qwen3.8-27b: no streaming support" in body
+
+
+@respx.mock
+async def test_a_read_timeout_on_send_falls_back_without_retrying_the_same_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=[
+            httpx.ReadTimeout(""),
+            httpx.Response(
+                200, headers=SSE_HEADERS, text=sse('{"choices": [{"delta": {"content": "ok"}}]}')
+            ),
+        ]
+    )
+    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    # Uma chamada ao primeiro (sem retry), uma ao segundo.
+    assert route.call_count == 2
+    sent = [json.loads(call.request.content)["model"] for call in route.calls]
+    assert sent == ["vendor/free", "vendor/cheap"]
+    assert '"text": "ok"' in body

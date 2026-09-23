@@ -23,6 +23,11 @@ class Outcome(Enum):
 
 def classify(status: int | None, exc: Exception | None, retry_after: float | None) -> Outcome:
     if exc is not None:
+        # ReadTimeout pula: o servidor aceitou a conexao e nao respondeu dentro
+        # do TIMEOUT_READ -- medido num llama.cpp saturado. Repetir no MESMO
+        # servidor repete a mesma espera e gasta o prazo total da cadeia.
+        if isinstance(exc, httpx.ReadTimeout):
+            return Outcome.SKIP
         return Outcome.RETRY if isinstance(exc, httpx.TransportError) else Outcome.SKIP
     if status is None:
         return Outcome.SKIP
