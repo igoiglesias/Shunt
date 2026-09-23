@@ -719,9 +719,9 @@ def _track_clients(monkeypatch) -> list[httpx.AsyncClient]:
 
 @respx.mock
 async def test_a_buffered_last_resort_across_a_reload_leaks_no_client(monkeypatch):
-    """`apply_settings` fecha o pool antigo enquanto um pedido ainda espera o
-    slot nele. O pedido segue sendo servido, mas o cliente httpx que ele usa
-    nao pode ficar vivo dentro de um pool que ninguem mais vai fechar."""
+    """O shutdown (`aclose`) chega enquanto um pedido ainda espera o slot. O
+    pedido segue sendo servido, mas o cliente httpx que ele usa nao pode
+    ficar vivo dentro de um pool que ninguem mais vai fechar."""
     created = _track_clients(monkeypatch)
     settings = _settings("loc")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))

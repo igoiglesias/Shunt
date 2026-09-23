@@ -44,18 +44,20 @@ def request_engine(request: Request):
 
 
 async def apply_settings(app, settings: Settings) -> None:
-    """Troca as settings vivas do processo, junto com o pool que as usa.
+    """Troca as settings vivas do processo e reconcilia o pool que as usa.
 
-    O pool guarda o objeto de settings no boot e le `providers` dele em toda
-    requisicao: trocar so `app.state.settings` deixaria provider novo, ou
-    `base_url` mudado, inacessivel ate restart. O pool antigo e fechado antes
-    da troca para nao vazar conexao de upstream.
+    O pool nunca troca de identidade: recria-lo cortava streams em voo e
+    zerava as contagens de concorrencia. `update` aposenta so o cliente cujo
+    `base_url` mudou (fechado quando o ultimo uso termina) e ajusta os gates
+    no lugar. Chamado pelo admin deste worker e pelo vigia de versao dos
+    outros (`app/core/config_watcher.py`).
     """
-    old_pool = getattr(app.state, "pool", None)
-    if old_pool is not None:
-        await old_pool.aclose()
     app.state.settings = settings
-    app.state.pool = UpstreamPool(settings)
+    pool = getattr(app.state, "pool", None)
+    if pool is None:
+        app.state.pool = UpstreamPool(settings)
+        return
+    await pool.update(settings)
 
 
 # Teto do limite por provedor. Nenhum provedor real atende dez mil pedidos

@@ -536,11 +536,12 @@ async def count_tokens(request: Request):
     if candidate.protocol == "anthropic":
         shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
         try:
-            upstream = await pool.get(candidate.provider).post(
-                "/v1/messages/count_tokens",
-                json={**body, "model": candidate.model},
-                headers=outbound_headers(shunt_request, candidate, settings),
-            )
+            async with pool.client(candidate.provider) as upstream_client:
+                upstream = await upstream_client.post(
+                    "/v1/messages/count_tokens",
+                    json={**body, "model": candidate.model},
+                    headers=outbound_headers(shunt_request, candidate, settings),
+                )
         except httpx.HTTPError:
             # Conexao que morre e a mesma situacao de um status diferente de
             # 200: a contagem autoritativa nao veio, e a estimativa local e uma

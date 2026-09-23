@@ -3,6 +3,7 @@
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,7 +20,7 @@ from app.config.settings import (
 from app.core.security import issue_jwt
 from app.core.upstream import UpstreamPool
 from app.main import app
-from app.routers.admin_config import create_config_version
+from app.routers.admin_config import apply_settings, create_config_version
 from app.stats.models import Base, ConfigVersion, Model, Provider, Route, RouteCandidate
 from app.stats.recorder import Recorder
 
@@ -710,15 +711,14 @@ def test_reload_reflects_db_mutation(monkeypatch, tmp_path):
     assert body["status"] == "reloaded"
     assert body["default_model"] == "free"
     assert "newprov" in app.state.settings.providers
-    # Regression: the pool was rebuilt and can resolve the new provider
-    # without raising KeyError.
+    # Regressao: o pool (o mesmo objeto) ja resolve o provedor novo sem KeyError.
     pool_client = app.state.pool.get("newprov")
     assert pool_client is not None
 
 
 def test_reload_pool_no_keyerror(monkeypatch, tmp_path):
-    """Regression for the pool-rebuild fix: after reload, get() on a
-    provider that was added directly to the DB does not raise."""
+    """Regressao: o pool (o mesmo objeto) ja resolve o provedor novo sem
+    KeyError -- pool reconciliado."""
     monkeypatch.setenv("ADMIN_TOKEN", "t")
     with client(tmp_path) as c:
         with Session(app.state.recorder.engine) as s:
@@ -934,7 +934,7 @@ def test_create_provider_with_a_concurrency_limit_reaches_db_settings_and_pool(m
         p = s.execute(select(Provider).where(Provider.name == "local")).scalar_one()
     assert p.max_concurrency == 2
     assert app.state.settings.providers["local"].max_concurrency == 2
-    # O pool reconstruido ja conhece o limite novo.
+    # O pool reconciliado ja conhece o limite novo.
     assert app.state.pool.limit("local") == 2
 
 
@@ -1134,3 +1134,44 @@ def test_patch_unknown_provider_with_an_invalid_limit_is_404(monkeypatch, tmp_pa
             cookies=COOKIE,
         )
     assert r.status_code == 404
+
+
+def test_an_edit_keeps_the_pool_identity_and_retires_only_the_changed_client(monkeypatch, tmp_path):
+    """O pool nunca e recriado: um stream em voo segue no cliente que ja usa e
+    `in_use` nao zera. So o cliente do provedor cujo `base_url` mudou e
+    aposentado (fechado por estar ocioso aqui); o do outro provedor e o mesmo."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="http://u1", protocol="openai"))
+            s.add(Provider(name="p2", base_url="http://u2", protocol="openai"))
+            s.commit()
+        assert c.post("/admin/config/reload", cookies=COOKIE).status_code == 200
+        pool = app.state.pool
+        p1 = pool.get("p1")
+        p2 = pool.get("p2")
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "http://u1-novo", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+        # Dentro do `with`: o shutdown do TestClient fecha o pool inteiro
+        # (`aclose`), que limparia `_clients` e derrubaria estas asserções
+        # por um motivo que nada tem a ver com `update()`.
+        assert r.status_code == 200
+        assert app.state.pool is pool
+        assert p1.is_closed
+        assert pool.get("p1") is not p1
+        assert str(pool.get("p1").base_url).rstrip("/") == "http://u1-novo"
+        assert pool.get("p2") is p2 and not p2.is_closed
+
+
+async def test_apply_settings_without_a_prior_pool_creates_one_instead_of_updating():
+    """Defensivo: se `app.state.pool` ainda nao existe (antes do lifespan
+    terminar de subir), `apply_settings` cria o pool em vez de chamar
+    `update()` num `None`, que estouraria `AttributeError`."""
+    settings = Settings(providers={}, models={}, routes=[], default_model=None)
+    fake_app = SimpleNamespace(state=SimpleNamespace())
+    await apply_settings(fake_app, settings)
+    assert fake_app.state.settings is settings
+    assert isinstance(fake_app.state.pool, UpstreamPool)

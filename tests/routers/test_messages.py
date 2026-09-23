@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 import httpx
 import respx
 from fastapi.testclient import TestClient
@@ -275,6 +277,34 @@ def test_count_tokens_falls_back_locally_when_the_anthropic_upstream_refuses():
         )
     assert response.status_code == 200
     assert 0 < response.json()["input_tokens"] < 4321
+
+
+@respx.mock
+def test_count_tokens_borrows_the_upstream_client_through_the_pool_lease():
+    """`pool.client()` conta o uso; `pool.get()` nao. Um `update` que troque o
+    `base_url` do provedor so fecha o cliente antigo quando a contagem zera,
+    entao esta rota tem de passar pelo `client()` como o dispatcher."""
+    respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
+        return_value=httpx.Response(200, json={"input_tokens": 7})
+    )
+    with client(ANTHROPIC_SETTINGS) as c:
+        pool = app.state.pool
+        leases: list[str] = []
+        real = pool.client
+
+        @asynccontextmanager
+        async def counting(provider):
+            leases.append(provider)
+            async with real(provider) as lent:
+                yield lent
+
+        pool.client = counting
+        body = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]},
+        ).json()
+    assert body == {"input_tokens": 7}
+    assert leases == ["anthropic"]
 
 
 def test_count_tokens_on_an_unknown_model_is_an_anthropic_shaped_400():
