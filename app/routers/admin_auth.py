@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.auth import ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE, ADMIN_COOKIE_PATH
+from app.config.config import ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE, ADMIN_COOKIE_PATH
 from app.core.security import hash_password, issue_jwt, verify_password
 from app.routers.admin_config import request_engine
 from app.stats.models import User

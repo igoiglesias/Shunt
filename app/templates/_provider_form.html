@@ -24,8 +24,10 @@
     </select>
   </div>
   <div class="form-group">
-    <label for="api_key_env">API Key Env</label>
-    <input type="text" id="api_key_env" name="api_key_env" placeholder="NOME_DA_VARIAVEL" value="{{ provider.api_key_env if provider else '' }}">
+    <label for="api_key">API Key</label>
+    <input type="password" id="api_key" name="api_key"
+           placeholder="{% if provider and provider.api_key %}deixe vazio para manter a chave atual{% else %}chave do provedor (opcional){% endif %}"
+           value="">
   </div>
 </div>
 <div style="margin-top: 16px; display: flex; gap: 8px;">

@@ -6,10 +6,10 @@ from app.core.upstream import UpstreamPool
 SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://openrouter.ai/api/v1", protocol="openai", api_key_env=None
+            base_url="https://openrouter.ai/api/v1", protocol="openai", api_key=None
         ),
         "local": ProviderConfig(
-            base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+            base_url="http://localhost:8080/v1", protocol="openai", api_key=None
         ),
     },
     models={},
@@ -78,7 +78,7 @@ async def test_injected_transport_is_actually_used_by_the_client():
     unroutable = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="http://127.0.0.1:9", protocol="openai", api_key_env=None
+                base_url="http://127.0.0.1:9", protocol="openai", api_key=None
             )
         },
         models={},

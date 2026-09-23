@@ -1,8 +1,11 @@
 import httpx
 
+from app.config.config import TIMEOUT_CONNECT, TIMEOUT_POOL, TIMEOUT_READ, TIMEOUT_WRITE
 from app.config.settings import Settings
 
-TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+TIMEOUT = httpx.Timeout(
+    connect=TIMEOUT_CONNECT, read=TIMEOUT_READ, write=TIMEOUT_WRITE, pool=TIMEOUT_POOL
+)
 
 
 class UpstreamPool:

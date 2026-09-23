@@ -10,31 +10,29 @@ from app.main import app
 def _isolated_app_state():
     """Save and restore `app.state` around each test.
 
-    Without this, the two tests below share the module-level `app` object's
-    state: the second test's `assert not hasattr(app.state, "settings")`
-    only held because the first test's `finally` block had already deleted
-    the attributes it set. Either test run alone -- or in a different order
-    -- would fail. Saving and restoring the actual attribute values (not just
-    deleting them) also protects any test added later that pre-seeds state
-    before entering the TestClient context.
+    Without this, the tests below share the module-level `app` object's
+    state: the third test's lifespan only calls `_engine_or_none()` when
+    `app.state.recorder` is absent, so a recorder left behind by an earlier
+    test (engine None, built against the conftest-neutralized env vars)
+    makes the boot return empty Settings no matter what the test sets.
+    Either test run alone -- or in a different order -- would fail. Saving
+    and restoring the actual attribute values (not just deleting them) also
+    protects any test added later that pre-seeds state before entering the
+    TestClient context.
     """
-    had_settings = hasattr(app.state, "settings")
-    saved_settings = app.state.settings if had_settings else None
-    had_pool = hasattr(app.state, "pool")
-    saved_pool = app.state.pool if had_pool else None
-    for attr in ("settings", "pool"):
+    saved = {}
+    for attr in ("settings", "pool", "recorder"):
         if hasattr(app.state, attr):
+            saved[attr] = getattr(app.state, attr)
             delattr(app.state, attr)
     try:
         yield
     finally:
-        for attr in ("settings", "pool"):
+        for attr in ("settings", "pool", "recorder"):
             if hasattr(app.state, attr):
                 delattr(app.state, attr)
-        if had_settings:
-            app.state.settings = saved_settings
-        if had_pool:
-            app.state.pool = saved_pool
+        for attr, value in saved.items():
+            setattr(app.state, attr, value)
 
 
 def test_health_endpoint_answers_ok_without_touching_state():
@@ -67,7 +65,9 @@ def test_lifespan_does_not_overwrite_injected_settings_and_pool():
         del app.state.pool
 
 
-def test_lifespan_loads_real_settings_and_builds_the_pool_from_them():
+def test_lifespan_loads_real_settings_and_builds_the_pool_from_them(monkeypatch, tmp_path):
+    """Sem banco o catalogo e vazio; com banco o boot semeia e carrega dele."""
+    monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{tmp_path / 'stats.db'}")
     assert not hasattr(app.state, "settings")
     assert not hasattr(app.state, "pool")
     try:

@@ -2,6 +2,7 @@
 
 import os
 import sys
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
@@ -13,7 +14,7 @@ os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
 os.environ["GROQ_API_KEY"] = "gsk-test"
 os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
 
-import app.config.seed as seed
+from app.config import seed
 from app.config.settings import Settings, load_settings_from_db
 from app.stats.models import Base
 
@@ -64,7 +65,7 @@ def test_lifespan_seeds_catalog_and_loads_settings(tmp_path, monkeypatch):
     """
     from fastapi.testclient import TestClient
 
-    import app.main as main
+    from app import main
 
     db = tmp_path / "boot.db"
     monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{db}")
@@ -97,9 +98,3 @@ def test_lifespan_seeds_catalog_and_loads_settings(tmp_path, monkeypatch):
         for attr in ("settings", "pool", "recorder", "admin_session_secret"):
             if hasattr(state, attr):
                 delattr(state, attr)
-
-
-if __name__ == "__main__":
-    test_boot_with_engine_returns_seeded_settings()
-    test_boot_without_engine_returns_empty_settings()
-    print("test_boot.py: todos passaram (RED esperado até boot rewire)")

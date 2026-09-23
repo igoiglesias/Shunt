@@ -33,19 +33,17 @@ Deliberate leniency, matching `app.translate.to_anthropic`:
 
 from typing import Any
 
+# Quantos pedacos de texto a resposta guarda em streaming. Um teto em NUMERO de
+# pedacos, e nao em bytes, porque cada um chega solto e contar bytes a cada
+# chegada custaria mais do que o proprio teto economiza. O corte final em
+# tamanho acontece no `bodies.capture`.
+from app.config.config import ANSWER_PIECES
 from app.stats import bodies
 from app.translate.ids import to_anthropic_id
 from app.translate.to_anthropic import STOP_REASONS, reasoning_of
 from app.translate.usage import openai_usage_to_anthropic
 
 Event = tuple[str, dict[str, Any]]
-
-
-# Quantos pedacos de texto a resposta guarda em streaming. Um teto em NUMERO de
-# pedacos, e nao em bytes, porque cada um chega solto e contar bytes a cada
-# chegada custaria mais do que o proprio teto economiza. O corte final em
-# tamanho acontece no `bodies.capture`.
-ANSWER_PIECES = 20_000
 
 
 class OpenAIStreamToAnthropic:

@@ -22,24 +22,15 @@ from urllib.parse import urlparse
 
 from sqlalchemy import Engine, create_engine, event, inspect, text
 
+from app.config.config import BUSY_TIMEOUT_MS, REACH_TIMEOUT
 from app.stats.models import Base
 
 logger = logging.getLogger("shunt")
 
-# Prazo do teste de alcance. Ele existe por uma medicao desagradavel: com a URL
-# do libsql apontada para uma porta morta, a conexao NAO levanta e NAO volta --
-# ela bloqueia segurando o GIL, e nem uma thread paralela consegue imprimir.
-# Quer dizer que um Turso fora do ar congelaria o proxy inteiro, que e
-# exatamente o que este epico nao pode causar. A defesa e nunca deixar o driver
-# tocar um host inalcancavel: um `connect` de socket comum, com relogio, decide
-# antes.
-REACH_TIMEOUT = 2.0
+# Prazo do teste de alcance e a espera por trava de banco agora vivem em
+# `app/config/config.py` (knobs `SHUNT_REACH_TIMEOUT` / `SHUNT_BUSY_TIMEOUT_MS`);
+# as medicoes que os criaram estao nos comentarios de la.
 DEFAULT_PORTS = {"libsql": 443, "https": 443, "http": 80}
-# Quanto um worker espera por uma trava antes de desistir do lote. `make prod`
-# sobe um processo por nucleo, e oito processos gravando no mesmo arquivo com o
-# journal padrao se atropelam: o primeiro que pegar a trava bloqueia os outros,
-# e sem prazo eles levantam `database is locked` na hora.
-BUSY_TIMEOUT_MS = 5000
 
 
 def _target(url: str) -> tuple[str, int] | None:

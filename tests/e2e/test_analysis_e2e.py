@@ -63,9 +63,8 @@ def seed(engine) -> None:
 
 
 @pytest.fixture
-def shunt_with_history(provider, tmp_path, monkeypatch):
+def shunt_with_history(provider, tmp_path):
     """O aplicativo real com banco de verdade, provedor falso e default declarado."""
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-do-servidor")
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
     Base.metadata.create_all(engine)
     seed(engine)

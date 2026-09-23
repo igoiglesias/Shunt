@@ -11,11 +11,10 @@ import httpx
 import pytest
 import respx
 
+from app.config.config import MAX_ATTEMPTS, PING_INTERVAL
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
 from app.core import dispatcher
-from app.core.attempt import MAX_ATTEMPTS
 from app.core.dispatcher import (
-    PING_INTERVAL,
     ShuntRequest,
     dispatch_stream,
     is_first_valid_event,
@@ -36,7 +35,7 @@ SSE_HEADERS = {"content-type": "text/event-stream"}
 ANTHROPIC_SETTINGS = Settings(
     providers={
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         )
     },
     models={
@@ -52,7 +51,7 @@ ANTHROPIC_SETTINGS = Settings(
 OPENAI_CLIENT_SETTINGS = Settings(
     providers={
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         )
     },
     models={
@@ -74,7 +73,7 @@ OPENAI_BODY = {
 RAW_OPENAI_SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -91,7 +90,7 @@ RAW_OPENAI_SETTINGS = Settings(
 SOLO_SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -671,10 +670,10 @@ async def test_a_candidate_whose_protocol_has_no_such_endpoint_is_skipped():
     settings = Settings(
         providers={
             "anthropic": ProviderConfig(
-                base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+                base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
             ),
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             ),
         },
         models={
@@ -708,7 +707,7 @@ async def test_an_empty_chain_is_reported_before_any_request_is_made():
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={
@@ -935,7 +934,7 @@ async def test_no_candidate_supports_the_endpoint_at_all():
     settings = Settings(
         providers={
             "anthropic": ProviderConfig(
-                base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+                base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
             )
         },
         models={
@@ -960,7 +959,7 @@ async def test_a_probe_that_cannot_be_rendered_is_recorded_before_the_filter(mon
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={
@@ -1013,11 +1012,10 @@ async def test_every_candidate_failing_to_render_is_named_in_the_trace(monkeypat
 
 @respx.mock
 async def test_the_outbound_request_carries_our_credential_and_the_translated_body(monkeypatch):
-    monkeypatch.setenv("SHUNT_TEST_KEY", "segredo")
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env="SHUNT_TEST_KEY"
+                base_url="https://api.test/v1", protocol="openai", api_key="segredo"
             )
         },
         models={
@@ -1452,7 +1450,7 @@ async def test_a_stream_whose_chain_does_not_fit_takes_the_default_model():
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={
@@ -1496,7 +1494,7 @@ async def test_a_stream_whose_chain_does_not_fit_takes_the_default_model():
 ALIAS_DIFFERS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -1544,7 +1542,7 @@ async def test_the_stream_probe_note_names_the_model_not_the_alias(monkeypatch):
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={

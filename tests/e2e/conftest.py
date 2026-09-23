@@ -13,15 +13,15 @@ E2E_SETTINGS = Settings(
         "openrouter": ProviderConfig(
             base_url="http://fake.openrouter/v1",
             protocol="openai",
-            api_key_env="OPENROUTER_API_KEY",
+            api_key="fake-or-key",
         ),
         "anthropic": ProviderConfig(
             base_url="http://fake.anthropic",
             protocol="anthropic",
-            api_key_env="ANTHROPIC_API_KEY",
+            api_key="fake-ant-key",
         ),
         "local": ProviderConfig(
-            base_url="http://fake.local/v1", protocol="openai", api_key_env=None
+            base_url="http://fake.local/v1", protocol="openai", api_key="fake-local-key"
         ),
     },
     models={
@@ -63,9 +63,7 @@ def settings():
 
 
 @pytest.fixture
-def shunt(provider, settings, monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-do-servidor")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-do-servidor")
+def shunt(provider, settings):
     shunt_app.state.settings = settings
     shunt_app.state.pool = UpstreamPool(settings, transport=ScriptedTransport(provider))
     with TestClient(shunt_app) as client:

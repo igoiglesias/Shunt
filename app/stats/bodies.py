@@ -19,9 +19,11 @@ import json
 import os
 import re
 
-# Teto por campo, em caracteres. 64 KB cobre uma conversa longa inteira e ainda
+from app.config.config import DEFAULT_LIMIT
+
+# Teto por campo, em caracteres (knob `SHUNT_BODY_LIMIT` em
+# `app/config/config.py`). 64 KB cobre uma conversa longa inteira e ainda
 # deixa a leitura rapida na tela.
-DEFAULT_LIMIT = 64_000
 
 # O que parece credencial em texto livre. Deliberadamente conservador: um falso
 # positivo esconde uma linha, um falso negativo grava uma chave para sempre.

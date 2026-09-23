@@ -26,13 +26,14 @@ from datetime import datetime
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session
 
+from app.config.config import ROW_LIMIT
 from app.stats import queries
 from app.stats.models import RequestBody, RequestEvent
 
-# Teto de linhas lidas para os agregados em Python. Cinco mil requisicoes ja
-# descrevem o comportamento de um periodo; ler mais muda o custo, nao a
-# conclusao.
-ROW_LIMIT = 5000
+# Teto de linhas lidas para os agregados em Python (`ROW_LIMIT`, em
+# `app/config/config.py`). Cinco mil requisicoes ja descrevem o comportamento
+# de um periodo; ler mais muda o custo, nao a conclusao.
+
 # Quantas requisicoes extremas de cada tipo entram no dossie.
 TOP = 5
 # Quantas conversas viram amostra, e quanto texto cabe em cada ponta.

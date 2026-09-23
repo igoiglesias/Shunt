@@ -193,7 +193,6 @@ def test_the_anthropic_route_also_carries_the_unknown_field_through(monkeypatch)
     """A mesma invariante da rota OpenAI, do lado Anthropic e com um provedor
     que fala Anthropic: sem tradutor no meio, o corpo que sobe e o corpo que
     desceu, campo desconhecido incluido."""
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://api.anthropic.test/v1/messages").mock(
         return_value=httpx.Response(200, json={"id": "msg_1", "model": "claude-real"})
     )
@@ -224,7 +223,6 @@ def test_count_tokens_also_carries_the_unknown_field_to_the_provider(monkeypatch
     """`count_tokens` encaminha o corpo quando o candidato fala Anthropic, e
     a contagem do provedor depende do corpo INTEIRO -- um campo derrubado
     aqui devolve uma contagem que nao corresponde ao que vai ser enviado."""
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
         return_value=httpx.Response(200, json={"input_tokens": 9})
     )

@@ -1,7 +1,8 @@
 import httpx
 
+from app.config.config import MAX_ATTEMPTS, RETRY_AFTER_BUDGET
 from app.core import attempt
-from app.core.attempt import MAX_ATTEMPTS, RETRY_AFTER_BUDGET, Outcome, backoff, classify
+from app.core.attempt import Outcome, backoff, classify
 
 
 def test_transport_error_is_retried():

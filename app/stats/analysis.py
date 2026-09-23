@@ -25,14 +25,13 @@ from datetime import UTC, datetime
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+# Teto da resposta. Uma analise util cabe em algumas paginas; pedir mais so
+# aumenta a conta e o tempo de espera de quem clicou no botao.
+from app.config.config import ANALYSIS_MAX_OUTPUT_TOKENS as MAX_OUTPUT_TOKENS
 from app.config.settings import Settings
 from app.core.dispatcher import ShuntRequest, dispatch
 from app.stats import dossier as dossie_mod
 from app.stats.models import Analysis
-
-# Teto da resposta. Uma analise util cabe em algumas paginas; pedir mais so
-# aumenta a conta e o tempo de espera de quem clicou no botao.
-MAX_OUTPUT_TOKENS = 4000
 
 SYSTEM = """Você é um especialista em fluxo de desenvolvimento assistido por modelos.
 Recebe o dossiê de um período de uso de um proxy de LLM (o Shunt, que traduz

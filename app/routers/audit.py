@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.config.config import EXPORT_LIMIT
 from app.stats import analysis, queries
 
 router = APIRouter()
@@ -44,7 +45,6 @@ CSV_COLUMNS = (
     "tools_offered",
     "tools_called",
 )
-EXPORT_LIMIT = 5000
 
 
 def _engine(request: Request):

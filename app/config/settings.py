@@ -1,4 +1,3 @@
-import os
 from typing import Literal
 
 from pydantic import BaseModel, model_validator
@@ -9,7 +8,9 @@ from sqlalchemy.orm import Session
 class ProviderConfig(BaseModel):
     base_url: str
     protocol: Literal["openai", "anthropic"]
-    api_key_env: str | None = None
+    # Chave bruta do provedor. Vem do banco (coluna providers.api_key); o seed
+    # a popula uma vez, a partir da variavel de ambiente, no primeiro boot.
+    api_key: str | None = None
 
 
 class ModelCaps(BaseModel):
@@ -51,23 +52,12 @@ class Settings(BaseModel):
         return self
 
     def api_key(self, provider: str) -> str | None:
-        env = self.providers[provider].api_key_env
-        return os.environ.get(env) if env else None
+        """A chave bruta do provedor, lida direto do catalogo (do banco).
 
-
-def load_settings() -> Settings:
-    """Carrega settings do arquivo de configuracao estatico (fallback sem banco)."""
-    from dotenv import load_dotenv
-
-    from app.config import config
-
-    load_dotenv()
-    return Settings(
-        providers={k: ProviderConfig.model_validate(v) for k, v in config.providers.items()},
-        models={k: ModelConfig.model_validate(v) for k, v in config.models.items()},
-        routes=config.routes,
-        default_model=config.default_model,
-    )
+        Antes lia o ambiente pelo nome da variavel (`api_key_env`); agora a
+        chave mora na coluna `providers.api_key` e o seed a populou uma vez.
+        """
+        return self.providers[provider].api_key
 
 
 def load_settings_from_db(session: Session) -> Settings:
@@ -79,7 +69,7 @@ def load_settings_from_db(session: Session) -> Settings:
         p.name: ProviderConfig(
             base_url=p.base_url,
             protocol=p.protocol,  # type: ignore[arg-type]
-            api_key_env=p.api_key_env,
+            api_key=p.api_key,
         )
         for p in providers_db
     }

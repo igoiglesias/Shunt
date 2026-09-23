@@ -4,7 +4,7 @@ from app.core.resolver import Candidate
 
 SETTINGS = Settings(
     providers={
-        "openrouter": ProviderConfig(base_url="https://x/v1", protocol="openai", api_key_env=None)
+        "openrouter": ProviderConfig(base_url="https://x/v1", protocol="openai", api_key=None)
     },
     models={
         "sem_tools": ModelConfig(

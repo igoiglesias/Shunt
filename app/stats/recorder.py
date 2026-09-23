@@ -25,25 +25,17 @@ from collections.abc import Callable
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
+from app.config.config import (
+    BATCH_SIZE,
+    DRAIN_TIMEOUT,
+    INTERVAL,
+    MAX_QUEUE,
+    RECONNECT_SECONDS,
+    SUBSCRIBER_QUEUE,
+)
 from app.stats.models import RequestBody, RequestEvent
 
 logger = logging.getLogger("shunt")
-
-MAX_QUEUE = 10_000
-BATCH_SIZE = 200
-INTERVAL = 1.0
-# Fila de cada navegador no painel. Pequena de proposito: leitor lento perde
-# linha ao vivo, nunca segura quem esta gravando.
-SUBSCRIBER_QUEUE = 100
-# Prazo do dreno final. Um `aclose` que espera o banco indefinidamente trocaria
-# um desligamento limpo por um processo pendurado.
-DRAIN_TIMEOUT = 5.0
-# Intervalo entre tentativas de reabrir um banco que nao abriu no boot. Medido
-# num `make prod` com oito workers: tres deles subiram sem engine e ficariam
-# assim para sempre, entao o painel respondia "sem banco" em um terco das
-# cargas enquanto os outros gravavam. Um banco que volta -- ou que so estava
-# ocupado no instante do boot -- precisa de uma segunda chance.
-RECONNECT_SECONDS = 30.0
 
 
 class Recorder:

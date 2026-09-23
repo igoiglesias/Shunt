@@ -23,15 +23,13 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+# Janela padrao e tetos (knobs em `app/config/config.py`). A janela vem do
+# cliente, mas presa entre limites: uma consulta de 10 anos varreria a tabela
+# inteira, que e o que os indices existem para evitar.
+from app.config.config import DEFAULT_HOURS, MAX_HOURS
 from app.stats import queries
 
 router = APIRouter()
-
-# Janela padrao e tetos. A janela vem do cliente, mas presa entre limites: uma
-# consulta de 10 anos varreria a tabela inteira, que e o que os indices existem
-# para evitar.
-DEFAULT_HOURS = 24.0
-MAX_HOURS = 24.0 * 30
 # Um minuto e o menor recorte util: abaixo disso a janela nao contem nem uma
 # conversa inteira de um harness.
 MIN_HOURS = 1 / 60

@@ -7,10 +7,10 @@ chega ao proprio provedor: foi o que aconteceu com um alias chamado
 proxima escotilha nao repita o erro em silencio.
 """
 
-from app.config.settings import load_settings
+from app.config.seed import catalog_settings
 from app.core.resolver import resolve
 
-settings = load_settings()
+settings = catalog_settings()
 
 
 def test_every_escape_hatch_route_reaches_the_provider_it_names():

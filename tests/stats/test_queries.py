@@ -594,7 +594,7 @@ def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_en
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key=None
             )
         },
         models={

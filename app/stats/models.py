@@ -174,7 +174,10 @@ class Provider(Base):
     name: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     base_url: Mapped[str] = mapped_column(String(512), nullable=False)
     protocol: Mapped[str] = mapped_column(String(16), nullable=False)  # "openai" or "anthropic"
-    api_key_env: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Chave bruta do provedor. Antes era `api_key_env` (nome da variavel de
+    # ambiente); agora a chave e persistida no banco. O seed a popula uma vez
+    # a partir da variavel de ambiente no primeiro boot.
+    api_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

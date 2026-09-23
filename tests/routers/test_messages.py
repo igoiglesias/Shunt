@@ -21,7 +21,7 @@ ANTHROPIC_SETTINGS = Settings(
         "anthropic": ProviderConfig(
             base_url="https://api.anthropic.test",
             protocol="anthropic",
-            api_key_env="SHUNT_TEST_KEY",
+            api_key="sk-da-config",
         )
     },
     models={
@@ -208,7 +208,7 @@ def test_count_tokens_asks_the_candidate_that_would_actually_serve():
             "providers": {
                 **ANTHROPIC_SETTINGS.providers,
                 "openrouter": ProviderConfig(
-                    base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                    base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
                 ),
             },
             "models": {
@@ -240,7 +240,6 @@ def test_count_tokens_is_forwarded_when_the_target_speaks_anthropic(monkeypatch)
     It also proves the request is built like every other outbound one: the
     model is the candidate's, and the credential is the configured one -- the
     client's own key must not reach a third-party provider here either."""
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
         return_value=httpx.Response(200, json={"input_tokens": 4321})
     )

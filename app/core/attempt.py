@@ -10,10 +10,9 @@ from enum import Enum
 
 import httpx
 
-MAX_ATTEMPTS = 3
-RETRY_AFTER_BUDGET = 5.0
-TOTAL_DEADLINE = 120.0
-FIRST_EVENT_DEADLINE = 20.0
+from app.config.config import (
+    RETRY_AFTER_BUDGET,
+)
 
 
 class Outcome(Enum):

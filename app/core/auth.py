@@ -15,18 +15,15 @@ entao responderia o proprio HTML. Em vez disso a dependencia levanta
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse
 
+# Nome e alcance do cookie de sessao (definicoes em `app/config/config.py`).
+# Por que o `path` precisa ser `"/"` e nao `"/admin"` -- as paginas do admin
+# (em `/admin/...`) fazem fetch de dados em `/api/...`, entao o cookie tem de
+# alcancar os dois -- esta na definicao do valor, em `config.py`.
+from app.config.config import (
+    ADMIN_COOKIE,
+    LOGIN_URL,
+)
 from app.core.security import decode_jwt
-
-# Nome e alcance do cookie de sessao. `path` cobre a area inteira do admin --
-# painel, requisicoes, configuracao, usuarios e tokens -- e nao vaza para o
-# resto do proxy (a superficie v1, em particular). `httponly` porque nenhum
-# script da pagina precisa ler o token, e `samesite=strict` porque o fluxo e
-# so navegacao dentro do proprio dominio.
-ADMIN_COOKIE = "shunt_admin"
-ADMIN_COOKIE_PATH = "/admin"
-ADMIN_COOKIE_MAX_AGE = 12 * 60 * 60
-
-LOGIN_URL = "/admin/login"
 
 
 class LoginRequired(Exception):

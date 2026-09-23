@@ -74,7 +74,11 @@ def snapshot_current_settings(session: Session) -> dict:
                 "name": p.name,
                 "base_url": p.base_url,
                 "protocol": p.protocol,
-                "api_key_env": p.api_key_env,
+                # A chave bruta NUNCA entra no snapshot de rollback: se
+                # gravarmos a verdadeira em `config_versions`, o banco de
+                # auditoria fica com a credencial em claro. Registramos
+                # apenas se ela existe; o valor real so muda no providers.
+                "api_key": bool(p.api_key),
             }
             for p in providers
         ],
@@ -167,7 +171,7 @@ async def create_provider(
     name: Annotated[str, Form()],
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
-    api_key_env: Annotated[str | None, Form()] = None,
+    api_key: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
@@ -178,7 +182,7 @@ async def create_provider(
             # Sem isso o valor invalido commita e load_settings_from_db levanta
             # ValidationError depois -> 500 em toda mutacao ate a linha sair.
             raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
-        p = Provider(name=name, base_url=base_url, protocol=protocol, api_key_env=api_key_env)
+        p = Provider(name=name, base_url=base_url, protocol=protocol, api_key=api_key)
         session.add(p)
         session.commit()
         create_config_version(session)
@@ -193,7 +197,7 @@ async def update_provider(
     name: str,
     base_url: Annotated[str, Form()],
     protocol: Annotated[str, Form()],
-    api_key_env: Annotated[str | None, Form()] = None,
+    api_key: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
@@ -205,7 +209,12 @@ async def update_provider(
             raise HTTPException(status_code=400, detail="Protocol deve ser openai ou anthropic")
         p.base_url = base_url
         p.protocol = protocol
-        p.api_key_env = api_key_env
+        # Campo vazio (ausente no form chega como None, presente vazio como
+        # None tambem no FastAPI) significa "nao mude a chave": so um valor
+        # nao vazio sobrescreve. Assim o Salvar do formulario, que envia o
+        # campo vazio por padrao, nunca apaga a chave gravada.
+        if api_key:
+            p.api_key = api_key
         session.commit()
         create_config_version(session)
         settings = load_settings_from_db(session)
@@ -639,6 +648,12 @@ async def rollback_config(
         if not cv:
             raise HTTPException(status_code=404, detail="Versao nao encontrada")
         snap = json.loads(cv.snapshot_json)
+        # O snapshot nao carrega a chave bruta (so o bool de existencia, para a
+        # credencial nunca entrar no historico). A chave atual por nome de
+        # provider sobrevive ao rollback; provider novo no snapshot fica sem chave.
+        current_keys = {
+            p.name: p.api_key for p in session.execute(select(Provider)).scalars()
+        }
         # Limpa tabelas de config (ordem respeita FKs)
         session.execute(delete(RouteCandidate))
         session.execute(delete(Route))
@@ -647,6 +662,7 @@ async def rollback_config(
         # Reinsere do snapshot
         for pdata in snap["providers"]:
             p = Provider(**pdata)
+            p.api_key = current_keys.get(p.name)
             session.add(p)
         session.flush()
         for mdata in snap["models"]:

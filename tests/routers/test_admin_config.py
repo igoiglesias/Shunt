@@ -59,7 +59,7 @@ def client(tmp_path: Path, *, no_engine: bool = False):
 
 def seed_db(session: Session):
     """Populate one provider + two models + one route + one real version."""
-    p = Provider(name="openrouter", base_url="https://or.test", protocol="openai", api_key_env=None)
+    p = Provider(name="openrouter", base_url="https://or.test", protocol="openai", api_key=None)
     session.add(p)
     session.flush()
     m1 = Model(alias="free", provider_id=p.id, upstream_model="vendor/free", supports_tools=True, supports_streaming=True, supports_vision=False, context_window=64000, max_output_tokens=8192, is_default=True)
@@ -107,6 +107,27 @@ def test_config_page_renders_seeded_names(monkeypatch, tmp_path):
     assert "opus" in r.text
 
 
+def test_providers_list_never_renders_the_full_key(monkeypatch, tmp_path):
+    """A chave completa nunca entra no HTML; so os 4 ultimos digitos aparecem
+    depois da mascara."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(
+                Provider(
+                    name="p1",
+                    base_url="https://p1.test",
+                    protocol="openai",
+                    api_key="sk-chave-secreta-1234",
+                )
+            )
+            s.commit()
+        r = c.get("/admin/config/providers", cookies=COOKIE)
+    assert r.status_code == 200
+    assert "sk-chave-secreta-1234" not in r.text
+    assert "1234" in r.text
+
+
 # ---- Providers -------------------------------------------------------------
 
 
@@ -119,6 +140,21 @@ def test_create_provider(monkeypatch, tmp_path):
         rows = s.execute(select(Provider).where(Provider.name == "anthropic")).scalars().all()
     assert len(rows) == 1
     assert rows[0].base_url == "https://ai.test"
+
+
+def test_create_provider_persists_api_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers",
+            data={"name": "p1", "base_url": "u", "protocol": "openai", "api_key": "sk-nova"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "p1")).scalar_one()
+    assert p.api_key == "sk-nova"
+    assert app.state.settings.providers["p1"].api_key == "sk-nova"
 
 
 def test_create_provider_duplicate_400(monkeypatch, tmp_path):
@@ -663,7 +699,7 @@ def test_reload_reflects_db_mutation(monkeypatch, tmp_path):
         with Session(app.state.recorder.engine) as s:
             seed_db(s)
         with Session(app.state.recorder.engine) as s:
-            s.add(Provider(name="newprov", base_url="https://np.test", protocol="openai", api_key_env=None))
+            s.add(Provider(name="newprov", base_url="https://np.test", protocol="openai", api_key=None))
             s.commit()
         r = c.post("/admin/config/reload", cookies=COOKIE)
     assert r.status_code == 200
@@ -683,7 +719,7 @@ def test_reload_pool_no_keyerror(monkeypatch, tmp_path):
     monkeypatch.setenv("ADMIN_TOKEN", "t")
     with client(tmp_path) as c:
         with Session(app.state.recorder.engine) as s:
-            s.add(Provider(name="newprov", base_url="https://np.test", protocol="openai", api_key_env=None))
+            s.add(Provider(name="newprov", base_url="https://np.test", protocol="openai", api_key=None))
             s.commit()
         r = c.post("/admin/config/reload", cookies=COOKIE)
     assert r.status_code == 200
@@ -717,6 +753,87 @@ def test_rollback_restores_snapshot(monkeypatch, tmp_path):
     assert app.state.settings.default_model == "free"
 
 
+def test_rollback_preserves_provider_api_key_by_name(monkeypatch, tmp_path):
+    """O snapshot nao grava a chave bruta (so o bool de existencia), entao o
+    rollback tem de carregar a chave atual do banco para o provider de mesmo
+    nome. Sem isso `Provider(**snapshot)` grava o bool na coluna String."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", api_key="sk-real-chave"))
+            s.commit()
+            cv_id = create_config_version(s).id
+            s.commit()
+        c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u2", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+        r = c.post(f"/admin/config/rollback/{cv_id}", cookies=COOKIE, follow_redirects=False)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "p1")).scalar_one()
+    assert p.base_url == "u"
+    assert p.api_key == "sk-real-chave"
+    # apply_settings recarrega do banco: a chave carregada do snapshot final
+    # nao pode ser o bool gravado no historico.
+    assert app.state.settings.providers["p1"].api_key == "sk-real-chave"
+
+
+def test_edit_provider_form_does_not_prefill_the_key_with_bullets(monkeypatch, tmp_path):
+    """Formulario pre-preenchido com •••••••• faz o Salvar enviar os bullet
+    e o update sobrescrever a chave real com a string de mascaramento."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", api_key="sk-real-chave"))
+            s.commit()
+        r = c.get("/admin/config/providers/p1/edit", cookies=COOKIE)
+    assert r.status_code == 200
+    assert 'value="••••••••"' not in r.text
+
+
+def test_patch_provider_empty_api_key_keeps_current_key(monkeypatch, tmp_path):
+    """Campo vazio no PATCH significa 'nao mude a chave'."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", api_key="sk-real-chave"))
+            s.commit()
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u2", "protocol": "openai", "api_key": ""},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "p1")).scalar_one()
+    assert p.api_key == "sk-real-chave"
+    # apply_settings recarrega do banco: a chave sobrevive as settings vivas.
+    assert app.state.settings.providers["p1"].api_key == "sk-real-chave"
+
+
+def test_patch_provider_with_key_overwrites_current_key(monkeypatch, tmp_path):
+    """Valor nao vazio no campo sobrescreve a chave gravada."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai", api_key="sk-antiga"))
+            s.commit()
+        r = c.patch(
+            "/admin/config/providers/p1",
+            data={"base_url": "u", "protocol": "openai", "api_key": "sk-nova"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        p = s.execute(select(Provider).where(Provider.name == "p1")).scalar_one()
+    assert p.api_key == "sk-nova"
+    # apply_settings recarrega do banco: a chave nova tambem entra nas settings
+    # vivas, de onde o dispatcher lera em runtime.
+    assert app.state.settings.providers["p1"].api_key == "sk-nova"
+
+
 def test_rollback_unknown_id_404(monkeypatch, tmp_path):
     monkeypatch.setenv("ADMIN_TOKEN", "t")
     with client(tmp_path) as c:
@@ -747,7 +864,7 @@ def test_load_settings_from_db(monkeypatch, tmp_path):
     monkeypatch.setenv("ADMIN_TOKEN", "t")
     with client(tmp_path):
         with Session(app.state.recorder.engine) as s:
-            p = Provider(name="groq", base_url="https://g.test", protocol="openai", api_key_env=None)
+            p = Provider(name="groq", base_url="https://g.test", protocol="openai", api_key=None)
             s.add(p); s.flush()
             m1 = Model(alias="g-free", provider_id=p.id, upstream_model="groq/compound", supports_tools=True, supports_streaming=False, supports_vision=False, context_window=8192, max_output_tokens=1024, is_default=True)
             m2 = Model(alias="g-fast", provider_id=p.id, upstream_model="groq/llama", supports_tools=False, supports_streaming=True, supports_vision=False, context_window=4096, max_output_tokens=512, is_default=False)
@@ -763,7 +880,7 @@ def test_load_settings_from_db(monkeypatch, tmp_path):
         with Session(app.state.recorder.engine) as s:
             settings = load_settings_from_db(s)
 
-    assert settings.providers["groq"] == ProviderConfig(base_url="https://g.test", protocol="openai", api_key_env=None)
+    assert settings.providers["groq"] == ProviderConfig(base_url="https://g.test", protocol="openai", api_key=None)
     assert settings.models["g-free"] == ModelConfig(provider="groq", model="groq/compound", supports=ModelCaps(tools=True, streaming=False, vision=False), context_window=8192, max_output_tokens=1024)
     assert settings.models["g-fast"] == ModelConfig(provider="groq", model="groq/llama", supports=ModelCaps(tools=False, streaming=True, vision=False), context_window=4096, max_output_tokens=512)
     assert settings.routes == [("chat", ["g-free", "g-fast"])]

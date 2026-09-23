@@ -8,16 +8,16 @@ def build(routes, default_model=None):
     return Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://openrouter.ai/api/v1", protocol="openai", api_key_env=None
+                base_url="https://openrouter.ai/api/v1", protocol="openai", api_key=None
             ),
             "anthropic": ProviderConfig(
-                base_url="https://api.anthropic.com", protocol="anthropic", api_key_env=None
+                base_url="https://api.anthropic.com", protocol="anthropic", api_key=None
             ),
             "local": ProviderConfig(
-                base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
             ),
             "openai": ProviderConfig(
-                base_url="https://api.openai.com/v1", protocol="openai", api_key_env=None
+                base_url="https://api.openai.com/v1", protocol="openai", api_key=None
             ),
         },
         models={
@@ -113,7 +113,7 @@ def test_transparent_rejects_name_with_no_declared_provider():
     settings = Settings(
         providers={
             "local": ProviderConfig(
-                base_url="http://localhost:8080/v1", protocol="openai", api_key_env=None
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
             )
         },
         models={},

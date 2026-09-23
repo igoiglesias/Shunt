@@ -12,7 +12,7 @@ from app.core.upstream import UpstreamPool
 SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -121,7 +121,7 @@ async def test_openai_in_anthropic_out_translates_both_ways():
     settings = Settings(
         providers={
             "anthropic": ProviderConfig(
-                base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+                base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
             )
         },
         models={
@@ -185,7 +185,7 @@ async def test_exhausted_chain_returns_the_last_error_and_names_every_candidate(
 KEYED = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env="SHUNT_TEST_KEY"
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-da-config"
         )
     },
     models={
@@ -202,7 +202,7 @@ TRANSPARENT = Settings(
         "anthropic": ProviderConfig(
             base_url="https://api.anthropic.test",
             protocol="anthropic",
-            api_key_env="SHUNT_TEST_KEY",
+            api_key="sk-da-config",
         )
     },
     models={},
@@ -223,7 +223,6 @@ CLIENT_HEADERS = {
 
 @respx.mock
 async def test_routed_mode_never_forwards_any_inbound_header(monkeypatch):
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=ok_payload("vendor/free"))
     )
@@ -242,7 +241,6 @@ async def test_routed_mode_never_forwards_any_inbound_header(monkeypatch):
 
 @respx.mock
 async def test_transparent_mode_passes_inbound_headers_verbatim_minus_three(monkeypatch):
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://api.anthropic.test/v1/messages").mock(
         return_value=httpx.Response(
             200,
@@ -276,7 +274,6 @@ async def test_transparent_mode_passes_inbound_headers_verbatim_minus_three(monk
 
 
 def test_outbound_headers_routed_uses_x_api_key_for_an_anthropic_provider(monkeypatch):
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     candidate = Candidate(alias=None, provider="anthropic", model="m", protocol="anthropic")
     headers = outbound_headers(
         ShuntRequest("anthropic", BODY, dict(CLIENT_HEADERS)), candidate, TRANSPARENT
@@ -288,11 +285,23 @@ def test_outbound_headers_routed_uses_x_api_key_for_an_anthropic_provider(monkey
 
 
 def test_outbound_headers_routed_without_a_configured_key_sends_no_credential():
+    """Sem chave configurada nao ha credencial para enviar: o rastro de
+    cabecalhos fica com o minimo."""
+    keyless = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
     candidate = Candidate(
         alias="free", provider="openrouter", model="vendor/free", protocol="openai"
     )
     headers = outbound_headers(
-        ShuntRequest("anthropic", BODY, dict(CLIENT_HEADERS)), candidate, SETTINGS
+        ShuntRequest("anthropic", BODY, dict(CLIENT_HEADERS)), candidate, keyless
     )
     assert headers == {"content-type": "application/json"}
 
@@ -318,7 +327,7 @@ def test_outbound_headers_transparent_drops_exactly_the_listed_headers():
 ANTHROPIC_SETTINGS = Settings(
     providers={
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         )
     },
     models={
@@ -419,7 +428,7 @@ async def test_same_protocol_passes_the_body_through_rewriting_only_the_model():
 NO_TOOLS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -631,7 +640,7 @@ async def test_a_json_error_body_that_is_not_an_object_falls_back_to_the_raw_tex
 MIXED = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -683,7 +692,7 @@ async def test_a_successful_result_still_reports_what_happened_before_it():
 VISION = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -746,7 +755,7 @@ async def test_an_anthropic_image_drops_a_candidate_without_vision():
 ANTHROPIC_PAIR = Settings(
     providers={
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         )
     },
     models={
@@ -849,10 +858,10 @@ async def test_an_error_object_without_a_message_falls_back_to_the_raw_text():
 MIXED_PROTOCOLS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         ),
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         ),
     },
     models={
@@ -905,10 +914,10 @@ async def test_a_translator_failure_skips_the_candidate_instead_of_killing_the_c
 BLIND_THEN_SEEING = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         ),
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         ),
     },
     models={
@@ -969,10 +978,10 @@ async def test_the_probe_degrades_to_the_untranslated_body_instead_of_raising():
 PATH_SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         ),
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         ),
     },
     models={
@@ -1154,7 +1163,7 @@ def test_chain_exhausted_documents_that_dispatch_never_raises_it():
 GATEWAY = Settings(
     providers={
         "anthropic": ProviderConfig(
-            base_url="https://gateway.exemplo/v1", protocol="openai", api_key_env="SHUNT_TEST_KEY"
+            base_url="https://gateway.exemplo/v1", protocol="openai", api_key="sk-da-config"
         )
     },
     models={},
@@ -1170,7 +1179,6 @@ async def test_transparent_across_protocols_translates_both_halves(monkeypatch):
     compativel com a OpenAI e algo normal de querer. `PATHS` ja re-enderecou a
     requisicao para `/chat/completions`; mandar o corpo Anthropic cru para la e
     um 400 garantido. As duas metades traduzem."""
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5"))
     )
@@ -1218,7 +1226,6 @@ async def test_transparent_translation_uses_the_clients_cap_not_our_default(monk
     """O que continua transparente e nao contribuirmos configuracao nem
     credencial nossa. Passar `_cap()` aqui devolveria DEFAULT_MAX_OUTPUT_TOKENS
     para `alias=None` e cortaria os 999999 do cliente para 4096 em silencio."""
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5"))
     )
@@ -1239,7 +1246,6 @@ async def test_transparent_translation_uses_the_clients_cap_not_our_default(monk
 
 @respx.mock
 async def test_transparent_credentials_go_verbatim_to_the_declared_base_url(monkeypatch):
-    monkeypatch.setenv("SHUNT_TEST_KEY", "sk-da-config")
     route = respx.post("https://gateway.exemplo/v1/chat/completions").mock(
         return_value=httpx.Response(200, json=ok_payload("claude-opus-4-5"))
     )
@@ -1411,7 +1417,7 @@ async def test_an_empty_chain_answers_an_openai_client_in_its_own_dialect():
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={
@@ -1455,10 +1461,10 @@ def test_exception_text_names_a_transport_failure_with_no_exception_object():
 TINY = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         ),
         "anthropic": ProviderConfig(
-            base_url="https://api.anthropic.test", protocol="anthropic", api_key_env=None
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
         ),
     },
     models={
@@ -1582,7 +1588,7 @@ async def test_a_route_with_no_candidates_is_refused_by_the_configuration():
 ALIAS_DIFFERS = Settings(
     providers={
         "openrouter": ProviderConfig(
-            base_url="https://api.test/v1", protocol="openai", api_key_env=None
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
         )
     },
     models={
@@ -1667,7 +1673,7 @@ async def test_the_last_resort_note_names_the_model_not_the_alias():
     settings = Settings(
         providers={
             "openrouter": ProviderConfig(
-                base_url="https://api.test/v1", protocol="openai", api_key_env=None
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
             )
         },
         models={

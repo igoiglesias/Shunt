@@ -23,9 +23,11 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import Engine, Integer, String, and_, case, cast, delete, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.config.config import DEFAULT_HOURS, MAX_SEARCH_LIMIT, SEARCH_LIMIT, TOOL_LIMIT
 from app.stats.models import RequestBody, RequestEvent
 
-DEFAULT_HOURS = 24
+# Topo de linhas por agrupamento (nao o teto de corpo): dez linhas fecham o
+# top do painel sem afogar a tela.
 DEFAULT_LIMIT = 10
 
 
@@ -593,9 +595,9 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     }
 
 
-# Oito linhas bastam: a nona ferramenta de um catalogo de harness nunca foi
-# chamada, e a tabela existe para mostrar as que foram.
-TOOL_LIMIT = 8
+# Oito ferramentas (`TOOL_LIMIT`, em `app/config/config.py`) bastam: a nona de
+# um catalogo de harness nunca foi chamada, e a tabela existe para mostrar as
+# que foram.
 
 
 def tool_usage(
@@ -656,8 +658,8 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
     ]
 
 
-SEARCH_LIMIT = 50
-MAX_SEARCH_LIMIT = 500
+# Teto da busca livre (`SEARCH_LIMIT` / `MAX_SEARCH_LIMIT`, em
+# `app/config/config.py`).
 
 
 def encode_cursor(row: RequestEvent) -> str:

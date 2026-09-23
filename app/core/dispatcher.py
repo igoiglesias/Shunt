@@ -32,15 +32,15 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.config.settings import Settings
-from app.core.attempt import (
+from app.config.config import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     FIRST_EVENT_DEADLINE,
     MAX_ATTEMPTS,
+    PING_INTERVAL,
     TOTAL_DEADLINE,
-    Outcome,
-    backoff,
-    classify,
 )
+from app.config.settings import Settings
+from app.core.attempt import Outcome, backoff, classify
 from app.core.capabilities import requirements_of
 from app.core.observability import RequestLog, log_request
 from app.core.project import project_and_session
@@ -77,8 +77,6 @@ PATHS = {
 TRANSPARENT_DROP = frozenset(
     {"host", "content-length", "content-encoding", "transfer-encoding", "accept-encoding"}
 )
-
-DEFAULT_MAX_OUTPUT_TOKENS = 4096
 
 # Nomes de erro da OpenAI. A tabela equivalente da Anthropic vive em
 # `app/translate/to_anthropic.py`; as duas nao coincidem (a OpenAI nao tem
@@ -231,19 +229,18 @@ def _translate_response(data: dict, req: ShuntRequest, candidate: Candidate) -> 
 
 
 def _missing_credential(candidate: Candidate, settings: Settings) -> str | None:
-    """Nome da variavel que o provedor declara e o ambiente nao tem, ou None.
+    """None se credencial presente, ou string descrevendo a falta.
 
-    Declarar `api_key_env` e nao ter a variavel e erro de instalacao, nao de
-    requisicao: chamar assim manda um pedido sem credencial, leva 401 e gasta
-    uma tentativa para descobrir o que a configuracao ja sabia. Um provedor com
-    `api_key_env=None` -- um llama.cpp aberto, por exemplo -- nao quer
-    credencial nenhuma e continua sendo chamado.
+    A chave mora no banco (Provider.api_key). Se None ou string vazia, o
+    provedor nao tem credencial configurada -- caso em que ele so e chamado
+    se for um endpoint aberto (llama.cpp sem auth). Se nao for transparente
+    e faltar chave, devolve uma mensagem de erro que o trace loga.
     """
     if candidate.transparent:
         return None
-    env = settings.providers[candidate.provider].api_key_env
-    if env and not settings.api_key(candidate.provider):
-        return env
+    key = settings.api_key(candidate.provider)
+    if not key:
+        return f"provider {candidate.provider} sem chave configurada"
     return None
 
 
@@ -611,7 +608,6 @@ async def _dispatch(
 #   translating would only let us corrupt it.
 # ---------------------------------------------------------------------------
 
-PING_INTERVAL = 5.0
 DONE = b"data: [DONE]\n\n"
 
 

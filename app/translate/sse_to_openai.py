@@ -42,12 +42,11 @@ Deliberate leniency, matching the rest of `app.translate`:
 import time
 from typing import Any
 
+# Mesmo teto do outro tradutor: contar pedacos, nao bytes.
+from app.config.config import ANSWER_PIECES
 from app.stats import bodies
 from app.translate.ids import to_openai_id
 from app.translate.to_openai import FINISH_REASONS
-
-# Mesmo teto do outro tradutor: contar pedacos, nao bytes.
-ANSWER_PIECES = 20_000
 
 
 class AnthropicStreamToOpenAI:

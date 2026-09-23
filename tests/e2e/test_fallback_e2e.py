@@ -156,16 +156,16 @@ def test_transport_failure_in_a_stream_names_the_exception_class(shunt, provider
 
 
 def test_candidate_whose_credential_is_unset_is_skipped_not_called_unauthenticated(
-    shunt, provider, settings, monkeypatch
+    shunt, provider, settings
 ):
-    """Declarar `api_key_env` e nao ter a variavel e erro de instalacao.
+    """`api_key=None` num provedor roteado e erro de instalacao.
 
     Chamar o provedor assim mando um pedido sem credencial, que volta 401 e
-    gasta uma tentativa para dizer o que a configuracao ja sabia. Um provedor
-    que declara `api_key_env=None` e outro caso: ele nao quer credencial, e
-    continua sendo chamado.
+    gasta uma tentativa para dizer o que a configuracao ja sabia. Um candidato
+    transparente e outro caso: ele usa a chave do cliente, e continua sendo
+    chamado sem credencial do servidor.
     """
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings.providers["openrouter"].api_key = None
     settings.routes = [("opus", ["free", "qwen"])]
     provider.queue(Scripted(json_body={**OK, "model": "qwen3-8b"}))
     response = shunt.post("/v1/messages", json=ASK)
@@ -175,17 +175,17 @@ def test_candidate_whose_credential_is_unset_is_skipped_not_called_unauthenticat
     assert provider.calls[0].url.host == "fake.local", "a chamada foi para o provedor errado"
 
 
-def test_the_error_names_the_environment_variable_that_is_missing(shunt, settings, monkeypatch):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+def test_the_error_names_the_provider_without_a_credential(shunt, settings):
+    settings.providers["openrouter"].api_key = None
     settings.routes = [("opus", ["free"])]
     body = shunt.post("/v1/messages", json=ASK).json()
-    assert "OPENROUTER_API_KEY" in body["error"]["message"]
+    assert "provider openrouter sem chave configurada" in body["error"]["message"]
 
 
 def test_a_stream_also_skips_the_candidate_whose_credential_is_unset(
-    shunt, provider, settings, monkeypatch
+    shunt, provider, settings
 ):
-    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    settings.providers["openrouter"].api_key = None
     settings.routes = [("opus", ["free", "qwen"])]
     provider.queue(
         Scripted(
@@ -200,18 +200,18 @@ def test_a_stream_also_skips_the_candidate_whose_credential_is_unset(
     assert len(provider.calls) == 1, "o candidato sem credencial nao pode ser chamado"
     assert provider.calls[0].url.host == "fake.local", "a chamada foi para o provedor errado"
     assert "do local" in body
-    assert "OPENROUTER_API_KEY" not in body
+    assert "sem chave configurada" not in body
 
 
 def test_a_transparent_candidate_is_called_even_with_no_server_credential(
-    shunt, provider, monkeypatch
+    shunt, provider, settings
 ):
     """Transparente usa a chave do CLIENTE, entao a do servidor pode faltar.
 
     Sem esta distincao, a regra de credencial ausente mataria justamente o modo
     em que o proxy nao deve ter credencial nenhuma.
     """
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings.providers["anthropic"].api_key = None
     provider.queue(
         Scripted(
             json_body={
