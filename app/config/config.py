@@ -39,6 +39,20 @@ TIMEOUT_POOL = float(os.environ.get("SHUNT_TIMEOUT_POOL", "10"))
 DEFAULT_MAX_OUTPUT_TOKENS = int(os.environ.get("SHUNT_DEFAULT_MAX_OUTPUT_TOKENS", "4096"))
 PING_INTERVAL = float(os.environ.get("SHUNT_PING_INTERVAL", "5"))
 
+# --- Token do Shunt e credencial do harness ---
+# Cache de validacao do token: hash -> id, por processo. Curto: a revogacao
+# no mesmo processo invalida na hora, em outro worker vale ate o TTL.
+TOKEN_CACHE_TTL = float(os.environ.get("SHUNT_TOKEN_CACHE_TTL", "60"))
+# Credencial do harness guardada so em memoria, por token e destino.
+CLIENT_CREDENTIAL_TTL = float(os.environ.get("SHUNT_CLIENT_CREDENTIAL_TTL", str(12 * 60 * 60)))
+
+# --- Passagem direta ---
+PASSTHROUGH_BODY_LIMIT = int(os.environ.get("SHUNT_PASSTHROUGH_BODY_LIMIT", str(64 * 1024 * 1024)))
+PASSTHROUGH_TIMEOUT_CONNECT = float(os.environ.get("SHUNT_PASSTHROUGH_TIMEOUT_CONNECT", "10"))
+PASSTHROUGH_TIMEOUT_READ = float(os.environ.get("SHUNT_PASSTHROUGH_TIMEOUT_READ", "120"))
+PASSTHROUGH_TIMEOUT_WRITE = float(os.environ.get("SHUNT_PASSTHROUGH_TIMEOUT_WRITE", "30"))
+PASSTHROUGH_TIMEOUT_POOL = float(os.environ.get("SHUNT_PASSTHROUGH_TIMEOUT_POOL", "10"))
+
 # --- Admin / sessão ---
 ADMIN_COOKIE = "shunt_admin"
 # `path` precisa ser `"/"` e nao `"/admin"` (defeito medido): as paginas do
