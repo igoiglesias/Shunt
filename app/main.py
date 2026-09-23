@@ -17,6 +17,7 @@ from app.config.seed import seed_catalog_if_empty
 from app.config.settings import Settings, load_settings_from_db
 from app.core.auth import LoginRequired, login_redirect, require_admin
 from app.core.observability import configure_logging, set_recorder
+from app.core.prefix import TokenPrefixMiddleware
 from app.core.upstream import UpstreamPool
 from app.routers.admin_auth import router as admin_auth_router
 from app.routers.admin_config import router as admin_config_router
@@ -203,13 +204,18 @@ SECURITY_SCHEMES = {
     },
 }
 
+# `redirect_slashes=False` (medido no brief da Task 1.3): o 307 padrao de
+# rota com barra final perdia qualquer prefixo `/t/<token>/` na Location, e
+# nenhuma tela ou rota do app termina com barra.
 app = FastAPI(
     title="Shunt",
     version=_version(),
     description=DESCRIPTION,
     openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
+    redirect_slashes=False,
 )
+app.add_middleware(TokenPrefixMiddleware)
 
 
 def _openapi() -> dict:
