@@ -60,12 +60,33 @@ class _Gate:
 
     def give_back(self) -> None:
         # Toda espera na fila esta pendente: so esta funcao conclui uma (e a
-        # tira da fila), e `abandon` tira da fila quem desistiu.
-        if self._waiters:
+        # tira da fila), e `abandon` tira da fila quem desistiu. O lugar so
+        # passa direto a quem espera quando cabe no limite ATUAL: depois de um
+        # `resize` para baixo `in_use` pode estar acima do limite, e entregar
+        # o lugar manteria o excesso para sempre. Nesse caso ele some ate a
+        # contagem voltar ao limite.
+        if self._waiters and self.in_use <= self.limit:
             # O lugar passa direto para quem esperava: `in_use` nao muda.
             self._waiters.popleft().set_result(None)
             return
         self.in_use -= 1
+
+    def resize(self, limit: int) -> None:
+        """Limite novo, no lugar. Subiu: acorda quem espera ate encher a
+        capacidade nova. Desceu: quem esta em voo continua, e `give_back`
+        segura o handoff ate a contagem caber."""
+        self.limit = limit
+        while self._waiters and self.in_use < self.limit:
+            self.in_use += 1
+            self._waiters.popleft().set_result(None)
+
+    def release_all(self) -> None:
+        """Gate que deixou de existir (limite ou provedor removido): toda
+        espera vira um lugar agora. `in_use` sobe junto para o `give_back`
+        de cada um devolver simetricamente; ninguem mais le este gate."""
+        while self._waiters:
+            self.in_use += 1
+            self._waiters.popleft().set_result(None)
 
 
 class Slot:
@@ -139,12 +160,10 @@ class SlotRequest:
 class UpstreamPool:
     """Clientes httpx e slots de concorrencia, por provedor.
 
-    Os slots vivem no pool, e `apply_settings` troca o pool inteiro a cada
-    mudanca de configuracao: o limite novo vale na hora. Transiente aceito: uma
-    requisicao em voo no pool antigo continua segurando o slot ANTIGO, entao
-    por alguns instantes o provedor pode receber o limite novo mais o que ja
-    estava em voo. O limite tambem e por processo: com varios workers do
-    uvicorn, cada um conta os seus.
+    O pool nunca e recriado: `update` reconcilia os gates no lugar a cada
+    edicao de configuracao, preservando `in_use` e as esperas em fila (ver
+    `update`/`_reconcile_gates`). O limite e por processo: com varios workers
+    do uvicorn, cada um conta os seus.
     """
 
     def __init__(
@@ -159,6 +178,28 @@ class UpstreamPool:
             for name, config in settings.providers.items()
             if config.max_concurrency is not None
         }
+
+    async def update(self, settings: Settings) -> None:
+        """Reconcilia o pool com um catalogo novo, sem trocar de identidade.
+
+        Chamado por `apply_settings` a cada edicao (e pelo vigia de versao):
+        recriar o pool cortava streams em voo e zerava `in_use`.
+        """
+        self._settings = settings
+        self._reconcile_gates(settings)
+
+    def _reconcile_gates(self, settings: Settings) -> None:
+        for name, config in settings.providers.items():
+            gate = self._gates.get(name)
+            if config.max_concurrency is None:
+                if gate is not None:
+                    self._gates.pop(name).release_all()
+            elif gate is None:
+                self._gates[name] = _Gate(config.max_concurrency)
+            elif gate.limit != config.max_concurrency:
+                gate.resize(config.max_concurrency)
+        for name in [name for name in self._gates if name not in settings.providers]:
+            self._gates.pop(name).release_all()
 
     def get(self, provider: str) -> httpx.AsyncClient:
         if provider not in self._clients:

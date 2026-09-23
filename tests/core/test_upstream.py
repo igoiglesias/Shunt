@@ -315,3 +315,133 @@ async def test_cancelling_an_unused_request_twice_returns_its_place_once():
     assert pool.in_use("local") == 1
     assert other is not None
     other.release()
+
+
+# ---------------------------------------------------------------------------
+# update(): gates reconciliados no lugar, sem zerar in_use
+# ---------------------------------------------------------------------------
+
+
+def _limited(**limits: int | None) -> Settings:
+    return Settings(
+        providers={
+            name: ProviderConfig(
+                base_url=f"http://{name}.test/v1", protocol="openai", max_concurrency=limit
+            )
+            for name, limit in limits.items()
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+
+
+async def test_update_raising_the_limit_wakes_waiters_up_to_the_new_capacity():
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    first = pool.request_slot("local")
+    second = pool.request_slot("local")
+    third = pool.request_slot("local")
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert await first.wait(0) is not None
+    assert await second.wait(0) is not None
+    # Capacidade nova (3) ja ocupada: o terceiro continua na fila.
+    assert await third.wait(0) is None
+    assert pool.in_use("local") == 3
+    third.cancel()
+    held.release()
+    await pool.aclose()
+
+
+async def test_update_lowering_the_limit_keeps_in_flight_and_holds_new_requests():
+    pool = UpstreamPool(_limited(local=2))
+    a = pool.try_slot("local")
+    b = pool.try_slot("local")
+    assert a is not None and b is not None
+    await pool.update(_limited(local=1))
+    assert pool.in_use("local") == 2  # preservado, nao zerado
+    assert pool.try_slot("local") is None
+    waiting = pool.request_slot("local")
+    a.release()  # 2 -> 1: ainda nao cabe entregar acima do limite novo
+    assert pool.in_use("local") == 1
+    assert await waiting.wait(0) is None
+    b.release()  # 1 <= 1: agora o lugar passa direto a quem espera
+    got = await waiting.wait(0)
+    assert got is not None
+    assert pool.in_use("local") == 1
+    got.release()
+    await pool.aclose()
+
+
+async def test_update_removing_the_limit_releases_waiters_at_once():
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(local=None))
+    assert pool.limit("local") is None
+    got = await waiting.wait(0)
+    assert got is not None
+    got.release()  # devolve num gate orfao: sem efeito no pool
+    held.release()
+    assert pool.in_use("local") == 0
+    assert pool.try_slot("local") is not None
+    await pool.aclose()
+
+
+async def test_update_adding_a_limit_to_a_provider_creates_its_gate():
+    pool = UpstreamPool(_limited(local=None))
+    assert pool.limit("local") is None
+    await pool.update(_limited(local=1))
+    assert pool.limit("local") == 1
+    assert pool.try_slot("local") is not None
+    assert pool.try_slot("local") is None
+    await pool.aclose()
+
+
+async def test_update_removing_the_provider_drops_its_gate_and_frees_waiters():
+    pool = UpstreamPool(_limited(local=1, cloud=None))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(cloud=None))
+    assert pool.limit("local") is None
+    assert await waiting.wait(0) is not None
+    held.release()
+    await pool.aclose()
+
+
+async def test_update_removing_the_limit_releases_every_waiter_not_just_the_first():
+    # Com uma unica espera, um `release_all` que so libera a primeira (e nao
+    # esvazia a fila toda) passaria despercebido: duas esperas tornam isso
+    # observavel.
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    first = pool.request_slot("local")
+    second = pool.request_slot("local")
+    await pool.update(_limited(local=None))
+    assert pool.limit("local") is None
+    got_first = await first.wait(0)
+    got_second = await second.wait(0)
+    assert got_first is not None
+    assert got_second is not None
+    got_first.release()
+    got_second.release()
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+async def test_in_use_survives_an_update_that_changes_nothing_relevant():
+    pool = UpstreamPool(_limited(local=2))
+    held = pool.try_slot("local")
+    assert held is not None
+    await pool.update(_limited(local=2))
+    assert pool.in_use("local") == 1
+    assert pool.limit("local") == 2
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
