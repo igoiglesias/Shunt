@@ -23,3 +23,6 @@ stats-antes-da-limpeza.db*
 
 # Guia compartilhado, fora do repositorio
 ARQUITETURA.md
+
+# Logs do stub do passo 0 (podem conter corpos de pedido)
+docs/superpowers/measurements/*.jsonl
