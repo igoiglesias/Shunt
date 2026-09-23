@@ -33,28 +33,44 @@
     <input type="number" id="max_output_tokens" name="max_output_tokens" required min="1" value="{{ model.max_output_tokens if model else 8192 }}">
   </div>
 </div>
-<div class="form-grid" style="margin-top: 8px;">
-  <div class="form-group checkbox-group">
+<div class="cap-group" role="group" aria-label="Capacidades do modelo" style="margin-top: 8px;">
+  <div class="cap">
     <!-- hidden companheiro: checkbox desmarcado envia nada sozinho, e o
          default do endpoint (True/False) decidiria o lugar de quem clicou -->
     <input type="hidden" name="supports_tools" value="false">
-    <input type="checkbox" id="supports_tools" name="supports_tools" value="true" {% if model is none or model.supports_tools %}checked{% endif %}>
-    <label for="supports_tools">Tools</label>
+    <input type="checkbox" id="supports_tools" name="supports_tools" value="true" class="cap-input" {% if model is none or model.supports_tools %}checked{% endif %}>
+    <label for="supports_tools">
+      <span class="cap-name">Tools</span>
+      <span class="cap-desc">O modelo chama ferramentas e funções</span>
+      <span class="cap-track" aria-hidden="true"></span>
+    </label>
   </div>
-  <div class="form-group checkbox-group">
+  <div class="cap">
     <input type="hidden" name="supports_streaming" value="false">
-    <input type="checkbox" id="supports_streaming" name="supports_streaming" value="true" {% if model is none or model.supports_streaming %}checked{% endif %}>
-    <label for="supports_streaming">Streaming</label>
+    <input type="checkbox" id="supports_streaming" name="supports_streaming" value="true" class="cap-input" {% if model is none or model.supports_streaming %}checked{% endif %}>
+    <label for="supports_streaming">
+      <span class="cap-name">Streaming</span>
+      <span class="cap-desc">Responde token a token, em tempo real</span>
+      <span class="cap-track" aria-hidden="true"></span>
+    </label>
   </div>
-  <div class="form-group checkbox-group">
+  <div class="cap">
     <input type="hidden" name="supports_vision" value="false">
-    <input type="checkbox" id="supports_vision" name="supports_vision" value="true" {% if model and model.supports_vision %}checked{% endif %}>
-    <label for="supports_vision">Vision</label>
+    <input type="checkbox" id="supports_vision" name="supports_vision" value="true" class="cap-input" {% if model and model.supports_vision %}checked{% endif %}>
+    <label for="supports_vision">
+      <span class="cap-name">Vision</span>
+      <span class="cap-desc">Aceita imagens na entrada</span>
+      <span class="cap-track" aria-hidden="true"></span>
+    </label>
   </div>
-  <div class="form-group checkbox-group">
+  <div class="cap">
     <input type="hidden" name="is_default" value="false">
-    <input type="checkbox" id="is_default" name="is_default" value="true" {% if model and model.is_default %}checked{% endif %}>
-    <label for="is_default">Default</label>
+    <input type="checkbox" id="is_default" name="is_default" value="true" class="cap-input" {% if model and model.is_default %}checked{% endif %}>
+    <label for="is_default">
+      <span class="cap-name">Default</span>
+      <span class="cap-desc">Usado quando o pedido não nomeia modelo</span>
+      <span class="cap-track" aria-hidden="true"></span>
+    </label>
   </div>
 </div>
 <div style="margin-top: 16px; display: flex; gap: 8px;">

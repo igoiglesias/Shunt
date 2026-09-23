@@ -39,6 +39,30 @@
   .section-header h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
   .section-header h2 em { font-style: normal; font-weight: 400; letter-spacing: 0.02em; text-transform: none; color: var(--dim); }
 
+  /* Capacidades do modelo: chave de sinalização, não checkbox cru.
+     O input fica invisível dentro da linha; para a leitura de tela segue
+     sendo um checkbox, para o olho é uma placa com nome, descrição e
+     interruptor — o estado ligado é a lâmpada verde, não só o texto. */
+  .cap-group { display: grid; border: 1px solid var(--edge); border-radius: 2px; background: var(--panel); }
+  .cap { position: relative; border-bottom: 1px solid var(--edge); }
+  .cap:last-child { border-bottom: 0; }
+  .cap-input { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .cap > label { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 8px 12px; cursor: pointer; }
+  .cap-name { font-size: 13px; font-weight: 600; color: var(--ink); }
+  .cap-desc { color: var(--dim); font-size: 12px; flex: 1; min-width: 0; }
+  @media (max-width: 480px) {
+    .cap-desc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  }
+  .cap-track { position: relative; flex: none; width: 36px; height: 20px; border: 1px solid var(--edge-strong); border-radius: 980px; background: var(--panel-2); transition: background 150ms cubic-bezier(0.2, 0, 0, 1), border-color 150ms cubic-bezier(0.2, 0, 0, 1); }
+  .cap-track::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--dim); transition: transform 150ms cubic-bezier(0.2, 0, 0, 1), background 150ms cubic-bezier(0.2, 0, 0, 1); }
+  .cap-input:checked ~ label .cap-track { background: var(--good); border-color: var(--good); }
+  .cap-input:checked ~ label .cap-track::after { transform: translateX(16px); background: var(--ground); }
+  .cap:hover .cap-track { border-color: var(--edge-strong); }
+  .cap-input:focus-visible ~ label .cap-track { outline: 2px solid var(--warning); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    .cap-track, .cap-track::after { transition: none; }
+  }
+
   .card { background: var(--panel); border: 1px solid var(--edge); border-radius: 2px; padding: 15px 17px 17px; margin-bottom: 20px; }
   .card h3 { margin: 0 0 12px; font-size: 11.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
 
