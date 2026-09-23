@@ -27,9 +27,20 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # cliente, mas presa entre limites: uma consulta de 10 anos varreria a tabela
 # inteira, que e o que os indices existem para evitar.
 from app.config.config import DEFAULT_HOURS, MAX_HOURS
+from app.routers._openapi_docs import ADMIN_SESSION as _SESSION
+from app.routers._openapi_docs import NO_DATABASE as _NO_DATABASE
+from app.routers._openapi_docs import UNAUTHORIZED as _UNAUTHORIZED
 from app.stats import queries
 
 router = APIRouter()
+
+# --- Contrato publicado no /docs ----------------------------------------------
+#
+# Os handlers leem `request.query_params` e `request.json()` na mao, de
+# proposito: janela invalida cai no padrao em vez de virar 422. Por isso o
+# esquema vai em `openapi_extra`, que so muda o documento e nao a validacao.
+
+
 # Um minuto e o menor recorte util: abaixo disso a janela nao contem nem uma
 # conversa inteira de um harness.
 MIN_HOURS = 1 / 60
@@ -130,7 +141,35 @@ def empty_snapshot(hours: float) -> dict:
     }
 
 
-@router.get("/api/stats")
+_WINDOW_PARAM = {
+    "name": "window",
+    "in": "query",
+    "required": False,
+    # Sem `minimum`/`maximum` no esquema: o servidor PRENDE a janela na faixa,
+    # nao recusa, e um limite publicado faria cliente recusar valor valido.
+    "description": (
+        "Window in hours, fractions allowed (0.0833 is five minutes). Values outside "
+        f"the range are clamped between one minute and {MAX_HOURS:g} hours "
+        "(SHUNT_MAX_HOURS), not refused; an unparsable value falls back to the "
+        "default (SHUNT_DEFAULT_HOURS)."
+    ),
+    "schema": {"type": "number", "default": DEFAULT_HOURS},
+}
+
+
+@router.get(
+    "/api/stats",
+    tags=["Panel"],
+    summary="Usage summary for a time window",
+    description=(
+        "Totals, latency percentiles, time series and breakdowns by model, provider, "
+        "route, project, error and tool for the requested window, plus the recorder "
+        "health block. Cached for five seconds per window. Without a database the same "
+        "document comes back with every count at zero and `health.enabled: false`."
+    ),
+    responses=_UNAUTHORIZED,
+    openapi_extra={"security": _SESSION, "parameters": [_WINDOW_PARAM]},
+)
 async def stats(request: Request) -> dict:
     hours = _window(request.query_params.get("window"))
     engine = _engine(request)
@@ -159,7 +198,64 @@ def _iso(value: Any) -> str:
     return str(value)
 
 
-@router.post("/api/stats/clear")
+@router.post(
+    "/api/stats/clear",
+    tags=["Panel"],
+    summary="Delete recorded history",
+    description=(
+        "Permanently deletes recorded requests. The body must carry "
+        '`{"confirm": true}`; anything else is refused with 400. Pass '
+        "`older_than_hours` to keep the most recent hours and delete only what is "
+        "older (clamped like the `window` of the summary). Clears the summary cache."
+    ),
+    responses={
+        "200": {
+            "description": "How many rows were deleted, and the cutoff applied.",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "deleted": {"type": "integer"},
+                            "older_than_hours": {"type": ["number", "null"]},
+                        },
+                    }
+                }
+            },
+        },
+        "400": {"description": 'The body did not carry `{"confirm": true}`.'},
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={
+        "security": _SESSION,
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["confirm"],
+                        "properties": {
+                            "confirm": {
+                                "type": "boolean",
+                                "const": True,
+                                "description": "Must be literally `true`.",
+                            },
+                            "older_than_hours": {
+                                "type": "number",
+                                "description": (
+                                    "Keep the last N hours and delete only older rows. "
+                                    "Omit it to delete everything."
+                                ),
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
 async def clear_stats(request: Request) -> JSONResponse:
     """Apaga o historico do painel.
 
@@ -194,7 +290,26 @@ def _sse(payload: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(payload, ensure_ascii=False, default=_iso)}\n\n".encode()
 
 
-@router.get("/api/stats/stream")
+@router.get(
+    "/api/stats/stream",
+    tags=["Panel"],
+    summary="Live feed of requests as they finish",
+    description=(
+        "Server-Sent Events. Each `data:` line is one finished request as JSON, read "
+        "from the recorder's in-memory bus, so an open tab never queries the database. "
+        "A `: keepalive` comment is sent every 15 seconds of silence. Without a "
+        "recorder the stream sends one comment and closes."
+    ),
+    response_class=StreamingResponse,
+    responses={
+        "200": {
+            "description": "Event stream.",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+        },
+        **_UNAUTHORIZED,
+    },
+    openapi_extra={"security": _SESSION},
+)
 async def stats_stream(request: Request) -> StreamingResponse:
     recorder = getattr(request.app.state, "recorder", None)
     if recorder is None:

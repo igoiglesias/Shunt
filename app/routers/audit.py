@@ -13,11 +13,15 @@ import asyncio
 import csv
 import io
 from datetime import UTC, datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Path, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.config.config import EXPORT_LIMIT
+from app.config.config import EXPORT_LIMIT, MAX_SEARCH_LIMIT, SEARCH_LIMIT
+from app.routers._openapi_docs import ADMIN_SESSION as _SESSION
+from app.routers._openapi_docs import NO_DATABASE as _NO_DATABASE
+from app.routers._openapi_docs import UNAUTHORIZED as _UNAUTHORIZED
 from app.stats import analysis, queries
 
 router = APIRouter()
@@ -122,6 +126,126 @@ def filters_from(params) -> dict:
     }
 
 
+# --- Contrato publicado no /docs ----------------------------------------------
+#
+# Os handlers leem `request.query_params` na mao, e isso e o contrato: filtro
+# que nao parseia vira filtro ausente, e nao 422. Trocar por `Query(...)` mudaria
+# essa resposta; por isso o esquema vai em `openapi_extra`, que so mexe no
+# documento. A lista abaixo espelha `filters_from` -- o teste em
+# `tests/test_openapi_api.py` compara as duas.
+
+_REQUEST_ID = Annotated[str, Path(description="The `request_id` of a recorded request.")]
+_ANALYSIS_ID = Annotated[int, Path(description="The `id` of a stored analysis.")]
+
+
+def _query(name: str, description: str, schema: dict) -> dict:
+    return {
+        "name": name,
+        "in": "query",
+        "required": False,
+        "description": description,
+        "schema": schema,
+    }
+
+
+_EXACT = "Exact match on the {}. Empty means no filter."
+_FLAG = (
+    "Tri-state: `1`, `true`, `yes`, `on` or `sim` keeps only matches; any other value "
+    "keeps only non-matches; absent or empty means no filter. {}"
+)
+_IGNORED = " An unparsable value is ignored, not refused."
+
+_ANALYSIS_FILTER_PARAMS = [
+    _query(
+        "since",
+        "Start of the period, inclusive, ISO 8601. Without an offset it is read as UTC." + _IGNORED,
+        {"type": "string", "format": "date-time"},
+    ),
+    _query(
+        "until",
+        "End of the period, inclusive, ISO 8601. Without an offset it is read as UTC." + _IGNORED,
+        {"type": "string", "format": "date-time"},
+    ),
+    _query(
+        "text",
+        "Substring searched in the request id, requested and candidate model, provider, "
+        "route, error type, matched rule, project, tools offered and called, and the "
+        "attempt chain.",
+        {"type": "string"},
+    ),
+    _query("route", _EXACT.format("proxy route, such as `/v1/messages`"), {"type": "string"}),
+    _query("dialect", _EXACT.format("client protocol"), {"type": "string"}),
+    _query("provider", _EXACT.format("provider that answered"), {"type": "string"}),
+    _query("candidate_model", _EXACT.format("model that answered"), {"type": "string"}),
+    _query("requested_model", _EXACT.format("model the client asked for"), {"type": "string"}),
+    _query("error_type", _EXACT.format("error type"), {"type": "string"}),
+    _query("project", _EXACT.format("project"), {"type": "string"}),
+    _query("status_min", "Lowest HTTP status, inclusive." + _IGNORED, {"type": "integer"}),
+    _query("status_max", "Highest HTTP status, inclusive." + _IGNORED, {"type": "integer"}),
+    _query("stream", _FLAG.format("Matches streamed requests."), {"type": "boolean"}),
+    _query("fell_back", _FLAG.format("Matches requests that fell back."), {"type": "boolean"}),
+    _query("has_tools", _FLAG.format("Matches requests that called a tool."), {"type": "boolean"}),
+    _query(
+        "min_duration_ms", "Minimum total duration in milliseconds." + _IGNORED, {"type": "integer"}
+    ),
+    _query("min_tokens", "Minimum input plus output tokens." + _IGNORED, {"type": "integer"}),
+]
+_ORDER_PARAM = _query(
+    "order_by",
+    "`duration` lists the slowest first; anything else lists the newest first.",
+    {"type": "string", "enum": ["time", "duration"], "default": "time"},
+)
+_FILTER_PARAMS = [*_ANALYSIS_FILTER_PARAMS, _ORDER_PARAM]
+# O corpo que `analysis.analyse` monta quando a chamada ao modelo falha.
+_ANALYSIS_FAILURE = {
+    "type": "object",
+    "properties": {
+        "status": {"type": "integer", "description": "The model's HTTP status, or 502."},
+        "error": {"type": "string", "description": "The error message from the model."},
+        "text": {"type": "string", "description": "Always empty on failure."},
+        "cached": {"type": "boolean", "description": "Always false on failure."},
+        "dossier": {"type": "object", "description": "The period summary that was sent."},
+        "trace": {
+            "type": "array",
+            "items": {},
+            "description": "The attempts made through the proxy.",
+        },
+    },
+}
+# Os outros dois corpos que 401 e 409 podem ter nesta rota: o do
+# `HTTPException` de `require_admin` e o de `_no_database`.
+_SESSION_ERROR = {
+    "type": "object",
+    "required": ["detail"],
+    "properties": {"detail": {"type": "string"}},
+}
+_NO_DATABASE_ERROR = {
+    "type": "object",
+    "required": ["error"],
+    "properties": {"error": {"type": "string"}},
+}
+_PAGE_PARAMS = [
+    _query(
+        "limit",
+        # Sem `minimum`/`maximum`: o servidor prende o valor na faixa, nao recusa.
+        "Page size. 0, absent or unparsable uses the default (SHUNT_SEARCH_LIMIT); "
+        f"other values are clamped between 1 and {MAX_SEARCH_LIMIT} "
+        "(SHUNT_MAX_SEARCH_LIMIT), not refused.",
+        {"type": "integer", "default": SEARCH_LIMIT},
+    ),
+    _query(
+        "cursor",
+        "Opaque `next_cursor` from the previous page. An invalid cursor restarts from "
+        "the first page.",
+        {"type": "string"},
+    ),
+]
+
+
+def _json(description: str) -> dict:
+    return {"description": description, "content": {"application/json": {}}}
+
+
 def _no_database() -> JSONResponse:
     return JSONResponse(
         status_code=409,
@@ -129,7 +253,23 @@ def _no_database() -> JSONResponse:
     )
 
 
-@router.get("/api/requests")
+@router.get(
+    "/api/requests",
+    tags=["Requests"],
+    summary="Search recorded requests",
+    description=(
+        "One page of recorded requests matching every filter, newest first unless "
+        "`order_by=duration`. `total` counts the whole search, not the page; pass "
+        "`next_cursor` back as `cursor` for the next page. Prompts and responses are "
+        "never part of a record."
+    ),
+    responses={
+        "200": _json("A page of events, the search total and the next cursor."),
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION, "parameters": [*_FILTER_PARAMS, *_PAGE_PARAMS]},
+)
 async def search_requests(request: Request):
     engine = _engine(request)
     if engine is None:
@@ -146,16 +286,47 @@ async def search_requests(request: Request):
     return JSONResponse(page)
 
 
-@router.get("/api/requests/export")
+@router.get(
+    "/api/requests/export",
+    tags=["Requests"],
+    summary="Export a search as CSV",
+    description=(
+        "The same filters as the search, as a CSV attachment of at most "
+        "SHUNT_EXPORT_LIMIT rows. `x-shunt-exported`, `x-shunt-total` and "
+        "`x-shunt-truncated` say whether the file holds the whole search."
+    ),
+    response_class=StreamingResponse,
+    responses={
+        "200": {
+            "description": "CSV file, one row per request.",
+            "content": {"text/csv": {"schema": {"type": "string"}}},
+            "headers": {
+                "x-shunt-exported": {
+                    "description": "Rows in the file.",
+                    "schema": {"type": "integer"},
+                },
+                "x-shunt-total": {
+                    "description": "Rows in the whole search.",
+                    "schema": {"type": "integer"},
+                },
+                "x-shunt-truncated": {
+                    "description": "`1` when the file holds fewer rows than the search.",
+                    "schema": {"type": "string", "enum": ["0", "1"]},
+                },
+            },
+        },
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION, "parameters": _FILTER_PARAMS},
+)
 async def export_requests(request: Request):
     """A mesma busca em CSV, para levar a investigacao para outro lugar."""
     engine = _engine(request)
     if engine is None:
         return _no_database()
     filters = filters_from(request.query_params)
-    page = await asyncio.to_thread(
-        queries.search_events, engine, limit=EXPORT_LIMIT, **filters
-    )
+    page = await asyncio.to_thread(queries.search_events, engine, limit=EXPORT_LIMIT, **filters)
     buffer = io.StringIO()
     writer = csv.DictWriter(buffer, fieldnames=CSV_COLUMNS, extrasaction="ignore")
     writer.writeheader()
@@ -189,7 +360,21 @@ async def export_requests(request: Request):
     )
 
 
-@router.get("/api/requests/facets")
+@router.get(
+    "/api/requests/facets",
+    tags=["Requests"],
+    summary="Filter values that exist",
+    description=(
+        "Distinct projects, providers, models and routes seen in the last 30 days, "
+        "each with its request count, to build the search filters."
+    ),
+    responses={
+        "200": _json("Lists of `{value, count}` per field."),
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION},
+)
 async def facets(request: Request):
     """Os valores que existem, para os seletores da tela."""
     engine = _engine(request)
@@ -198,8 +383,23 @@ async def facets(request: Request):
     return JSONResponse(await asyncio.to_thread(queries.facets, engine))
 
 
-@router.get("/api/requests/{request_id}/body")
-async def request_body(request: Request, request_id: str):
+@router.get(
+    "/api/requests/{request_id}/body",
+    tags=["Requests"],
+    summary="Conversation text of one request",
+    description=(
+        "The recorded conversation of a request. Returns 404 when none was recorded, "
+        "for instance because conversation capture was off when it ran."
+    ),
+    responses={
+        "200": _json("The recorded conversation."),
+        "404": {"description": "No conversation was recorded for this request."},
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION},
+)
+async def request_body(request: Request, request_id: _REQUEST_ID):
     """O texto da conversa daquela requisicao.
 
     404 quando nao ha: pode ser que a gravacao de conversa estivesse desligada
@@ -217,8 +417,20 @@ async def request_body(request: Request, request_id: str):
     return JSONResponse(body)
 
 
-@router.get("/api/requests/{request_id}")
-async def one_request(request: Request, request_id: str):
+@router.get(
+    "/api/requests/{request_id}",
+    tags=["Requests"],
+    summary="One recorded request",
+    description="A single request with its attempt chain, in the order the attempts ran.",
+    responses={
+        "200": _json("The request record."),
+        "404": {"description": "No request with this id."},
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION},
+)
+async def one_request(request: Request, request_id: _REQUEST_ID):
     engine = _engine(request)
     if engine is None:
         return _no_database()
@@ -255,7 +467,73 @@ async def _body_of(request: Request) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-@router.post("/api/analysis")
+@router.post(
+    "/api/analysis",
+    tags=["Analysis"],
+    summary="Ask a model to read a period",
+    description=(
+        "Builds a summary of the requests matching the query filters and sends it to a "
+        "model through the proxy itself. The body is optional: `model` defaults to "
+        "`default_model`, and a previous analysis of the same filters and model is "
+        "returned from storage unless `refresh` is true. When the model call fails, "
+        "its HTTP status is passed through (502 when it answered without text)."
+    ),
+    responses={
+        "200": _json("The analysis text, whether it came from storage, and usage."),
+        # 401 e 409 colidem: a mesma chave vale para o erro do proprio Shunt e
+        # para o status do provedor que `analyse` repassa, cada um com seu corpo.
+        "401": {
+            "description": "No valid admin session cookie (`detail`), or the model's "
+            "provider refused the key and its 401 is passed through (failure body).",
+            "content": {
+                "application/json": {"schema": {"anyOf": [_SESSION_ERROR, _ANALYSIS_FAILURE]}}
+            },
+        },
+        "409": {
+            "description": "No database is configured (`error` only); no model was "
+            "given and there is no `default_model` (failure body without `dossier` "
+            "and `trace`); or the provider answered 409, passed through.",
+            "content": {
+                "application/json": {"schema": {"anyOf": [_NO_DATABASE_ERROR, _ANALYSIS_FAILURE]}}
+            },
+        },
+        "502": {
+            "description": "The model answered without text.",
+            "content": {"application/json": {"schema": _ANALYSIS_FAILURE}},
+        },
+        # `analyse` devolve o status do modelo quando ele falha: qualquer 4xx/5xx
+        # que o provedor mandar, com o mesmo corpo.
+        "default": {
+            "description": "The model call failed; its HTTP status is passed through.",
+            "content": {"application/json": {"schema": _ANALYSIS_FAILURE}},
+        },
+    },
+    openapi_extra={
+        "security": _SESSION,
+        "parameters": _ANALYSIS_FILTER_PARAMS,
+        "requestBody": {
+            "required": False,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "model": {
+                                "type": "string",
+                                "description": "Model alias to use. Defaults to `default_model`.",
+                            },
+                            "refresh": {
+                                "type": "boolean",
+                                "default": False,
+                                "description": "Run again instead of returning a stored analysis.",
+                            },
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
 async def analyse_period(request: Request):
     """Manda o periodo para um modelo e devolve a leitura dele."""
     engine = _engine(request)
@@ -274,7 +552,21 @@ async def analyse_period(request: Request):
     return JSONResponse(status_code=result["status"], content=result)
 
 
-@router.get("/api/analysis")
+@router.get(
+    "/api/analysis",
+    tags=["Analysis"],
+    summary="Stored analyses and available models",
+    description=(
+        "Recent stored analyses, plus the configured model aliases and "
+        "`default_model`, so a client can choose a model before spending on one."
+    ),
+    responses={
+        "200": _json("`analyses`, `models` and `default_model`."),
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION},
+)
 async def list_analyses(request: Request):
     """As analises ja pagas, e quem pode ler o periodo.
 
@@ -298,8 +590,20 @@ async def list_analyses(request: Request):
     )
 
 
-@router.get("/api/analysis/{analysis_id}")
-async def one_analysis(request: Request, analysis_id: int):
+@router.get(
+    "/api/analysis/{analysis_id}",
+    tags=["Analysis"],
+    summary="One stored analysis",
+    description="A stored analysis by id, with the summary it was built from.",
+    responses={
+        "200": _json("The stored analysis."),
+        "404": {"description": "No analysis with this id."},
+        **_UNAUTHORIZED,
+        **_NO_DATABASE,
+    },
+    openapi_extra={"security": _SESSION},
+)
+async def one_analysis(request: Request, analysis_id: _ANALYSIS_ID):
     engine = _engine(request)
     if engine is None:
         return _no_database()

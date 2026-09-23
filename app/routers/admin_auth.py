@@ -40,7 +40,7 @@ def _set_session_cookie(response: RedirectResponse, request: Request, user_id: i
     )
 
 
-@router.get("/login", response_class=HTMLResponse)
+@router.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_page(request: Request):
     """A porta de entrada.
 
@@ -64,7 +64,7 @@ async def login_page(request: Request):
     return render("login.html", request=request, mode=mode, error=None)
 
 
-@router.post("/login", response_class=HTMLResponse)
+@router.post("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_submit(
     request: Request,
     username: Annotated[str, Form()],
@@ -123,7 +123,9 @@ async def login_submit(
     return target
 
 
-@router.post("/logout")
+# Fora do /docs: e o formulario "Sair" do navegador, que responde 303 para a
+# tela de login. Nao ha contrato de API para documentar aqui.
+@router.post("/logout", include_in_schema=False)
 async def logout(request: Request):
     """Apaga o cookie de sessao e devolve o navegador ao login."""
     response = RedirectResponse("/admin/login", status_code=303)

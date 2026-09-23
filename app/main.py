@@ -1,8 +1,11 @@
 import asyncio
+import copy
 import logging
 import os
 import secrets
+import tomllib
 from contextlib import asynccontextmanager
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Response
@@ -22,6 +25,7 @@ from app.routers.admin_tokens import router as admin_tokens_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.audit import router as audit_router
 from app.routers.dashboard import router as dashboard_router
+from app.routers.v1 import DOCUMENTED_MODELS
 from app.routers.v1 import router as v1_router
 from app.stats.engine import build_engine, database_url
 from app.stats.recorder import Recorder
@@ -102,7 +106,178 @@ async def _engine_or_none():
         )
         return None
 
-app = FastAPI(lifespan=lifespan)
+def _version() -> str:
+    """A versao do `pyproject.toml`.
+
+    Medido: o projeto nao e instalado como distribuicao (`uv sync` sem
+    build-system), entao `importlib.metadata` levanta `PackageNotFoundError`
+    rodando do repositorio. O `pyproject.toml` e a fonte nesse caso.
+    """
+    try:
+        return version("shunt")
+    except PackageNotFoundError:
+        pass
+    try:
+        with (Path(__file__).parent.parent / "pyproject.toml").open("rb") as fh:
+            return str(tomllib.load(fh)["project"]["version"])
+    except (OSError, KeyError, tomllib.TOMLDecodeError):
+        return "0.0.0"
+
+
+DESCRIPTION = """\
+Shunt is a local proxy that lets a client speaking one LLM API talk to a provider \
+speaking another.
+
+`/v1` speaks both dialects: the Anthropic Messages API (`/v1/messages`) and the \
+OpenAI API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`). Each \
+request is routed by its `model` to a configured provider, translated when the \
+provider speaks the other dialect, and answered in the caller's own shape.
+
+`/v1` needs no credential of its own. An `x-shunt-token` created in the admin area \
+is checked, and makes Shunt send the provider key it holds. `x-api-key` and \
+`Authorization: Bearer` are not checked: Shunt forwards them to transparent \
+providers and replaces them with the configured key for the others.
+
+`/api` and `/admin` need the admin session cookie `shunt_admin`, set by signing in \
+at `/admin/login`.
+"""
+
+OPENAPI_TAGS = [
+    {
+        "name": "Anthropic",
+        "description": "Anthropic Messages API: `/v1/messages` and token counting.",
+    },
+    {
+        "name": "OpenAI",
+        "description": "OpenAI API: chat completions, legacy completions and embeddings.",
+    },
+    {"name": "Models", "description": "The configured model aliases, in the caller's dialect."},
+    {
+        "name": "Panel",
+        "description": "Usage statistics behind the admin panel. Admin session required.",
+    },
+    {
+        "name": "Requests",
+        "description": "The recorded requests, one by one. Admin session required.",
+    },
+    {
+        "name": "Analysis",
+        "description": "Aggregates over a period of requests. Admin session required.",
+    },
+    {"name": "Admin", "description": "Sign-in, users, tokens and catalog configuration."},
+    {"name": "System", "description": "Liveness of the Shunt process."},
+]
+
+_FORWARDED = (
+    "Shunt does not check it: it is forwarded to transparent providers and replaced "
+    "by the configured provider key for the others."
+)
+
+SECURITY_SCHEMES = {
+    "anthropicApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": f"The client's Anthropic-style key. {_FORWARDED}",
+    },
+    "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": f"The client's bearer token. {_FORWARDED}",
+    },
+    "shuntToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-shunt-token",
+        "description": (
+            "A token created on the Tokens screen. Checked by Shunt: unknown or expired "
+            "is a 401, and with no database it is a 503. When valid, Shunt sends the "
+            "provider key it holds."
+        ),
+    },
+    "adminSession": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "shunt_admin",
+        "description": "The admin session cookie, set by signing in at `/admin/login`.",
+    },
+}
+
+app = FastAPI(
+    title="Shunt",
+    version=_version(),
+    description=DESCRIPTION,
+    openapi_tags=OPENAPI_TAGS,
+    lifespan=lifespan,
+)
+
+
+def _openapi() -> dict:
+    """O documento padrao, mais o que as rotas citam e o FastAPI nao ve.
+
+    As rotas `/v1` apontam por `$ref` para modelos que nao sao parametro de
+    nenhuma funcao (o corpo e lido na mao), entao o FastAPI nao os poe em
+    `components`. Sem este registro o Swagger mostraria uma `$ref` pendurada.
+
+    A geracao, o cache e a invalidacao ficam com o `FastAPI.openapi` original:
+    ele passa todos os argumentos do app (servers, webhooks, versao do OpenAPI,
+    `separate_input_output_schemas`...) e regenera quando uma rota e incluida
+    depois da primeira chamada. Medido no FastAPI 0.141: um override que so
+    olha `app.openapi_schema` servia o documento velho sem a rota nova. Aqui
+    so se acrescenta, e so num documento recem-gerado -- um objeto novo.
+    """
+    cached = app.openapi_schema
+    schema = FastAPI.openapi(app)
+    if schema is cached:
+        return schema
+    components = schema.setdefault("components", {})
+    schemas = components.setdefault("schemas", {})
+    for model in DOCUMENTED_MODELS:
+        body = model.model_json_schema(ref_template="#/components/schemas/{model}")
+        for name, definition in body.pop("$defs", {}).items():
+            schemas.setdefault(name, definition)
+        schemas.setdefault(model.__name__, body)
+    # Copia: o documento e publico e mutavel (quem o ajusta depois nao pode
+    # alterar a constante do modulo, nem o proximo documento gerado).
+    components["securitySchemes"] = copy.deepcopy(SECURITY_SCHEMES)
+    for operations in schema["paths"].values():
+        for operation in operations.values():
+            if not _can_fail_validation(operation):
+                operation["responses"].pop("422", None)
+    return schema
+
+
+# O que um parametro `str` sem restricao gera no schema. Medido: `key: str`
+# vira `{"type": "string", "title": "Key"}`; com `pattern`/`max_length` entram
+# `pattern`/`maxLength`, e ai o 422 e real.
+_PLAIN_STRING_KEYS = {"type", "title", "description"}
+
+
+def _can_fail_validation(operation: dict) -> bool:
+    """O FastAPI 0.141 poe 422 em toda rota com parametro declarado, e
+    `openapi_extra` so mescla -- nao remove chave. Um 422 so e real quando
+    algum parametro pode falhar: corpo validado pelo framework, query, header,
+    cookie, ou caminho com tipo ou restricao. Caminho `str` puro nunca falha
+    (`/v1/models/{model_id}`, `/api/requests/{request_id}`); as rotas POST de
+    `/v1` leem o corpo na mao e nem declaram parametro.
+    """
+    # Limite conservador: o schema nao diz de onde veio o `requestBody` nem o
+    # parametro. Um corpo declarado so em `openapi_extra` e lido na mao (que
+    # nunca da 422), ou uma query so documentada ali, contam como "pode
+    # falhar". Hoje nenhuma rota junta isso a um parametro declarado, entao
+    # nao muda nada; importaria numa rota com `{id}: str` e corpo lido na mao,
+    # que ficaria com um 422 que nao devolve.
+    if "requestBody" in operation:
+        return True
+    return any(
+        param.get("in") != "path"
+        or param.get("schema", {}).get("type") != "string"
+        or not set(param.get("schema", {})) <= _PLAIN_STRING_KEYS
+        for param in operation.get("parameters", [])
+    )
+
+
+app.openapi = _openapi  # type: ignore[method-assign]
 
 
 @app.exception_handler(LoginRequired)
@@ -123,7 +298,15 @@ app.include_router(admin_tokens_router)
 app.include_router(admin_config_router)
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["System"],
+    summary="Liveness check",
+    description=(
+        "Answers `{\"status\": \"ok\"}` while the process is up, without touching "
+        "providers or the database."
+    ),
+)
 async def health() -> dict[str, str]:
     """Liveness check.
 
@@ -155,7 +338,7 @@ async def root():
     return RedirectResponse("/admin/painel", status_code=302)
 
 
-@app.get("/shunt.css")
+@app.get("/shunt.css", include_in_schema=False)
 async def estilo() -> Response:
     """A identidade visual das telas, num arquivo só.
 

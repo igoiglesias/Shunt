@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from app.core.auth import require_admin
 from app.templates import render
 
-router = APIRouter(prefix="/admin", tags=["admin-dashboard"])
+router = APIRouter(prefix="/admin")
 
 # As duas paginas mudam junto com o estado do proxy; um navegador que as
 # cachearia entregaria um painel de dez minutos atras. `no-store` as torna
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/admin", tags=["admin-dashboard"])
 NO_STORE = {"cache-control": "no-store, must-revalidate"}
 
 
-@router.get("/painel", response_class=HTMLResponse)
+@router.get("/painel", response_class=HTMLResponse, include_in_schema=False)
 async def painel(request: Request, _: int = Depends(require_admin)):
     """O painel de uso, agora sob /admin e atrás do login."""
     response = render("dashboard.html", request=request, active="painel")
@@ -31,7 +31,7 @@ async def painel(request: Request, _: int = Depends(require_admin)):
     return response
 
 
-@router.get("/requests", response_class=HTMLResponse)
+@router.get("/requests", response_class=HTMLResponse, include_in_schema=False)
 async def requests_page(request: Request, _: int = Depends(require_admin)):
     """A tela de auditoria: buscar, abrir e exportar requisicoes gravadas."""
     response = render("audit.html", request=request, active="requests")

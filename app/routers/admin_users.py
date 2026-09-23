@@ -32,7 +32,7 @@ def _all(session: Session) -> list[User]:
     return list(session.execute(select(User).order_by(User.username)).scalars().all())
 
 
-@router.get("", response_class=HTMLResponse)
+@router.get("", response_class=HTMLResponse, include_in_schema=False)
 async def users_page(request: Request, current: int = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
@@ -40,7 +40,7 @@ async def users_page(request: Request, current: int = Depends(require_admin)):
     return render("users.html", request=request, users=users, active="users")
 
 
-@router.get("/list", response_class=HTMLResponse)
+@router.get("/list", response_class=HTMLResponse, include_in_schema=False)
 async def list_users(request: Request, _: int = Depends(require_admin)):
     """A tabela de usuarios; o alvo de troca das operacoes via HTMX."""
     engine = request_engine(request)
@@ -49,12 +49,12 @@ async def list_users(request: Request, _: int = Depends(require_admin)):
     return render("_user_list.html", request=request, users=users, active="users")
 
 
-@router.get("/new", response_class=HTMLResponse)
+@router.get("/new", response_class=HTMLResponse, include_in_schema=False)
 async def new_user_form(request: Request, _: int = Depends(require_admin)):
     return render("_user_form.html", request=request, user=None, active="users")
 
 
-@router.post("", response_class=HTMLResponse)
+@router.post("", response_class=HTMLResponse, include_in_schema=False)
 async def create_user(
     request: Request,
     username: Annotated[str, Form()],
@@ -73,7 +73,7 @@ async def create_user(
     return await list_users(request)
 
 
-@router.get("/{username}/edit", response_class=HTMLResponse)
+@router.get("/{username}/edit", response_class=HTMLResponse, include_in_schema=False)
 async def edit_user_form(
     request: Request, username: str, _: int = Depends(require_admin)
 ):
@@ -85,7 +85,7 @@ async def edit_user_form(
     return render("_user_form.html", request=request, user=user, active="users")
 
 
-@router.patch("/{username}", response_class=HTMLResponse)
+@router.patch("/{username}", response_class=HTMLResponse, include_in_schema=False)
 async def update_user(
     request: Request,
     username: str,
@@ -109,7 +109,7 @@ async def update_user(
     return await list_users(request)
 
 
-@router.delete("/{username}", response_class=HTMLResponse)
+@router.delete("/{username}", response_class=HTMLResponse, include_in_schema=False)
 async def delete_user(
     request: Request, username: str, current: int = Depends(require_admin)
 ):
