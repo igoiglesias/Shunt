@@ -75,7 +75,19 @@ class ConfigWatcher:
         try:
             await task
         except asyncio.CancelledError:
-            pass
+            # `await task` aqui pode levantar por dois motivos distintos: o
+            # cancelamento que ESTE metodo acabou de pedir na task de fundo
+            # (esperado, engole), ou um cancelamento pedido na task de quem
+            # chamou `aclose()` (ex.: `asyncio.wait_for(w.aclose(), t)`
+            # estourando o timeout) que chega no mesmo ponto de suspensao.
+            # `current_task().cancelling()` (3.14) conta pedidos de
+            # cancelamento pendentes na task ATUAL: se for a nossa propria
+            # chamada sendo cancelada, propaga; senao e so a task de fundo
+            # que cancelamos, e o metodo termina normalmente.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+
 
     async def _run(self) -> None:
         while True:

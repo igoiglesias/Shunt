@@ -309,6 +309,58 @@ async def test_aclose_while_parked_inside_check_once_does_not_hang(tmp_path):
     assert watcher._task is None
 
 
+async def test_aclose_propagates_cancellation_aimed_at_its_caller(tmp_path):
+    """`aclose()` so' pode engolir o cancelamento da task de fundo que ele
+    mesmo pediu (`task.cancel()`). Se quem CHAMOU `aclose()` for cancelado
+    enquanto `aclose()` esta parado em `await task` -- caso real:
+    `asyncio.wait_for(watcher.aclose(), timeout)` estourando o timeout --
+    esse segundo cancelamento tem de propagar. Sob o codigo antigo
+    (`except CancelledError: pass` sem distinguir de onde veio) ele
+    desaparecia e `wait_for` nunca via o timeout: o caller ficava pendurado
+    para sempre.
+
+    Para criar uma janela real (medido: cancelar uma task presa em
+    `asyncio.sleep` ou em `asyncio.to_thread` resolve quase instantaneo --
+    rapido demais para um `asyncio.sleep(0.01)` externo alcancar o `await
+    task` de `aclose()` ainda pendurado), a task de fundo e um coroutine
+    proprio que, ao ser cancelado, entra num `except CancelledError` e so'
+    ENTAO faz um `await asyncio.sleep(0.3)` antes de re-levantar -- limpeza
+    lenta de verdade, que mantem `aclose()` genuinamente parado em `await
+    task` por uma janela grande o bastante para o cancelamento externo
+    chegar dentro dela (medido com um probe isolado antes deste teste:
+    `cancelling()=1` dentro do `except` de `aclose()` nesse cenario).
+
+    Roda `aclose()` como task PROPRIA (nao com `asyncio.timeout` em volta de
+    um `await` direto -- isso cancelaria a task de TESTE, nao a de
+    `aclose()`, e o bug antigo so aparece quando quem e cancelado e a
+    propria chamada de `aclose()`) e usa `asyncio.wait(..., timeout=...)`
+    para nao travar a suite se o mutante voltar."""
+
+    async def _stubborn_background() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.3)  # limpeza lenta: mantem `aclose()` parado
+            raise
+
+    engine = _engine(tmp_path)
+    applied = _Applied()
+    watcher = _watcher(engine, applied)
+    watcher._task = asyncio.ensure_future(_stubborn_background())
+
+    aclose_task = asyncio.ensure_future(watcher.aclose())
+    await asyncio.sleep(0.1)  # aclose() ja pediu task.cancel() e esta parado em `await task`
+    aclose_task.cancel()  # cancelamento mirado no CALLER de aclose(), nao na task de fundo
+
+    done, pending = await asyncio.wait([aclose_task], timeout=2)
+    if pending:
+        for t in pending:
+            t.cancel()
+        raise AssertionError("aclose() nao terminou: mutante pode ter travado a task")
+    assert aclose_task in done
+    assert aclose_task.cancelled(), "aclose() engoliu o cancelamento do proprio caller"
+
+
 async def test_an_edit_made_by_one_worker_reaches_another_within_one_cycle(tmp_path):
     """Dois estados sobre o mesmo arquivo: A grava como o admin grava, o laco
     do vigia de B recarrega e o pool de B ja serve o provedor novo."""
