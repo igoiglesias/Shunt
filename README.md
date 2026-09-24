@@ -357,6 +357,7 @@ Every number above is an environment variable with that default:
 | `SHUNT_FIRST_EVENT_DEADLINE` | 20 | seconds a stream may take to send its first real event |
 | `SHUNT_TOTAL_DEADLINE` | 120 | seconds for the whole chain of a request that does not stream |
 | `SHUNT_TIMEOUT_CONNECT` / `_READ` / `_WRITE` / `_POOL` | 10 / 60 / 30 / 10 | the HTTP client, in seconds |
+| `SHUNT_CONFIG_POLL_SECONDS` | 10 | seconds between checks of `config_versions`; an admin edit reaches every worker within one interval |
 
 The remaining `SHUNT_*` knobs (queue sizes, panel limits, cookie lifetime) are
 listed with their defaults in `app/config/config.py`.
