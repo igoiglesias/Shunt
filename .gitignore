@@ -26,3 +26,7 @@ ARQUITETURA.md
 
 # Logs do stub do passo 0 (podem conter corpos de pedido)
 docs/superpowers/measurements/*.jsonl
+
+# Artefatos de QA local (screenshots e logs do Playwright MCP)
+.playwright-mcp/
+qa*.png
