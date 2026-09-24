@@ -1,11 +1,7 @@
 """Testes de que as knobs operacionais lêem SHUNT_* do ambiente com defaults."""
 
 import os
-import sys
 from importlib import reload
-
-# Garante que o path do projeto esteja disponível
-sys.path.insert(0, "/home/iglesias/Documents/Projetos_Pessoais/Shunt")
 
 
 def test_env_overrides_default():
