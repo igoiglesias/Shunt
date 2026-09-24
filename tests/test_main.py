@@ -87,3 +87,76 @@ def test_lifespan_loads_real_settings_and_builds_the_pool_from_them(monkeypatch,
         for attr in ("settings", "pool"):
             if hasattr(app.state, attr):
                 delattr(app.state, attr)
+
+
+def test_lifespan_has_no_config_watcher_without_a_database():
+    """conftest esvazia TURSO_DATABASE_URL: sem banco nao ha o que vigiar."""
+    with TestClient(app):
+        assert app.state.config_watcher is None
+
+
+def test_lifespan_starts_and_stops_the_config_watcher_with_a_database(monkeypatch, tmp_path):
+    from app.core.config_watcher import ConfigWatcher
+
+    monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{tmp_path / 'stats.db'}")
+    try:
+        with TestClient(app):
+            watcher = app.state.config_watcher
+            assert isinstance(watcher, ConfigWatcher)
+            assert watcher._task is not None and not watcher._task.done()
+            assert watcher.seen is None  # boot novo: seed nao cria versao
+        assert watcher._task is None  # aclose no shutdown, antes do pool
+    finally:
+        for attr in ("settings", "pool"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+
+
+def test_config_watcher_engine_of_reads_the_recorder_live(monkeypatch, tmp_path):
+    """`engine_of` tem de ler `app.state.recorder.engine` a cada chamada, nao
+    capturar a engine do boot: o gravador reabre o banco quando ele volta
+    (`Recorder.reconnect`), e uma engine congelada no boot deixaria o vigia
+    consultando uma conexao morta para sempre."""
+    monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{tmp_path / 'stats.db'}")
+    try:
+        with TestClient(app):
+            watcher = app.state.config_watcher
+            engine_at_boot = watcher._engine_of()
+            sentinel = object()
+            app.state.recorder._engine = sentinel
+            assert watcher._engine_of() is sentinel
+            app.state.recorder._engine = engine_at_boot
+    finally:
+        for attr in ("settings", "pool"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+
+
+def test_lifespan_closes_the_config_watcher_before_the_pool(monkeypatch, tmp_path):
+    """Ordem no shutdown: vigia -> recorder -> pool, senao um `apply` em voo
+    no vigia pode chamar `pool.update()` num pool ja fechado."""
+    from app.core.upstream import UpstreamPool
+
+    monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{tmp_path / 'stats.db'}")
+    calls: list[str] = []
+    original_pool_aclose = UpstreamPool.aclose
+
+    async def spy_pool_aclose(self):
+        calls.append("pool")
+        await original_pool_aclose(self)
+
+    monkeypatch.setattr(UpstreamPool, "aclose", spy_pool_aclose)
+    try:
+        with TestClient(app):
+            original_watcher_aclose = app.state.config_watcher.aclose
+
+            async def spy_watcher_aclose():
+                calls.append("watcher")
+                await original_watcher_aclose()
+
+            app.state.config_watcher.aclose = spy_watcher_aclose
+        assert calls == ["watcher", "pool"]
+    finally:
+        for attr in ("settings", "pool"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)

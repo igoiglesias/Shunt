@@ -5,6 +5,7 @@ import os
 import secrets
 import tomllib
 from contextlib import asynccontextmanager
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -16,10 +17,12 @@ from app.config.config import ENGINE_BOOT_TIMEOUT
 from app.config.seed import seed_catalog_if_empty
 from app.config.settings import Settings, load_settings_from_db
 from app.core.auth import LoginRequired, login_redirect, require_admin
+from app.core.config_watcher import ConfigWatcher
 from app.core.observability import configure_logging, set_recorder
 from app.core.prefix import TokenPrefixMiddleware
 from app.core.upstream import UpstreamPool
 from app.routers.admin_auth import router as admin_auth_router
+from app.routers.admin_config import apply_settings
 from app.routers.admin_config import router as admin_config_router
 from app.routers.admin_dashboard import router as admin_dashboard_router
 from app.routers.admin_tokens import router as admin_tokens_router
@@ -52,6 +55,22 @@ async def lifespan(app: FastAPI):
         app.state.settings = _settings_for(app.state.recorder)
     if not hasattr(app.state, "pool"):
         app.state.pool = UpstreamPool(app.state.settings)
+    # Vigia de versao: so com banco declarado (mesma regra do `reconnect`).
+    # Le `recorder.engine` a cada ciclo porque o gravador reabre o banco
+    # quando ele volta. Sempre atribuido: um teste anterior nao pode deixar um
+    # vigia velho em `app.state`.
+    url = database_url()
+    app.state.config_watcher = (
+        ConfigWatcher(
+            engine_of=lambda: app.state.recorder.engine,
+            apply=partial(apply_settings, app),
+            url=url,
+        )
+        if url
+        else None
+    )
+    if app.state.config_watcher is not None:
+        await app.state.config_watcher.start()
     # Segredo que assina o JWT de sessao do admin. Vem do ambiente para sessoes
     # sobrevivirem a restart; sem ele um segredo aleatorio e gerado no boot, e a
     # sessao morre quando o processo morre -- aceitavel para um proxy local.
@@ -60,6 +79,8 @@ async def lifespan(app: FastAPI):
             os.environ.get("ADMIN_SESSION_SECRET") or secrets.token_hex(32)
         )
     yield
+    if app.state.config_watcher is not None:
+        await app.state.config_watcher.aclose()
     await app.state.recorder.aclose()
     await app.state.pool.aclose()
 
