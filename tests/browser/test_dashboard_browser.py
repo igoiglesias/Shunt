@@ -22,7 +22,8 @@ from sqlalchemy.orm import Session
 
 from app.config.config import ADMIN_COOKIE
 from app.core.security import issue_jwt
-from app.stats.models import Base, RequestEvent
+from app.core.token_auth import token_hash
+from app.stats.models import ApiToken, Base, RequestEvent
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import sync_playwright
@@ -31,6 +32,10 @@ from playwright.sync_api import sync_playwright
 # conhecido o teste assina o proprio cookie em vez de passar pela tela de login.
 # So precisa ser estavel dentro do modulo; nao e segredo de producao.
 SESSION_SECRET = "segredo-fixo-do-teste-do-painel"
+
+# `/v1` exige token (Task 1.5): o servidor de verdade confere no banco semeado.
+BROWSER_TOKEN = "token-do-teste-de-navegador"
+V1 = {"x-shunt-token": BROWSER_TOKEN}
 
 
 def free_port() -> int:
@@ -77,6 +82,7 @@ def seed(path) -> None:
         )
     with Session(engine) as session:
         session.add_all(rows)
+        session.add(ApiToken(name="navegador", token_hash=token_hash(BROWSER_TOKEN)))
         session.commit()
     engine.dispose()
 
@@ -203,7 +209,7 @@ def test_a_request_served_right_now_lands_on_the_tape(browser, server):
     """O SSE: o painel aberto tem de mostrar a requisicao chegando."""
     page, _ = open_panel(browser, server, 1440, 1000)
     before = page.locator("#tape li").count()
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.wait_for_function(f"document.querySelectorAll('#tape li').length > {before}", timeout=10_000)
     first = page.locator("#tape li").first.inner_text()
     page.close()
@@ -289,7 +295,7 @@ def test_a_single_hour_of_traffic_draws_bars_instead_of_a_flat_line(browser, ser
 def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, server):
     """`/v1/models` nao pede modelo; o diagrama nao pode ganhar uma linha sem nome."""
     page, _ = open_panel(browser, server, 1400, 900)
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.reload(wait_until="networkidle")
     page.wait_for_selector("#flow .flow-label")
     labels = page.evaluate(
@@ -327,7 +333,7 @@ def test_the_tape_fills_in_what_the_live_stream_could_not_see(browser, server):
 def test_the_tape_keeps_the_newest_request_on_top(browser, server):
     page, _ = open_panel(browser, server, 1400, 900)
     page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.wait_for_timeout(800)
     page.evaluate("() => load()")
     page.wait_for_timeout(600)
@@ -370,7 +376,7 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     # Nao depende do que outros testes deixaram: gera o proprio trafego, porque
     # o teste de limpeza pode ter zerado o banco antes deste rodar.
     for _ in range(3):
-        httpx.get(f"{server}/v1/models", timeout=10)
+        assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page, problems = open_panel(browser, server, 1400, 900)
     # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
     # vez de esperar por ela, depois de dar ao worker o tempo de um lote.
