@@ -156,9 +156,6 @@ class ShuntRequest:
     body: dict
     headers: dict[str, str]
     endpoint: str = "messages"  # "messages" | "chat" | "completions" | "embeddings"
-    # True quando a requisicao foi autenticada por um token do painel admin.
-    # Nao confia na transparencia da rota: injeta a chave do provedor configurada.
-    shunt_token: bool = False
     # True quando a credencial APRESENTADA (x-api-key/Authorization) casou com
     # um token do Shunt: ela NAO e a credencial do provedor, e a chave
     # configurada a substitui. Setada pela dependencia `require_shunt_token`.
@@ -174,20 +171,16 @@ class ShuntResult:
     real_provider: str | None = None
 
 
+def _client_presented_credential(req: ShuntRequest) -> bool:
+    """O cliente trouxe `x-api-key`/`Authorization`? So neste caso o transparente
+    a repassa crua; sem ela, a chave configurada e a unica que pode sair.
+    A casinha do nome do cabecalho nao importa (HTTP e case-insensitive)."""
+    lower = {k.lower() for k in req.headers}
+    return "x-api-key" in lower or "authorization" in lower
+
+
 def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
-    # Se a requisicao veio autenticada por token Shunt, NAO usa modo transparente:
-    # injeta a chave configurada do provedor. Isso garante que o token do admin
-    # controle o acesso e a chave do provedor fique do lado do proxy.
-    if req.shunt_token:
-        key = settings.api_key(candidate.provider)
-        headers = {"content-type": "application/json"}
-        if key and candidate.protocol == "anthropic":
-            headers["x-api-key"] = key
-            headers["anthropic-version"] = "2023-06-01"
-        elif key:
-            headers["authorization"] = f"Bearer {key}"
-        return headers
-    if candidate.transparent:
+    if candidate.transparent and _client_presented_credential(req) and not req.credential_is_token:
         # The client's own credentials go verbatim to whatever `base_url` this
         # provider entry names. That is the user's declared intent: they wrote
         # the entry. Do not read a protocol mismatch as evidence that the

@@ -390,7 +390,7 @@ async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool
     # A validacao do token e da dependencia `require_shunt_token` (rodou antes
     # deste handler): `credential_is_token` diz se a credencial apresentada
     # FOI um token do Shunt, e entao a chave configurada do provedor o
-    # substitui. `shunt_token` continua no dataclass ate a Task 2.4.
+    # substitui. O campo `shunt_token` do dataclass foi removido (Task 1.5).
     shunt_request = ShuntRequest(
         protocol,
         body,
@@ -530,7 +530,14 @@ async def count_tokens(request: Request):
         )
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     if candidate.protocol == "anthropic":
-        shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
+        # Mesma guarda de `_serve`: o valor do token nunca e credencial que sai.
+        shunt_request = ShuntRequest(
+            "anthropic",
+            body,
+            dict(request.headers),
+            endpoint="messages",
+            credential_is_token=request.state.credential_is_token,
+        )
         try:
             async with pool.client(
                 candidate.provider, settings.providers[candidate.provider]

@@ -332,6 +332,20 @@ def test_outbound_headers_transparent_drops_exactly_the_listed_headers():
     assert headers == {"X-Api-Key": "sk"}
 
 
+def test_transport_credentials_in_authorization_alone_stay_the_transparent_credential():
+    """So `authorization` na requisicao (OAuth de assinatura, sem `x-api-key`):
+    continua sendo a credencial do transparente, e a chave configurada nao
+    substitui."""
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="m", protocol="anthropic", transparent=True
+    )
+    headers = outbound_headers(
+        ShuntRequest("anthropic", BODY, {"authorization": "Bearer oauth-x"}), candidate, TRANSPARENT
+    )
+    assert headers["authorization"] == "Bearer oauth-x"
+    assert "x-api-key" not in headers
+
+
 # --- escolha de caminho, corpo e tradução ------------------------------------
 
 ANTHROPIC_SETTINGS = Settings(

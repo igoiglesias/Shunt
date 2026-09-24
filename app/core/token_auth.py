@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from fastapi import Request
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 
@@ -97,8 +98,16 @@ def _db_lookup(engine, digest: str) -> int | None:
 
     with Session(engine) as session:
         row = session.execute(select(ApiToken).where(ApiToken.token_hash == digest)).scalars().first()
-    if row is None or (row.expires_at is not None and row.expires_at < datetime.now(UTC)):
+    if row is None:
         return None
+    expires = row.expires_at
+    if expires is not None:
+        # `DateTime(timezone=True)` em SQLite pode voltar sem `tzinfo`; a
+        # comparacao com um `now(UTC)` aware sem normalizar dava `TypeError`.
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        if expires < datetime.now(UTC):
+            return None
     return row.id
 
 
@@ -123,7 +132,14 @@ async def _lookup(request: Request, digest: str, *, strict: bool) -> int | None:
             raise TokenRejected(503, "shunt has no database to check the token")
         return None  # sem cache negativo: o banco pode voltar (reconnect do recorder)
     # Driver sincrono: fora do event loop.
-    token_id = await asyncio.to_thread(_db_lookup, engine, digest)
+    try:
+        token_id = await asyncio.to_thread(_db_lookup, engine, digest)
+    except SQLAlchemyError:  # banco fora do ar tem a mesma resposta que banco
+        # ausente: 503 no explicito, "nao e token" no nao-explicito. So erro do
+        # SQLAlchemy e tratado como queda: bug do proprio codigo continua 500.
+        if strict:
+            raise TokenRejected(503, "shunt database is unavailable to check the token")
+        return None  # sem cache negativo: o banco pode voltar (reconnect do recorder)
     cache.put(digest, token_id)
     return token_id
 
