@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from app.config.settings import Settings
 from app.core.config_watcher import UNKNOWN_VERSION, ConfigWatcher
 from app.core.upstream import UpstreamPool
-from app.routers.admin_config import create_config_version
+from app.routers.admin_config import apply_settings, create_config_version
 from app.stats.models import Base, Provider
 
 
@@ -411,10 +412,9 @@ async def test_an_edit_made_by_one_worker_reaches_another_within_one_cycle(tmp_p
     engine_b = create_engine(url)
     state_b = SimpleNamespace(settings=Settings(providers={}, models={}, routes=[]), pool=None)
     state_b.pool = UpstreamPool(state_b.settings)
-
-    async def apply_b(settings: Settings) -> None:
-        state_b.settings = settings
-        await state_b.pool.update(settings)
+    # O `apply_settings` de producao, o mesmo que o lifespan liga ao vigia:
+    # uma copia aqui provaria o criterio com codigo que nao roda no servidor.
+    apply_b = partial(apply_settings, SimpleNamespace(state=state_b))
 
     watcher = ConfigWatcher(engine_of=lambda: engine_b, apply=apply_b, url=url, interval=0.01)
     await watcher.read_initial_version()  # como o lifespan real: antes do laco comecar
