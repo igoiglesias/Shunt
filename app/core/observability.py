@@ -27,7 +27,7 @@ logger = logging.getLogger("shunt")
 
 # Comparados sempre em caixa baixa: o cabecalho chega na caixa que o cliente
 # digitou, e `X-Api-Key` passaria inteiro por uma comparacao literal.
-SECRET_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "proxy-authorization"})
+SECRET_HEADERS = frozenset({"authorization", "x-api-key", "api-key", "proxy-authorization", "x-shunt-token"})
 
 REDACTED = "[redacted]"
 

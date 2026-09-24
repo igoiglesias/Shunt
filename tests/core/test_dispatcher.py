@@ -316,11 +316,19 @@ def test_outbound_headers_transparent_drops_exactly_the_listed_headers():
         ShuntRequest(
             "anthropic",
             BODY,
-            {"Host": "x", "Content-Length": "1", "Accept-Encoding": "gzip", "X-Api-Key": "sk"},
+            {
+                "Host": "x",
+                "Content-Length": "1",
+                "Accept-Encoding": "gzip",
+                "X-Api-Key": "sk",
+                "X-Shunt-Token": "tok",
+                "Cookie": "shunt_admin=abc",
+            },
         ),
         candidate,
         TRANSPARENT,
     )
+    # x-shunt-token e cookie NAO saem; a credencial do cliente (x-api-key) sai.
     assert headers == {"X-Api-Key": "sk"}
 
 

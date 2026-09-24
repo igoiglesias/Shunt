@@ -1,6 +1,9 @@
 import json
+
 from fastapi.testclient import TestClient
+
 from tools.harness_stub import build_stub, mask_headers
+
 
 def test_credentials_are_masked_but_names_kept():
     out = mask_headers({"Authorization": "Bearer sk-x", "x-api-key": "k", "x-shunt-token": "t", "user-agent": "codex/1"})

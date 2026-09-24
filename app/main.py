@@ -9,15 +9,17 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app.config.config import ENGINE_BOOT_TIMEOUT
+from app.config.config import ENGINE_BOOT_TIMEOUT, TOKEN_CACHE_TTL
 from app.config.seed import seed_catalog_if_empty
 from app.config.settings import Settings, load_settings_from_db
 from app.core.auth import LoginRequired, login_redirect, require_admin
+from app.core.dispatcher import error_body
 from app.core.observability import configure_logging, set_recorder
 from app.core.prefix import TokenPrefixMiddleware
+from app.core.token_auth import TokenCache, TokenRejected
 from app.core.upstream import UpstreamPool
 from app.routers.admin_auth import router as admin_auth_router
 from app.routers.admin_config import router as admin_config_router
@@ -26,7 +28,7 @@ from app.routers.admin_tokens import router as admin_tokens_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.audit import router as audit_router
 from app.routers.dashboard import router as dashboard_router
-from app.routers.v1 import DOCUMENTED_MODELS
+from app.routers.v1 import DOCUMENTED_MODELS, protocol_of
 from app.routers.v1 import router as v1_router
 from app.stats.engine import build_engine, database_url
 from app.stats.recorder import Recorder
@@ -52,6 +54,10 @@ async def lifespan(app: FastAPI):
         app.state.settings = _settings_for(app.state.recorder)
     if not hasattr(app.state, "pool"):
         app.state.pool = UpstreamPool(app.state.settings)
+    # Cache de validacao de token: o `hasattr` respeita o cache ja injetado
+    # pelos testes (tests/conftest.py).
+    if not hasattr(app.state, "token_cache"):
+        app.state.token_cache = TokenCache(ttl=TOKEN_CACHE_TTL)
     # Segredo que assina o JWT de sessao do admin. Vem do ambiente para sessoes
     # sobrevivirem a restart; sem ele um segredo aleatorio e gerado no boot, e a
     # sessao morre quando o processo morre -- aceitavel para um proxy local.
@@ -290,6 +296,13 @@ app.openapi = _openapi  # type: ignore[method-assign]
 async def _login_required_handler(request, exc):
     """Converte o sinal de sessao ausente em um redirect para a tela de login."""
     return login_redirect(request)
+
+
+@app.exception_handler(TokenRejected)
+async def _token_rejected_handler(request, exc):
+    """O token recusado responde no envelope do protocolo da rota, nunca `detail`."""
+    protocol = protocol_of(request.url.path, request.headers)
+    return JSONResponse(status_code=exc.status, content=error_body(protocol, exc.status, exc.message))
 
 
 app.include_router(v1_router)

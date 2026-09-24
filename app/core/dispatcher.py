@@ -83,8 +83,19 @@ READ_FLOOR = 0.5
 
 # `host` names the wrong destination once we re-address the request; the other
 # four all describe the inbound body, which we re-serialise before sending.
+# `x-shunt-token` and `cookie` NEVER leave Shunt: o primeiro autentica aqui,
+# e o segundo carrega a sessao do admin (Task 1.5, A11: o filtro completo de
+# credenciais e da Task 2.4).
 TRANSPARENT_DROP = frozenset(
-    {"host", "content-length", "content-encoding", "transfer-encoding", "accept-encoding"}
+    {
+        "host",
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
+        "accept-encoding",
+        "x-shunt-token",
+        "cookie",
+    }
 )
 
 # Nomes de erro da OpenAI. A tabela equivalente da Anthropic vive em
@@ -148,6 +159,10 @@ class ShuntRequest:
     # True quando a requisicao foi autenticada por um token do painel admin.
     # Nao confia na transparencia da rota: injeta a chave do provedor configurada.
     shunt_token: bool = False
+    # True quando a credencial APRESENTADA (x-api-key/Authorization) casou com
+    # um token do Shunt: ela NAO e a credencial do provedor, e a chave
+    # configurada a substitui. Setada pela dependencia `require_shunt_token`.
+    credential_is_token: bool = False
 
 
 @dataclass

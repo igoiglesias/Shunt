@@ -1,6 +1,7 @@
 """Middleware ASGI do prefixo /t/<token>/: o token sai do caminho antes do roteamento."""
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+
 from app.core.prefix import TokenPrefixMiddleware
 
 

@@ -12,6 +12,55 @@ teste injete um `Recorder` com engine de arquivo temporario.
 """
 
 import pytest
+from fastapi.testclient import TestClient
+
+TEST_SHUNT_TOKEN = "token-da-suite-de-testes"
+# Id que nenhum banco de teste gera (todos comecam em 1): invalidar o token de
+# um teste de revogacao nunca derruba o token da suite.
+TEST_SHUNT_TOKEN_ID = 999_999
+_ORIGINAL_INIT = TestClient.__init__
+
+
+@pytest.fixture(autouse=True)
+def shunt_token_everywhere(monkeypatch):
+    """Todo `TestClient` manda `x-shunt-token` por padrao, e o token ja esta no
+    cache de validacao: a suite roda sem banco, entao sem este cache semeado
+    todo `/v1` responderia 503. Os 32 arquivos que chamam `/v1/` seguem sem
+    edicao. Quem testa a AUSENCIA do token pede `without_shunt_token`."""
+    from app.core.token_auth import TokenCache, token_hash
+    from app.main import app
+
+    cache = TokenCache(ttl=3600)
+    cache.put(token_hash(TEST_SHUNT_TOKEN), TEST_SHUNT_TOKEN_ID)
+    app.state.token_cache = cache  # cache novo por teste: nada vaza entre testes
+
+    def patched(self, *args, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("x-shunt-token", TEST_SHUNT_TOKEN)
+        _ORIGINAL_INIT(self, *args, headers=headers, **kwargs)
+
+    monkeypatch.setattr(TestClient, "__init__", patched)
+    yield
+
+
+@pytest.fixture
+def without_shunt_token(monkeypatch):
+    """O `TestClient` volta a nao mandar token. O cache semeado continua: quem
+    manda `TEST_SHUNT_TOKEN` por prefixo ou query ainda e aceito sem banco."""
+    monkeypatch.setattr(TestClient, "__init__", _ORIGINAL_INIT)
+
+
+@pytest.fixture(autouse=True)
+def _recorder_not_leaked():
+    yield
+    # Testes que injetam um `Recorder` com engine fazem isso no `app.state`;
+    # sem limpeza o proximo `TestClient` reaproveita o objeto (worker encerrado,
+    # engine antiga) e o teste que exige o comportamento "sem banco" (503)
+    # passa a ver banco.
+    from app.main import app
+
+    if hasattr(app.state, "recorder"):
+        del app.state.recorder
 
 
 @pytest.fixture(autouse=True, scope="session")
