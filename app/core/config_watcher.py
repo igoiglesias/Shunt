@@ -19,6 +19,7 @@ ciclo: catalogo velho ainda atende; catalogo vazio ou parcial nao. Por isso
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from typing import Final
 
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
@@ -30,6 +31,28 @@ from app.stats.engine import reachable
 logger = logging.getLogger("shunt")
 
 VERSION_SQL = text("SELECT max(id) FROM config_versions")
+
+
+class _UnknownVersion:
+    """Sentinela de `seen` antes de qualquer leitura bem sucedida.
+
+    Distinto de `None`: `None` e' um valor real (banco alcancavel, sem
+    nenhuma linha em `config_versions` ainda). Comparar `version == seen`
+    com esse sentinela nunca bate, entao o primeiro ciclo que conseguir ler
+    QUALQUER coisa -- mesmo `None` -- e' tratado como mudanca e recarrega, em
+    vez de aceitar um `None` nunca lido de verdade como se fosse a versao
+    inicial confirmada.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNKNOWN_VERSION"
+
+
+UNKNOWN_VERSION: Final = _UnknownVersion()
+
+SeenVersion = int | None | _UnknownVersion
 
 
 class ConfigWatcher:
@@ -47,24 +70,46 @@ class ConfigWatcher:
         self._url = url
         self._interval = interval
         self._task: asyncio.Task[None] | None = None
-        self.seen: int | None = None
+        self.seen: SeenVersion = UNKNOWN_VERSION
         self.reloads = 0
         self.failures = 0
+
+    async def read_initial_version(self) -> None:
+        """Le a versao ANTES do catalogo ser carregado pelo lifespan.
+
+        Chamado por `app/main.py` antes de `_settings_for`: se essa ordem se
+        inverter (catalogo carregado primeiro), uma edicao de outro worker
+        que aterrissa entre os dois pontos grava a versao NOVA em `seen` mas
+        o catalogo carregado continua sendo o velho -- `check_once` nunca
+        mais recarrega ate a PROXIMA edicao real, porque `version == seen`
+        sempre bate contra a versao ja vista (medido pelo reviewer: `seen: 1
+        | novo no catalogo: False`). Lendo antes, uma edicao nessa janela so
+        custa um reload extra no proximo ciclo -- o erro seguro.
+
+        Sem engine (banco inalcancavel no boot) ou leitura que falha, `seen`
+        fica em `UNKNOWN_VERSION`: o primeiro ciclo que conseguir ler
+        qualquer coisa (mesmo `None`, banco recem-alcancavel e ainda sem
+        edicoes) e' tratado como mudanca e recarrega, em vez de aceitar um
+        `None` nunca lido de verdade como versao confirmada e ficar com o
+        catalogo desatualizado ate a proxima edicao real.
+        """
+        engine = self._engine_of()
+        if engine is None:
+            return
+        try:
+            self.seen = await asyncio.to_thread(self._read_version, engine)
+        except Exception as err:  # noqa: BLE001 - ver docstring do modulo.
+            logger.warning(
+                "config: versao inicial nao lida (%s: %s)", type(err).__name__, err
+            )
 
     async def start(self) -> None:
         if self._task is not None:
             return
-        # Versao inicial junto com o boot: o primeiro ciclo nao recarrega a
-        # toa. Sem ela (banco lento no boot) o primeiro ciclo recarrega uma
-        # vez, o que e o custo certo.
-        engine = self._engine_of()
-        if engine is not None:
-            try:
-                self.seen = await asyncio.to_thread(self._read_version, engine)
-            except Exception as err:  # noqa: BLE001 - ver docstring do modulo.
-                logger.warning(
-                    "config: versao inicial nao lida (%s: %s)", type(err).__name__, err
-                )
+        # Nao le a versao aqui: `read_initial_version()` (chamado pelo
+        # lifespan antes do catalogo ser carregado) ja fez isso. Ler de novo
+        # aqui sobrescreveria um `seen` que uma corrida ja capturou
+        # corretamente.
         self._task = asyncio.create_task(self._run())
 
     async def aclose(self) -> None:
@@ -87,7 +132,6 @@ class ConfigWatcher:
             current = asyncio.current_task()
             if current is not None and current.cancelling() > 0:
                 raise
-
 
     async def _run(self) -> None:
         while True:

@@ -9,7 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings
-from app.core.config_watcher import ConfigWatcher
+from app.core.config_watcher import UNKNOWN_VERSION, ConfigWatcher
 from app.core.upstream import UpstreamPool
 from app.routers.admin_config import create_config_version
 from app.stats.models import Base, Provider
@@ -52,11 +52,18 @@ def _watcher(engine, applied, url: str = "sqlite:///irrelevante.db") -> ConfigWa
     return ConfigWatcher(engine_of=lambda: engine, apply=applied, url=url, interval=_INERT_INTERVAL)
 
 
+async def _boot(watcher: ConfigWatcher) -> None:
+    """Espelha a ordem real do lifespan (app/main.py): versao inicial lida
+    ANTES do laco de fundo comecar."""
+    await watcher.read_initial_version()
+    await watcher.start()
+
+
 async def test_a_new_version_reloads_the_catalog_and_applies_it(tmp_path):
     engine = _engine(tmp_path)
     applied = _Applied()
     watcher = _watcher(engine, applied)
-    await watcher.start()
+    await _boot(watcher)
     assert watcher.seen is None  # banco novo: o seed nao cria versao
     assert await watcher.check_once() is False  # None == None: nada a fazer
     version = _add_provider(engine, "p1")
@@ -72,8 +79,8 @@ async def test_the_same_version_reloads_nothing(tmp_path):
     version = _add_provider(engine, "p1")
     applied = _Applied()
     watcher = _watcher(engine, applied)
-    await watcher.start()
-    assert watcher.seen == version  # versao inicial lida no boot
+    await _boot(watcher)
+    assert watcher.seen == version  # versao inicial lida antes do laco comecar
     assert await watcher.check_once() is False
     assert applied.settings == []
     await watcher.aclose()
@@ -85,7 +92,7 @@ async def test_a_failed_query_keeps_the_catalog_and_the_next_cycle_tries_again(
     engine = _engine(tmp_path)
     applied = _Applied()
     watcher = _watcher(engine, applied)
-    await watcher.start()
+    await _boot(watcher)
     _add_provider(engine, "p1")
     real = watcher._read_version
     calls = {"n": 0}
@@ -115,7 +122,7 @@ async def test_an_apply_that_fails_keeps_seen_unchanged_so_the_next_cycle_retrie
     engine = _engine(tmp_path)
     applied = _Applied()
     watcher = _watcher(engine, applied)
-    await watcher.start()
+    await _boot(watcher)
     version = _add_provider(engine, "p1")
 
     async def explode(settings):
@@ -131,6 +138,10 @@ async def test_an_apply_that_fails_keeps_seen_unchanged_so_the_next_cycle_retrie
 
 
 async def test_an_unreachable_remote_database_is_not_queried(tmp_path, monkeypatch):
+    """`read_initial_version()` tambem falha (banco inalcancavel): `seen`
+    fica em `UNKNOWN_VERSION`, nao em `None` -- distincao que importa para o
+    caso de recuperacao (ver `test_after_the_initial_read_finds_no_engine_...`
+    abaixo)."""
     engine = _engine(tmp_path)
     applied = _Applied()
     touched: list[str] = []
@@ -138,9 +149,10 @@ async def test_an_unreachable_remote_database_is_not_queried(tmp_path, monkeypat
         "app.core.config_watcher.reachable", lambda url: touched.append(url) or False
     )
     watcher = _watcher(engine, applied, url="libsql://banco.turso.io")
-    await watcher.start()
+    await watcher.read_initial_version()
     assert touched == ["libsql://banco.turso.io"]
-    assert watcher.seen is None
+    assert watcher.seen is UNKNOWN_VERSION
+    await watcher.start()
     assert await watcher.check_once() is False
     assert watcher.failures == 1
     assert applied.settings == []
@@ -156,7 +168,7 @@ async def test_an_engine_of_that_raises_counts_as_a_failure_and_retries_next_cyc
     engine = _engine(tmp_path)
     applied = _Applied()
     watcher = _watcher(engine, applied)
-    await watcher.start()
+    await _boot(watcher)
     assert watcher.seen is None
     version = _add_provider(engine, "p1")
 
@@ -183,10 +195,40 @@ async def test_without_an_engine_the_cycle_does_nothing_and_counts_no_failure(tm
     watcher = ConfigWatcher(
         engine_of=lambda: None, apply=applied, url="sqlite:///x.db", interval=_INERT_INTERVAL
     )
-    await watcher.start()
+    await _boot(watcher)
     assert await watcher.check_once() is False
     assert applied.settings == []
     assert watcher.failures == 0
+    await watcher.aclose()
+
+
+async def test_after_the_initial_read_finds_no_engine_the_first_successful_cycle_still_reloads(
+    tmp_path,
+):
+    """I-2 (reviewer): banco inalcancavel no boot -- `engine_of()` devolve
+    `None` -- deixa `seen` em `UNKNOWN_VERSION`. Quando o gravador reconecta
+    e `engine_of()` passa a devolver a engine real, o PRIMEIRO ciclo bem
+    sucedido tem de recarregar mesmo que a versao real seja `None` (banco
+    alcancavel mas ainda sem nenhuma edicao) -- se `seen` tivesse ficado em
+    `None` (o default antigo) em vez de `UNKNOWN_VERSION`, um banco vazio
+    apos a reconexao nunca dispararia o catch-up (medido pelo reviewer:
+    `check_once apos reconexao: False applied: 0 seen: None`), e o worker
+    ficaria com o catalogo desatualizado ate a PROXIMA edicao real."""
+    engine_holder: dict[str, object] = {"engine": None}
+    applied = _Applied()
+    watcher = ConfigWatcher(
+        engine_of=lambda: engine_holder["engine"],
+        apply=applied,
+        url="sqlite:///irrelevante.db",
+        interval=_INERT_INTERVAL,
+    )
+    await watcher.read_initial_version()
+    assert watcher.seen is UNKNOWN_VERSION
+    assert await watcher.check_once() is False  # ainda sem engine: nada a fazer
+    engine_holder["engine"] = _engine(tmp_path)  # "reconexao": banco alcancavel, sem edicoes
+    assert await watcher.check_once() is True  # catch-up: version (None) != UNKNOWN_VERSION
+    assert watcher.seen is None
+    assert applied.settings  # o catalogo (vazio) foi de fato aplicado
     await watcher.aclose()
 
 
@@ -205,7 +247,7 @@ async def test_start_called_twice_keeps_the_first_background_task(tmp_path):
     """`start()` de novo nao pode duplicar o laco: chamar duas vezes tem de
     manter a mesma task, senao dois lacos concorrentes disputariam `seen`."""
     watcher = _watcher(_engine(tmp_path), _Applied())
-    await watcher.start()
+    await _boot(watcher)
     first_task = watcher._task
     await watcher.start()
     assert watcher._task is first_task
@@ -213,9 +255,9 @@ async def test_start_called_twice_keeps_the_first_background_task(tmp_path):
 
 
 async def test_a_cancellation_during_the_initial_read_is_not_swallowed(tmp_path):
-    """O `except` da leitura inicial cobre so `Exception`: um cancelamento
-    real (encerramento do processo no meio do boot) tem de propagar, nao
-    terminar `start()` como se nada tivesse acontecido."""
+    """O `except` de `read_initial_version()` cobre so `Exception`: um
+    cancelamento real (encerramento do processo no meio do boot) tem de
+    propagar, nao terminar a leitura como se nada tivesse acontecido."""
     import time
 
     engine = _engine(tmp_path)
@@ -226,7 +268,7 @@ async def test_a_cancellation_during_the_initial_read_is_not_swallowed(tmp_path)
         time.sleep(0.2)
 
     watcher._read_version = slow_read
-    task = asyncio.ensure_future(watcher.start())
+    task = asyncio.ensure_future(watcher.read_initial_version())
     await asyncio.sleep(0.02)
     task.cancel()
     try:
@@ -297,8 +339,8 @@ async def test_aclose_while_parked_inside_check_once_does_not_hang(tmp_path):
         time.sleep(0.2)
 
     watcher._read_version = slow_read
-    await watcher.start()  # leitura inicial tambem usa slow_read: ja gasta ~0.2s
-    await asyncio.sleep(0.02)  # deixa o laco de fundo entrar no proximo check_once
+    await watcher.start()  # sem leitura inicial: so' cria o laco de fundo
+    await asyncio.sleep(0.02)  # deixa o laco de fundo entrar no primeiro check_once, preso no slow_read
     aclose_task = asyncio.ensure_future(watcher.aclose())
     done, pending = await asyncio.wait([aclose_task], timeout=2)
     if pending:
@@ -375,6 +417,7 @@ async def test_an_edit_made_by_one_worker_reaches_another_within_one_cycle(tmp_p
         await state_b.pool.update(settings)
 
     watcher = ConfigWatcher(engine_of=lambda: engine_b, apply=apply_b, url=url, interval=0.01)
+    await watcher.read_initial_version()  # como o lifespan real: antes do laco comecar
     await watcher.start()
     try:
         _add_provider(engine_a, "novo")
