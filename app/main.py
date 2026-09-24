@@ -5,6 +5,7 @@ import os
 import secrets
 import tomllib
 from contextlib import asynccontextmanager
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -16,12 +17,14 @@ from app.config.config import ENGINE_BOOT_TIMEOUT, TOKEN_CACHE_TTL
 from app.config.seed import seed_catalog_if_empty
 from app.config.settings import Settings, load_settings_from_db
 from app.core.auth import LoginRequired, login_redirect, require_admin
+from app.core.config_watcher import ConfigWatcher
 from app.core.dispatcher import error_body
 from app.core.observability import configure_logging, set_recorder
 from app.core.prefix import TokenPrefixMiddleware
 from app.core.token_auth import TokenCache, TokenRejected
 from app.core.upstream import UpstreamPool
 from app.routers.admin_auth import router as admin_auth_router
+from app.routers.admin_config import apply_settings
 from app.routers.admin_config import router as admin_config_router
 from app.routers.admin_dashboard import router as admin_dashboard_router
 from app.routers.admin_tokens import router as admin_tokens_router
@@ -47,6 +50,28 @@ async def lifespan(app: FastAPI):
         app.state.recorder = Recorder(await _engine_or_none(), reconnect=reconnect)
     set_recorder(app.state.recorder)
     await app.state.recorder.start()
+    # Vigia de versao: so com banco declarado (mesma regra do `reconnect`).
+    # Le `recorder.engine` a cada ciclo porque o gravador reabre o banco
+    # quando ele volta. Sempre atribuido: um teste anterior nao pode deixar um
+    # vigia velho em `app.state`. Criado e com a versao inicial lida ANTES de
+    # `_settings_for`: se o catalogo fosse carregado primeiro, uma edicao de
+    # outro worker que aterrissasse entre os dois pontos gravaria a versao
+    # NOVA em `seen` com o catalogo VELHO ja carregado, e o vigia nunca mais
+    # recarregaria ate a proxima edicao real (medido: `seen: 1 | novo no
+    # catalogo: False`). Nessa ordem, a mesma corrida so custa um reload
+    # extra no proximo ciclo.
+    url = database_url()
+    app.state.config_watcher = (
+        ConfigWatcher(
+            engine_of=lambda: app.state.recorder.engine,
+            apply=partial(apply_settings, app),
+            url=url,
+        )
+        if url
+        else None
+    )
+    if app.state.config_watcher is not None:
+        await app.state.config_watcher.read_initial_version()
     # `hasattr` respects state already injected: the route tests and the E2E
     # tests set `state.settings` and `state.pool` before entering the
     # TestClient context.
@@ -54,6 +79,8 @@ async def lifespan(app: FastAPI):
         app.state.settings = _settings_for(app.state.recorder)
     if not hasattr(app.state, "pool"):
         app.state.pool = UpstreamPool(app.state.settings)
+    if app.state.config_watcher is not None:
+        await app.state.config_watcher.start()
     # Cache de validacao de token: o `hasattr` respeita o cache ja injetado
     # pelos testes (tests/conftest.py).
     if not hasattr(app.state, "token_cache"):
@@ -66,8 +93,16 @@ async def lifespan(app: FastAPI):
             os.environ.get("ADMIN_SESSION_SECRET") or secrets.token_hex(32)
         )
     yield
-    await app.state.recorder.aclose()
-    await app.state.pool.aclose()
+    # `try/finally`: se `config_watcher.aclose()` levantar (ele pode
+    # relevantar um cancelamento mirado no proprio caller do shutdown -- ver
+    # `ConfigWatcher.aclose()`), o recorder e o pool tem de fechar do mesmo
+    # jeito, senao a conexao com o banco e os clientes HTTP vazam.
+    try:
+        if app.state.config_watcher is not None:
+            await app.state.config_watcher.aclose()
+    finally:
+        await app.state.recorder.aclose()
+        await app.state.pool.aclose()
 
 
 def _settings_for(recorder: Recorder) -> Settings:

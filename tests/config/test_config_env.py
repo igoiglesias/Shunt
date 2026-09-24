@@ -1,11 +1,7 @@
 """Testes de que as knobs operacionais lêem SHUNT_* do ambiente com defaults."""
 
 import os
-import sys
 from importlib import reload
-
-# Garante que o path do projeto esteja disponível
-sys.path.insert(0, "/home/iglesias/Documents/Projetos_Pessoais/Shunt")
 
 
 def test_env_overrides_default():
@@ -62,6 +58,7 @@ def test_all_env_knobs_readable():
         "SEARCH_LIMIT": (50, int),
         "MAX_SEARCH_LIMIT": (500, int),
         "TOOL_LIMIT": (8, int),
+        "CONFIG_POLL_SECONDS": (10.0, float),
         "ROW_LIMIT": (5000, int),
         "ANSWER_PIECES": (20000, int),
         "ANALYSIS_MAX_OUTPUT_TOKENS": (4000, int),
@@ -114,6 +111,7 @@ def test_each_knob_reads_its_own_env_var():
         "SEARCH_LIMIT": "SHUNT_SEARCH_LIMIT",
         "MAX_SEARCH_LIMIT": "SHUNT_MAX_SEARCH_LIMIT",
         "TOOL_LIMIT": "SHUNT_TOOL_LIMIT",
+        "CONFIG_POLL_SECONDS": "SHUNT_CONFIG_POLL_SECONDS",
         "ROW_LIMIT": "SHUNT_DOSIER_ROW_LIMIT",
         "ANSWER_PIECES": "SHUNT_ANSWER_PIECES",
         "ANALYSIS_MAX_OUTPUT_TOKENS": "SHUNT_ANALYSIS_MAX_OUTPUT_TOKENS",

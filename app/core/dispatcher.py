@@ -547,7 +547,7 @@ async def _dispatch(
             continue
         tally.tried = True
         with slot:
-            async with pool.client(candidate.provider) as client:
+            async with pool.client(candidate.provider, settings.providers[candidate.provider]) as client:
                 result = await _attempts(
                     req, settings, client, candidate, payload, deadline, trace, tally
                 )
@@ -564,7 +564,7 @@ async def _dispatch(
             trace.append(f"{candidate.model}: still busy at the deadline")
         else:
             with slot:
-                async with pool.client(candidate.provider) as client:
+                async with pool.client(candidate.provider, settings.providers[candidate.provider]) as client:
                     result = await _attempts(
                         req, settings, client, candidate, payload, deadline, trace, tally
                     )
@@ -1035,7 +1035,7 @@ async def _stream_chain(
         # entao sai do `with`.
         with slot:
             async with (
-                pool.client(candidate.provider) as client,
+                pool.client(candidate.provider, settings.providers[candidate.provider]) as client,
                 aclosing(
                     _stream_candidate(
                         req, settings, client, candidate, payload, passthrough, tally, leg
@@ -1073,7 +1073,7 @@ async def _stream_chain(
             leg = _Leg()
             with slot:
                 async with (
-                    pool.client(candidate.provider) as client,
+                    pool.client(candidate.provider, settings.providers[candidate.provider]) as client,
                     aclosing(
                         _stream_candidate(
                             req, settings, client, candidate, payload, passthrough, tally, leg
