@@ -195,8 +195,10 @@ chain. Streaming follows the same path, one SSE event at a time.
 
 The catalogue lives in the database: four tables for providers, models, routes
 and the candidates of each route. You edit it on the **Configuração** screen
-(`/admin/config`), and every change applies to the next request, with no
-restart.
+(`/admin/config`), with no restart. The worker that served your edit applies it
+on the next request. With several workers (`make prod`), the others pick it up
+within `SHUNT_CONFIG_POLL_SECONDS` (10 s by default). Requests already in flight
+finish on the catalogue they started with.
 
 `app/config/seed.py` holds the catalogue Shunt starts from. At boot, when any
 of providers, models or routes is empty, Shunt inserts the parts of that
