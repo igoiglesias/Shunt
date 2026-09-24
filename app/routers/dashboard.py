@@ -319,6 +319,11 @@ async def stats_stream(request: Request) -> StreamingResponse:
 
     async def events():
         try:
+            # Sem checagem de desligamento de proposito: o uvicorn instalado
+            # nao avisa uma resposta em curso (so marca keep_alive=False), e o
+            # lifespan de shutdown roda depois da espera. O que chega aqui e o
+            # cancelamento da task no teto do --timeout-graceful-shutdown do
+            # alvo `prod`; o `finally` abaixo solta a fila nesse caminho.
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SECONDS)

@@ -678,7 +678,7 @@ make type    # mypy
 make check   # lint + type + suite with coverage
 make e2e     # the app end to end against a scripted provider
 make browser # the panel in a headless browser
-make prod    # no reload, one worker per core, access log off
+make prod    # no reload, one worker per core, access log off, shutdown capped at 5 s
 ```
 
 For a configured model, Shunt sends the provider key stored in the database.
