@@ -536,7 +536,9 @@ async def count_tokens(request: Request):
     if candidate.protocol == "anthropic":
         shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
         try:
-            async with pool.client(candidate.provider) as upstream_client:
+            async with pool.client(
+                candidate.provider, settings.providers[candidate.provider]
+            ) as upstream_client:
                 upstream = await upstream_client.post(
                     "/v1/messages/count_tokens",
                     json={**body, "model": candidate.model},

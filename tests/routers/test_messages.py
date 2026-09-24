@@ -293,9 +293,9 @@ def test_count_tokens_borrows_the_upstream_client_through_the_pool_lease():
         real = pool.client
 
         @asynccontextmanager
-        async def counting(provider):
+        async def counting(provider, config):
             leases.append(provider)
-            async with real(provider) as lent:
+            async with real(provider, config) as lent:
                 yield lent
 
         pool.client = counting
@@ -305,6 +305,25 @@ def test_count_tokens_borrows_the_upstream_client_through_the_pool_lease():
         ).json()
     assert body == {"input_tokens": 7}
     assert leases == ["anthropic"]
+
+
+@respx.mock
+def test_count_tokens_uses_the_snapshot_it_resolved_when_the_pool_no_longer_has_the_provider():
+    """O provedor saiu do catalogo vivo do pool entre a leitura das settings
+    e o `client()`: o pedido segue o snapshot dele (host e chave juntos) em
+    vez de levantar `KeyError`."""
+    route = respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
+        return_value=httpx.Response(200, json={"input_tokens": 7})
+    )
+    with client(ANTHROPIC_SETTINGS) as c:
+        app.state.pool = UpstreamPool(SETTINGS)  # catalogo vivo sem "anthropic"
+        body = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]},
+        ).json()
+    assert body == {"input_tokens": 7}
+    assert route.call_count == 1
+    assert route.calls[0].request.headers["x-api-key"] == "sk-da-config"
 
 
 def test_count_tokens_on_an_unknown_model_is_an_anthropic_shaped_400():

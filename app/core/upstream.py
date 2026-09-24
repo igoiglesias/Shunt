@@ -7,7 +7,7 @@ from typing import Self
 import httpx
 
 from app.config.config import TIMEOUT_CONNECT, TIMEOUT_POOL, TIMEOUT_READ, TIMEOUT_WRITE
-from app.config.settings import Settings
+from app.config.settings import ProviderConfig, Settings
 
 TIMEOUT = httpx.Timeout(
     connect=TIMEOUT_CONNECT, read=TIMEOUT_READ, write=TIMEOUT_WRITE, pool=TIMEOUT_POOL
@@ -266,28 +266,37 @@ class UpstreamPool:
     def _held(self, provider: str) -> _Held:
         if provider not in self._clients:
             base_url = self._settings.providers[provider].base_url
-            self._clients[provider] = _Held(self._new_client(provider), base_url)
+            self._clients[provider] = _Held(self._new_client(base_url), base_url)
         return self._clients[provider]
 
-    def _new_client(self, provider: str) -> httpx.AsyncClient:
-        config = self._settings.providers[provider]
-        return httpx.AsyncClient(
-            base_url=config.base_url, timeout=TIMEOUT, transport=self._transport
-        )
+    def _new_client(self, base_url: str) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=base_url, timeout=TIMEOUT, transport=self._transport)
 
     @asynccontextmanager
-    async def client(self, provider: str) -> AsyncIterator[httpx.AsyncClient]:
+    async def client(
+        self, provider: str, config: ProviderConfig
+    ) -> AsyncIterator[httpx.AsyncClient]:
         """O cliente do provedor pelo tempo de um candidato, com uso contado.
 
-        Com o pool aberto e o cliente compartilhado; se um `update` o
+        `config` e o `ProviderConfig` do snapshot de `Settings` do PEDIDO --
+        o mesmo de onde saem a resolucao e a chave dos cabecalhos. O
+        catalogo vivo do pool pode ter mudado desde o `resolve` (fallback,
+        backoff, espera do ultimo recurso). O revisor mediu dois defeitos de
+        ler so o catalogo vivo aqui: provedor removido virava `KeyError` (o
+        `release_all` entrega o lugar e o pedido quebrava em seguida), e um
+        `base_url` trocado mandava a chave ANTIGA do snapshot ao host NOVO.
+
+        Snapshot igual ao vivo: o cliente compartilhado; se um `update` o
         aposentar no meio do uso, ele so fecha quando este uso (e os outros
-        em voo) terminarem. Com o pool ja fechado -- o shutdown chegou com
-        este pedido ainda esperando um slot -- e um cliente so deste uso,
-        fechado na saida: `get()` o criaria dentro de um pool que ninguem
-        mais vai fechar.
+        em voo) terminarem. Provedor fora do catalogo vivo, `base_url`
+        diferente do vivo, ou pool ja fechado (o shutdown chegou com o pedido
+        ainda esperando um slot): um cliente so deste uso, no `base_url` do
+        snapshot, fechado na saida -- host e chave sempre do mesmo catalogo,
+        e nenhum cliente orfao num pool que ninguem mais vai fechar.
         """
-        if self._closed:
-            own = self._new_client(provider)
+        live = self._settings.providers.get(provider)
+        if self._closed or live is None or live.base_url != config.base_url:
+            own = self._new_client(config.base_url)
             try:
                 yield own
             finally:

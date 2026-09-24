@@ -502,10 +502,10 @@ async def test_update_with_a_new_base_url_serves_a_new_client_and_closes_the_idl
 
 async def test_a_retired_client_stays_open_while_a_request_uses_it_and_closes_after():
     pool = UpstreamPool(SETTINGS)
-    async with pool.client("local") as lent:
+    async with pool.client("local", SETTINGS.providers["local"]) as lent:
         await pool.update(_moved())
         assert not lent.is_closed  # em uso: o update nao fecha
-        async with pool.client("local") as fresh:
+        async with pool.client("local", _moved().providers["local"]) as fresh:
             assert fresh is not lent  # requisicao nova ja recebe o endereco novo
     assert lent.is_closed  # ultimo uso terminou: fechou
     assert pool._retired == []
@@ -515,8 +515,8 @@ async def test_a_retired_client_stays_open_while_a_request_uses_it_and_closes_af
 
 async def test_a_retired_client_shared_by_two_requests_closes_only_after_both():
     pool = UpstreamPool(SETTINGS)
-    first = pool.client("local")
-    second = pool.client("local")
+    first = pool.client("local", SETTINGS.providers["local"])
+    second = pool.client("local", SETTINGS.providers["local"])
     a = await first.__aenter__()
     b = await second.__aenter__()
     assert a is b
@@ -537,7 +537,7 @@ async def test_an_exception_inside_a_retired_lease_still_closes_it_and_clears_us
     pool = UpstreamPool(SETTINGS)
     lent = None
     with pytest.raises(RuntimeError, match="stream quebrou"):
-        async with pool.client("local") as leased:
+        async with pool.client("local", SETTINGS.providers["local"]) as leased:
             lent = leased
             await pool.update(_moved())
             assert not lent.is_closed
@@ -546,7 +546,7 @@ async def test_an_exception_inside_a_retired_lease_still_closes_it_and_clears_us
     assert lent.is_closed
     assert pool._retired == []
     # uses voltou a 0: um novo lease do provedor novo funciona normalmente.
-    async with pool.client("local") as fresh:
+    async with pool.client("local", _moved().providers["local"]) as fresh:
         assert not fresh.is_closed
     await pool.aclose()
 
@@ -582,7 +582,7 @@ async def test_update_removing_a_provider_retires_its_client():
 
 async def test_aclose_closes_retired_clients_still_in_use():
     pool = UpstreamPool(SETTINGS)
-    lease = pool.client("local")
+    lease = pool.client("local", SETTINGS.providers["local"])
     lent = await lease.__aenter__()
     await pool.update(_moved())
     await pool.aclose()
@@ -616,11 +616,8 @@ class _GatedClosePool(UpstreamPool):
         super().__init__(settings)
         self._gate = gate
 
-    def _new_client(self, provider: str) -> httpx.AsyncClient:
-        config = self._settings.providers[provider]
-        client = _GatedCloseClient(
-            base_url=config.base_url, timeout=TIMEOUT, transport=self._transport
-        )
+    def _new_client(self, base_url: str) -> httpx.AsyncClient:
+        client = _GatedCloseClient(base_url=base_url, timeout=TIMEOUT, transport=self._transport)
         client.gate = self._gate
         return client
 
@@ -673,3 +670,70 @@ async def test_two_concurrent_updates_do_not_corrupt_the_client_map():
     assert fresh.is_closed
     assert pool._clients == {}
     assert pool._retired == []
+
+
+# ---------------------------------------------------------------------------
+# client(provider, config): o pedido usa o catalogo que ele resolveu
+# ---------------------------------------------------------------------------
+# Cada pedido carrega o seu snapshot de `Settings` (resolucao, cabecalhos,
+# chave). O revisor mediu dois defeitos de ler o catalogo VIVO em `client()`:
+# provedor removido entre `resolve` e o `client()` virava `KeyError`, e um
+# `base_url` trocado mandava a chave antiga para o host novo.
+
+
+def _without_local() -> Settings:
+    return Settings(
+        providers={"openrouter": SETTINGS.providers["openrouter"]},
+        models={},
+        routes=[],
+        default_model=None,
+    )
+
+
+async def test_a_provider_removed_from_the_live_catalog_is_served_from_the_snapshot():
+    snapshot = SETTINGS.providers["local"]
+    pool = UpstreamPool(SETTINGS)
+    await pool.update(_without_local())
+    async with pool.client("local", snapshot) as own:
+        assert str(own.base_url).rstrip("/") == "http://localhost:8080/v1"
+        assert not own.is_closed
+        assert "local" not in pool._clients  # nao entra no mapa compartilhado
+    assert own.is_closed  # cliente so deste uso: fecha na saida
+    assert "local" not in pool._clients
+    assert pool._retired == []
+    await pool.aclose()
+
+
+async def test_an_old_snapshot_after_a_base_url_change_keeps_the_old_address():
+    old_snapshot = SETTINGS.providers["local"]
+    moved = _moved()
+    pool = UpstreamPool(SETTINGS)
+    await pool.update(moved)
+    async with pool.client("local", old_snapshot) as old:
+        assert str(old.base_url).rstrip("/") == "http://localhost:8080/v1"
+        async with pool.client("local", moved.providers["local"]) as new:
+            assert str(new.base_url).rstrip("/") == "http://localhost:9090/v1"
+            assert new is pool.get("local")  # o snapshot novo usa o compartilhado
+        assert old is not pool.get("local")
+    assert old.is_closed
+    assert not pool.get("local").is_closed
+    await pool.aclose()
+
+
+async def test_a_snapshot_matching_the_live_catalog_uses_the_shared_client():
+    pool = UpstreamPool(SETTINGS)
+    async with pool.client("local", SETTINGS.providers["local"]) as lent:
+        assert lent is pool.get("local")
+        assert pool._clients["local"].uses == 1
+    assert not lent.is_closed
+    assert pool._clients["local"].uses == 0
+    await pool.aclose()
+
+
+async def test_a_closed_pool_serves_the_snapshot_address():
+    pool = UpstreamPool(_moved())
+    await pool.aclose()
+    async with pool.client("local", SETTINGS.providers["local"]) as own:
+        assert str(own.base_url).rstrip("/") == "http://localhost:8080/v1"
+    assert own.is_closed
+    assert pool._clients == {}
