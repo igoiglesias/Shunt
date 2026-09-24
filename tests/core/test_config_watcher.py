@@ -37,8 +37,19 @@ class _Applied:
         self.settings.append(settings)
 
 
+# Intervalo longo de proposito: quase todo teste aqui chama `check_once()`
+# manualmente. Com um intervalo curto o laco de fundo (criado por `start()`)
+# corre em paralelo e pode entrar no mesmo `check_once()` que o teste chama
+# na mao -- os dois veem `version != seen(None)` antes de qualquer um gravar
+# `seen`, e os dois recarregam (`reloads` vira 2 em vez de 1). Medido: 15
+# falhas em 40 rodadas com intervalo 0.01 (reviewer), 0 falhas em 60 rodadas
+# com intervalo alto. So o teste que exercita o laco em si usa intervalo
+# curto (`ConfigWatcher(..., interval=0.01)` direto, sem este helper).
+_INERT_INTERVAL = 3600.0
+
+
 def _watcher(engine, applied, url: str = "sqlite:///irrelevante.db") -> ConfigWatcher:
-    return ConfigWatcher(engine_of=lambda: engine, apply=applied, url=url, interval=0.01)
+    return ConfigWatcher(engine_of=lambda: engine, apply=applied, url=url, interval=_INERT_INTERVAL)
 
 
 async def test_a_new_version_reloads_the_catalog_and_applies_it(tmp_path):
@@ -136,9 +147,42 @@ async def test_an_unreachable_remote_database_is_not_queried(tmp_path, monkeypat
     await watcher.aclose()
 
 
+async def test_an_engine_of_that_raises_counts_as_a_failure_and_retries_next_cycle(tmp_path):
+    """`engine_of()` roda dentro do `try` de `check_once()`: se o gravador
+    estiver no meio de reabrir o banco e `engine_of()` levantar, o ciclo
+    conta como falha e tenta de novo no proximo -- em vez de deixar a
+    excecao subir e matar o laco de fundo em silencio, contradizendo a
+    docstring de `check_once` ("Nunca levanta")."""
+    engine = _engine(tmp_path)
+    applied = _Applied()
+    watcher = _watcher(engine, applied)
+    await watcher.start()
+    assert watcher.seen is None
+    version = _add_provider(engine, "p1")
+
+    calls = {"n": 0}
+
+    def flaky_engine_of():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("banco reabrindo")
+        return engine
+
+    watcher._engine_of = flaky_engine_of
+    assert await watcher.check_once() is False
+    assert watcher.failures == 1
+    assert watcher.seen is None
+    assert await watcher.check_once() is True
+    assert watcher.seen == version
+    assert "p1" in applied.settings[-1].providers
+    await watcher.aclose()
+
+
 async def test_without_an_engine_the_cycle_does_nothing_and_counts_no_failure(tmp_path):
     applied = _Applied()
-    watcher = ConfigWatcher(engine_of=lambda: None, apply=applied, url="sqlite:///x.db", interval=0.01)
+    watcher = ConfigWatcher(
+        engine_of=lambda: None, apply=applied, url="sqlite:///x.db", interval=_INERT_INTERVAL
+    )
     await watcher.start()
     assert await watcher.check_once() is False
     assert applied.settings == []
@@ -192,6 +236,77 @@ async def test_a_cancellation_during_the_initial_read_is_not_swallowed(tmp_path)
         raised = True
     assert raised
     assert watcher._task is None  # nao chegou a criar o laco de fundo
+
+
+async def test_a_cancellation_during_check_once_is_not_swallowed(tmp_path):
+    """O `except` de `check_once()` cobre so `Exception`: um cancelamento
+    real durante o ciclo (nao um erro de banco) tem de propagar, nao virar
+    uma falha comum contada e engolida. `asyncio.timeout` limita a espera:
+    se o mutante (`except BaseException`) engolir o cancelamento, a task
+    termina sozinha sem levantar nada e o teste falha rapido no assert, sem
+    travar a suite."""
+    import time
+
+    engine = _engine(tmp_path)
+    applied = _Applied()
+    watcher = _watcher(engine, applied)
+    _add_provider(engine, "p1")
+
+    def slow_read(engine_):
+        time.sleep(0.2)
+
+    watcher._read_version = slow_read
+    task = asyncio.ensure_future(watcher.check_once())
+    await asyncio.sleep(0.02)
+    task.cancel()
+    async with asyncio.timeout(2):
+        try:
+            await task
+            raised = False
+        except asyncio.CancelledError:
+            raised = True
+    assert raised
+    assert watcher.failures == 0  # propagou; nao contou como falha comum
+
+
+async def test_aclose_while_parked_inside_check_once_does_not_hang(tmp_path):
+    """Se o laco de fundo estiver preso dentro de `check_once()` quando
+    `aclose()` pede o cancelamento, `aclose()` tem de terminar mesmo assim.
+
+    `aclose()` espera a MESMA task que ele cancelou (`await task` dentro do
+    seu proprio `except CancelledError: pass`); um `asyncio.timeout` em volta
+    da chamada nao serve de rede de seguranca aqui -- ele cancela a task de
+    TESTE, que esta parada bem naquele `await task`, e `aclose()` absorve
+    esse cancelamento tambem (e' o mesmo ponto de suspensao), entao o
+    `async with` sai sem excecao e nada denuncia o timeout. Por isso o
+    `aclose()` roda como uma task PROPRIA e `asyncio.wait(..., timeout=...)`
+    so' observa se ela terminou, sem cancelar nada: se o mutante engolir o
+    cancelamento em `check_once()`, `_run` nunca sai do `while True`, a task
+    de `aclose()` fica em `pending`, e o assert falha rapido em vez de a
+    suite travar."""
+    import time
+
+    engine = _engine(tmp_path)
+    applied = _Applied()
+    watcher = ConfigWatcher(
+        engine_of=lambda: engine, apply=applied, url="sqlite:///irrelevante.db", interval=0.01
+    )
+    _add_provider(engine, "p1")
+
+    def slow_read(engine_):
+        time.sleep(0.2)
+
+    watcher._read_version = slow_read
+    await watcher.start()  # leitura inicial tambem usa slow_read: ja gasta ~0.2s
+    await asyncio.sleep(0.02)  # deixa o laco de fundo entrar no proximo check_once
+    aclose_task = asyncio.ensure_future(watcher.aclose())
+    done, pending = await asyncio.wait([aclose_task], timeout=2)
+    if pending:
+        for t in pending:
+            t.cancel()
+        raise AssertionError("aclose() nao terminou em 2s: laco preso em check_once")
+    assert aclose_task in done
+    assert watcher._task is None
 
 
 async def test_an_edit_made_by_one_worker_reaches_another_within_one_cycle(tmp_path):

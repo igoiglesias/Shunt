@@ -85,10 +85,10 @@ class ConfigWatcher:
     async def check_once(self) -> bool:
         """Um ciclo: recarregou o catalogo? Nunca levanta (cancelamento passa:
         `CancelledError` nao e `Exception`)."""
-        engine = self._engine_of()
-        if engine is None:
-            return False
         try:
+            engine = self._engine_of()
+            if engine is None:
+                return False
             version = await asyncio.to_thread(self._read_version, engine)
             if version == self.seen:
                 return False
