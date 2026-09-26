@@ -23,7 +23,13 @@ LOCAL2_URL = "http://local2.test/v1/chat/completions"
 CLOUD_URL = "https://api.test/v1/chat/completions"
 
 
-def _settings(*aliases: str, cloud_key: str | None = "sk-teste") -> Settings:
+def _settings(
+    *aliases: str, cloud_key: str | None = "sk-teste", default_model: str | None = None
+) -> Settings:
+    # `loc-tail` esta FORA da rota: so entra como ultimo recurso via
+    # `default_model`, e assim o candidato final tem portao de verdade no pool.
+    # Sem ele, sem `default_model`, o ultimo recurso seria o transparente
+    # (bypass de `828591e`) e a chamada saida para o host oficial.
     return Settings(
         providers={
             "local": ProviderConfig(
@@ -46,13 +52,18 @@ def _settings(*aliases: str, cloud_key: str | None = "sk-teste") -> Settings:
             "cld": ModelConfig(
                 provider="cloud", model="vendor/cloud", context_window=64000, max_output_tokens=8192
             ),
+            "loc-tail": ModelConfig(
+                provider="local", model="vendor/local", context_window=64000, max_output_tokens=8192
+            ),
         },
         routes=[("opus", list(aliases))],
-        default_model=None,
+        default_model=default_model,
     )
 
 
-LOCAL_THEN_CLOUD = _settings("loc", "cld")
+# `default_model="cld"` deduplica o ultimo recurso na posicao da rota: a cadeia
+# e [loc, cld] como antes do bypass, sem o transparente no fim.
+LOCAL_THEN_CLOUD = _settings("loc", "cld", default_model="cld")
 
 
 def _occupy(pool: UpstreamPool, provider: str):
@@ -154,7 +165,7 @@ async def test_the_slot_is_released_when_the_2xx_body_is_unreadable():
 async def test_last_resort_waits_for_the_busy_candidate_when_nothing_else_can_serve():
     # `cld` sem chave e inelegivel; `loc` esta cheio. Sem o ultimo recurso a
     # requisicao falharia com um slot vagando logo depois.
-    settings = _settings("loc", "cld", cloud_key=None)
+    settings = _settings("loc", "cld", cloud_key=None, default_model="loc-tail")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
@@ -172,7 +183,7 @@ async def test_last_resort_waits_for_the_busy_candidate_when_nothing_else_can_se
 @respx.mock
 async def test_last_resort_gives_up_at_the_total_deadline(monkeypatch):
     monkeypatch.setattr(dispatcher, "TOTAL_DEADLINE", 0.05)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     local = respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("x")))
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
@@ -194,7 +205,7 @@ async def test_last_resort_gives_up_at_the_total_deadline(monkeypatch):
 
 @respx.mock
 async def test_last_resort_waits_on_the_first_busy_candidate():
-    settings = _settings("loc", "loc2")
+    settings = _settings("loc", "loc2", default_model="loc2")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
     respx.post(LOCAL2_URL).mock(return_value=httpx.Response(200, json=ok_payload("x")))
     pool = UpstreamPool(settings)
@@ -238,7 +249,7 @@ async def test_no_last_resort_once_some_candidate_was_actually_tried(monkeypatch
 @respx.mock
 async def test_no_last_resort_when_nothing_was_busy():
     # Cadeia toda inelegivel e ninguem cheio: o erro de sempre, sem espera.
-    settings = _settings("cld", cloud_key=None)
+    settings = _settings("cld", cloud_key=None, default_model="cld")
     pool = UpstreamPool(settings)
     try:
         result = await asyncio.wait_for(
@@ -454,7 +465,7 @@ async def _enter_last_resort(monkeypatch, settings, pool):
 
 @respx.mock
 async def test_streaming_last_resort_serves_when_the_slot_frees_in_time(monkeypatch):
-    settings = _settings("loc", "cld", cloud_key=None)
+    settings = _settings("loc", "cld", cloud_key=None, default_model="loc-tail")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-local"), headers=SSE_HEADERS)
     )
@@ -475,7 +486,7 @@ async def test_streaming_last_resort_serves_when_the_slot_frees_in_time(monkeypa
 
 @respx.mock
 async def test_streaming_last_resort_waits_on_the_first_busy_candidate(monkeypatch):
-    settings = _settings("loc", "loc2")
+    settings = _settings("loc", "loc2", default_model="loc2")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-primeiro"), headers=SSE_HEADERS)
     )
@@ -499,7 +510,7 @@ async def test_streaming_last_resort_waits_on_the_first_busy_candidate(monkeypat
 
 @respx.mock
 async def test_streaming_last_resort_reports_why_the_awaited_candidate_failed(monkeypatch):
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(400, json={"error": {"message": "contexto estourou"}})
     )
@@ -522,7 +533,7 @@ async def test_streaming_last_resort_gives_up_at_the_first_event_deadline(monkey
     # do laco ja depois do prazo (100) -- desiste sem nenhum keep-alive.
     monkeypatch.setattr(dispatcher, "_now", _FrozenClock(0.0, 0.0, 100.0))
     monkeypatch.setattr(dispatcher, "PING_INTERVAL", 0.001)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     local = respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("x"), headers=SSE_HEADERS)
     )
@@ -545,7 +556,7 @@ async def test_streaming_last_resort_keeps_the_client_warm_while_waiting(monkeyp
     # ping, fatia (100, vira espera zero), checagem (100) -> desiste.
     monkeypatch.setattr(dispatcher, "_now", _FrozenClock(0.0, 0.0, 0.0, 0.0, 0.0, 100.0))
     monkeypatch.setattr(dispatcher, "PING_INTERVAL", 0.001)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
     try:
@@ -590,7 +601,7 @@ async def test_a_streaming_last_resort_keeps_its_place_in_line_across_pings(monk
     depois levava o slot. A espera tem de ficar na fila entre os pings."""
     monkeypatch.setattr(dispatcher, "_now", _FrozenClock(0.0))
     monkeypatch.setattr(dispatcher, "PING_INTERVAL", 0.001)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-primeiro"), headers=SSE_HEADERS)
     )
@@ -642,7 +653,7 @@ async def test_the_buffered_last_resort_waits_only_for_what_is_left_of_the_deadl
     # em 30 -- sobram 90, nao os 120 do prazo inteiro.
     monkeypatch.setattr(dispatcher, "TOTAL_DEADLINE", 120.0)
     monkeypatch.setattr(dispatcher, "time", _Clock(0.0, 0.0, 30.0))
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
     asked: list[float] = []
@@ -723,7 +734,7 @@ async def test_a_buffered_last_resort_across_a_reload_leaks_no_client(monkeypatc
     pedido segue sendo servido, mas o cliente httpx que ele usa nao pode
     ficar vivo dentro de um pool que ninguem mais vai fechar."""
     created = _track_clients(monkeypatch)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
@@ -741,7 +752,7 @@ async def test_a_buffered_last_resort_across_a_reload_leaks_no_client(monkeypatc
 @respx.mock
 async def test_a_streaming_last_resort_across_a_reload_leaks_no_client(monkeypatch):
     created = _track_clients(monkeypatch)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-local"), headers=SSE_HEADERS)
     )
@@ -804,7 +815,7 @@ async def test_the_streaming_last_resort_stops_exactly_at_the_deadline(monkeypat
     monkeypatch.setattr(dispatcher, "FIRST_EVENT_DEADLINE", 20.0)
     monkeypatch.setattr(dispatcher, "_now", _FrozenClock(0.0, 0.0, 20.0))
     monkeypatch.setattr(dispatcher, "PING_INTERVAL", 0.001)
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
     try:
@@ -827,11 +838,13 @@ NEW_LOCAL_URL = "http://new-host.test/v1/chat/completions"
 
 
 def _without_local() -> Settings:
-    full = _settings("loc2")
+    full = _settings("loc2", default_model="loc2")
     return Settings(
         providers={k: v for k, v in full.providers.items() if k != "local"},
-        models={k: v for k, v in full.models.items() if k != "loc"},
+        models={k: v for k, v in full.models.items() if k not in ("loc", "loc-tail")},
         routes=[("opus", ["loc2"])],
+        # Sem o provider `local`, nenhum `default_model` que aponte para ele:
+        # a validacao das `Settings` proibia esse dedo morto no reload.
         default_model=None,
     )
 
@@ -853,7 +866,7 @@ async def _until_waiting(pool: UpstreamPool, provider: str) -> None:
 
 @respx.mock
 async def test_a_last_resort_waiter_released_by_removing_its_provider_is_still_served():
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
     pool = UpstreamPool(settings)
     held = _occupy(pool, "local")
@@ -871,7 +884,7 @@ async def test_a_last_resort_waiter_released_by_removing_its_provider_is_still_s
 
 @respx.mock
 async def test_a_request_in_flight_across_a_base_url_and_key_change_keeps_host_and_key_together():
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     old = respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, json=ok_payload("vendor/local"))
     )
@@ -965,7 +978,7 @@ async def test_a_streaming_fallback_after_a_base_url_and_key_change_keeps_host_a
 async def test_a_streaming_last_resort_waiter_released_by_removing_its_provider_is_served(
     monkeypatch,
 ):
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-local"), headers=SSE_HEADERS)
     )
@@ -986,7 +999,7 @@ async def test_a_streaming_last_resort_waiter_released_by_removing_its_provider_
 async def test_a_stream_in_flight_across_a_base_url_and_key_change_keeps_host_and_key_together(
     monkeypatch,
 ):
-    settings = _settings("loc")
+    settings = _settings("loc", default_model="loc")
     old = respx.post(LOCAL_URL).mock(
         return_value=httpx.Response(200, text=_sse("do-antigo"), headers=SSE_HEADERS)
     )
