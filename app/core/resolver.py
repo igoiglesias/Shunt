@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from app.config.settings import Settings
+from app.core.official_hosts import OFFICIAL_HOSTS
 
 # prefixo do nome do modelo -> nome do provedor esperado na tabela `providers`
 PROVIDER_HINTS: tuple[tuple[str, str], ...] = (
@@ -46,6 +47,14 @@ def _candidate(alias: str, settings: Settings, requested: str) -> Candidate:
 
 
 def _transparent(requested: str, settings: Settings, model: str | None = None) -> Candidate:
+    """Destino transparente do nome pedido.
+
+    Medida (bug do harness): o seed nao declara "anthropic" nem "openai", e um
+    Claude Code com `claude-*` sem rota morria em `UnknownProviderError` -- o
+    erro que a spec R1 proibia, porque o destino de um transparente SEM
+    entrada no catalogo e o host oficial embutido em codigo, nao o catalogo.
+    Provider declarado continua valendo: e a escolha do operador.
+    """
     provider = None
     for prefix, name in PROVIDER_HINTS:
         if requested.startswith(prefix):
@@ -53,16 +62,26 @@ def _transparent(requested: str, settings: Settings, model: str | None = None) -
             break
     if provider is None and "/" in requested:
         provider = "openrouter"
-    if provider is None or provider not in settings.providers:
+    if provider is None:
         raise UnknownProviderError(
             f"no provider declared for model {requested!r}; "
             f"add it to `providers` or create a route for it"
         )
+    if provider in settings.providers:
+        protocol = settings.providers[provider].protocol
+    else:
+        official = OFFICIAL_HOSTS.get(provider)
+        if official is None:
+            raise UnknownProviderError(
+                f"no provider declared for model {requested!r}; "
+                f"add it to `providers` or create a route for it"
+            )
+        protocol = official.protocol
     return Candidate(
         alias=None,
         provider=provider,
         model=model if model is not None else requested,
-        protocol=settings.providers[provider].protocol,
+        protocol=protocol,
         transparent=True,
     )
 

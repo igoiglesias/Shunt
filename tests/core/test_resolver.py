@@ -109,7 +109,9 @@ def test_transparent_infers_openai_provider_from_gpt_and_o_series_prefixes():
     assert resolve("o3-mini", settings).chain[0].provider == "openai"
 
 
-def test_transparent_rejects_name_with_no_declared_provider():
+def test_transparent_uses_official_host_when_provider_not_declared():
+    """Provedor derivado do nome fora do catalogo: o transparente usa o host
+    oficial embutido, em vez de levantar (RAIZ DO BUG que matava o harness)."""
     settings = Settings(
         providers={
             "local": ProviderConfig(
@@ -120,8 +122,86 @@ def test_transparent_rejects_name_with_no_declared_provider():
         routes=[],
         default_model=None,
     )
-    with pytest.raises(UnknownProviderError, match="claude-fable-5-1"):
-        resolve("claude-fable-5-1", settings)
+    result = resolve("claude-fable-5-1", settings)
+    assert result.rule == "transparent"
+    candidate = result.chain[0]
+    assert candidate.transparent is True
+    assert candidate.alias is None
+    assert candidate.provider == "anthropic"
+    assert candidate.protocol == "anthropic"
+    assert candidate.model == "claude-fable-5-1"
+
+
+def test_transparent_still_rejects_a_name_with_no_deducible_provider():
+    """Sem prefixo dedutivel nem host oficial do nome, nao existe destino: o
+    400 que o chamador ja devolvia continua valendo."""
+    settings = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    with pytest.raises(UnknownProviderError, match="um-modelo-qualquer"):
+        resolve("um-modelo-qualquer", settings)
+
+
+def test_unknown_model_with_no_route_and_no_default_is_official_transparent():
+    """Caso a do usuario: modelo inexistente, sem rota, sem default e sem
+    "anthropic" no catalogo -> transparente no host oficial da Anthropic."""
+    settings = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            ),
+            "openrouter": ProviderConfig(
+                base_url="https://openrouter.ai/api/v1", protocol="openai", api_key=None
+            ),
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    result = resolve("claude-sonnet-4-5", settings)
+    assert result.rule == "transparent"
+    candidate = result.chain[0]
+    assert candidate.transparent is True
+    assert candidate.provider == "anthropic"
+    assert candidate.protocol == "anthropic"
+    assert candidate.model == "claude-sonnet-4-5"
+
+
+def test_family_route_tail_is_official_transparent_when_provider_undeclared():
+    """Caso b do usuario: rota de familia casando, sem default e sem
+    "anthropic" no catalogo -> o ULTIMO da cadeia e o transparente oficial
+    com o model pedido."""
+    settings = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            )
+        },
+        models={
+            "qwen": ModelConfig(
+                provider="local", model="qwen3-8b", context_window=32768, max_output_tokens=4096
+            )
+        },
+        routes=[("haiku", ["qwen"])],
+        default_model=None,
+    )
+    result = resolve("claude-haiku-4-5-20251001", settings)
+    assert result.rule == "family"
+    chain = result.chain
+    assert chain[0].alias == "qwen"
+    last = chain[-1]
+    assert last.transparent is True
+    assert last.alias is None
+    assert last.provider == "anthropic"
+    assert last.protocol == "anthropic"
+    assert last.model == "claude-haiku-4-5-20251001"
 
 
 # -- Candidato transparente na cadeia de rota ----------------------------------

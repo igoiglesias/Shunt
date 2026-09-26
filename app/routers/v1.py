@@ -36,6 +36,7 @@ from app.config.settings import Settings
 from app.core.dispatcher import (
     ROUTES,
     ShuntRequest,
+    _provider_config,
     dispatch,
     dispatch_stream,
     error_body,
@@ -219,8 +220,11 @@ def _ref(model: type[BaseModel]) -> dict:
     return {"$ref": f"#/components/schemas/{model.__name__}"}
 
 
-# `{}` e a alternativa sem credencial: o Shunt nao exige autenticacao do
-# cliente. So `x-shunt-token` e conferido; as outras duas seguem adiante.
+# `PROXY_SECURITY` documenta, para o OpenAPI, os veiculos que um token valido
+# do Shunt pode chegar em: o cabecalho `x-shunt-token`, o prefixo `/t/<token>/`
+# e o `?token=`. A execucao nao depende desta lista: `require_shunt_token`
+# (dependencia do router) exige um token valido em toda a familia `/v1` e
+# recusa com 401 quando nao ha token em nenhum veiculo.
 PROXY_SECURITY: list[dict[str, list[str]]] = [
     {"anthropicApiKey": []},
     {"bearerAuth": []},
@@ -540,7 +544,7 @@ async def count_tokens(request: Request):
         )
         try:
             async with pool.client(
-                candidate.provider, settings.providers[candidate.provider]
+                candidate.provider, _provider_config(candidate, settings)
             ) as upstream_client:
                 upstream = await upstream_client.post(
                     "/v1/messages/count_tokens",

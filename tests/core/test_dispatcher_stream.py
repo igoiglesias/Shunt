@@ -5,6 +5,7 @@ the dispatcher may still change its mind and try the next candidate; after it,
 it is committed and an upstream failure becomes an error event on the wire.
 """
 
+import asyncio
 import json
 
 import httpx
@@ -21,7 +22,7 @@ from app.core.dispatcher import (
 )
 from app.core.upstream import UpstreamPool
 from app.translate.sse_parse import SSEEvent
-from tests.core.test_dispatcher import CLIENT_HEADERS, SETTINGS, TRANSPARENT
+from tests.core.test_dispatcher import CLIENT_HEADERS, SETTINGS, TRANSPARENT, NO_ANTHROPIC_DECLARED
 
 BODY = {
     "model": "claude-opus-4-5",
@@ -60,7 +61,10 @@ OPENAI_CLIENT_SETTINGS = Settings(
         )
     },
     routes=[("gpt-4o", ["native"])],
-    default_model=None,
+    # "native" amarra o degrau de baixo ao candidato declarado: sem isso,
+    # `gpt-*` ganharia o transparente oficial do OpenAI (spec R1) ao fim da
+    # cadeia e quebraria a premissa "um unico candidato" destes testes.
+    default_model="native",
 )
 
 OPENAI_BODY = {
@@ -69,6 +73,13 @@ OPENAI_BODY = {
     "stream": True,
     "messages": [{"role": "user", "content": "oi"}],
 }
+
+# Mesmo motivo do override no arquivo de concorrencia: desde o degrau
+# transparente oficial (spec R1), um nome `claude-*` com "anthropic" ausente
+# do catalogo ganharia um candidato transparente no fim da cadeia, que
+# encobriria o comportamento de stream que e o foco daqui. "my-opus" casa na
+# rota "opus" e nao deriva provedor, entao a cadeia sai como os testes declaram.
+BODY = {**BODY, "model": "my-opus"}
 
 RAW_OPENAI_SETTINGS = Settings(
     providers={
@@ -82,7 +93,9 @@ RAW_OPENAI_SETTINGS = Settings(
         )
     },
     routes=[("gpt-4o", ["free"])],
-    default_model=None,
+    # Mesmo amarrador do OPENAI_CLIENT_SETTINGS: sem ele o nome `gpt-*`
+    # acrescentaria o transparente oficial ao fim da cadeia.
+    default_model="free",
 )
 
 # Um unico candidato: sem o segundo, uma decisao errada do laco aparece como
@@ -244,7 +257,11 @@ async def test_stream_is_translated_into_anthropic_events_in_order():
             ),
         )
     )
-    body = (await run(ShuntRequest("anthropic", BODY, {}), SETTINGS)).decode()
+    # O nome pedido e o da era pre-transparente: o override "my-opus" do
+    # arquivo quebraria a verificacao de que o cliente ve o modelo que PEDIU.
+    # O primeiro candidato atende, entao o degrau transparente oficial que o
+    # nome `claude-*` acrescenta ao fim nunca e tocado.
+    body = (await run(ShuntRequest("anthropic", {**BODY, "model": "claude-opus-4-5"}, {}), SETTINGS)).decode()
     assert events_of(body) == [
         "message_start",
         "content_block_start",
@@ -287,6 +304,61 @@ async def test_error_after_the_first_event_is_reported_not_retried():
     assert "message_stop" not in body
     assert "depois" not in body
     assert "depois2" not in body
+
+
+@respx.mock
+async def test_a_fatal_in_band_error_is_logged_with_the_failure_status(caplog):
+    """O erro `{"error": ...}` sai DENTRO do stream em 200 do provedor: registrar
+    a linha do banco como 200 sem error_type seria declarar sucesso sobre um
+    stream que o cliente viu morrer com `event: error` (502/api_error)."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            stream=Chunks(
+                b'data: {"choices": [{"delta": {"content": "comecou"}}]}\n\n',
+                b'data: {"error": {"message": "caiu no meio"}}\n\n',
+            ),
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    stream = dispatch_stream(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream com erro in-band nao foi registrado"
+    linha = linhas[-1]
+    assert linha["status"] == 502
+    # O mesmo tipo que o `event: error` que o cliente recebeu: 502 no dialeto
+    # Anthropic e `api_error`.
+    assert linha["error_type"] == "api_error"
+
+
+@respx.mock
+async def test_a_successful_stream_is_still_logged_as_success(caplog):
+    """O oposto do erro in-band: o stream terminou com `message_stop` e o banco
+    continua dizendo 200 sem error_type. E o que segura o `if state.erro_em_band`
+    do fix de integridade -- sem esta linha, mover as duas atribuicoes de 502
+    para FORA do `if` deixa a suíte verde e todo stream vira falha no painel."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            text=sse('{"choices": [{"delta": {"content": "oi"}}]}'),
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    stream = dispatch_stream(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream bem-sucedido nao foi registrado"
+    linha = linhas[-1]
+    assert linha["status"] == 200
+    assert linha["error_type"] is None
+    assert linha["candidate"] == SETTINGS.models["free"].model
 
 
 @respx.mock
@@ -357,8 +429,11 @@ async def test_transparent_mode_streams_raw_bytes_with_the_clients_own_headers()
     route = respx.post("https://api.anthropic.test/v1/messages").mock(
         return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(raw))
     )
+    # "my-opus" do override nao deriva provedor e derrubaria o teste em
+    # `UnknownProviderError`: o nome original `claude-*` e o que cai no
+    # transparente.
     body = await run(
-        ShuntRequest("anthropic", BODY, dict(CLIENT_HEADERS)),
+        ShuntRequest("anthropic", {**BODY, "model": "claude-opus-4-5"}, dict(CLIENT_HEADERS)),
         TRANSPARENT,
     )
     assert body == raw
@@ -946,7 +1021,10 @@ async def test_no_candidate_supports_the_endpoint_at_all():
             )
         },
         routes=[("gpt-4o", ["native"])],
-        default_model=None,
+        # Sem default o nome `gpt-*` ganharia o transparente oficial do
+        # OpenAI (spec R1), que APOIA embeddings: o teste cobrira "nenhum
+        # candidato suporta o endpoint" com os candidatos declarados.
+        default_model="native",
     )
     body = (await run(ShuntRequest("openai", OPENAI_BODY, {}, "embeddings"), settings)).decode()
     assert "claude-real: endpoint not supported" in body
@@ -1442,6 +1520,384 @@ async def test_a_client_that_walks_away_is_logged_as_such(caplog):
     assert linha["status"] == 499
     assert linha["error_type"] == "client_disconnected"
     await pool.aclose()
+
+
+class Holding(httpx.AsyncByteStream):
+    """Entrega o primeiro chunk e so depois disso espera num evento, segurando
+    o consumidor no meio do stream -- a situacao real do e2e SSE-010, em que o
+    cliente corta a conexao enquanto o proxy ainda esta lendo do provedor."""
+
+    def __init__(self, chunk: bytes, release: asyncio.Event) -> None:
+        self._chunk = chunk
+        self._release = release
+        self.closed = False
+
+    async def __aiter__(self):
+        yield self._chunk
+        await self._release.wait()
+        yield self._chunk
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@respx.mock
+async def test_a_cancelled_consumption_task_is_logged_as_client_disconnected(caplog):
+    """O cancelamento real do framework chega como `CancelledError` no `yield`,
+    nao como `GeneratorExit` (esse so e lançado por `aclose()` -- coberto pelo
+    teste acima). Com Starlette 1.6 um cliente que corta a conexao cancela a
+    task que consome o stream; registrar aquele pedido como 200 esconde
+    exatamente as requisicoes que o harness abortou."""
+    release = asyncio.Event()
+    stream = Holding(b'data: {"choices": [{"delta": {"content": "um"}}]}\n\n', release)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=stream)
+    )
+    pool = UpstreamPool(SETTINGS)
+    recebido: list[bytes] = []
+
+    async def consume():
+        gen = dispatch_stream(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        chunks: list[bytes] = []
+        async for chunk in gen:
+            chunks.append(chunk)
+            if len(chunks) == 1:
+                recebido.append(chunk)
+        return b"".join(chunks)
+
+    with caplog.at_level("INFO", logger="shunt"):
+        task = asyncio.create_task(consume())
+        # Aguarda o primeiro byte sair: sem ele o cancelamento cairia antes de
+        # qualquer `yield` e o teste passaria sem medir nada.
+        while not recebido:
+            assert not task.done(), "o stream terminou antes do cancelamento"
+            await asyncio.sleep(0.005)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream cancelado nao foi registrado"
+    linha = linhas[-1]
+    assert linha["status"] == 499
+    assert linha["error_type"] == "client_disconnected"
+
+
+@respx.mock
+async def test_a_fatal_stream_error_is_logged_with_the_failure_status(caplog):
+    """O cliente ja viu o `event: error` no fio: registrar a linha do banco
+    como 200 sem error_type e declarar sucesso sobre um stream que morreu."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            stream=Failing(
+                b'data: {"choices": [{"delta": {"content": "comecou"}}]}\n\n',
+                error=httpx.ReadTimeout("tempo esgotado"),
+            ),
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    stream = dispatch_stream(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream que falhou no fio nao foi registrado"
+    linha = linhas[-1]
+    assert linha["status"] == 502
+    # O mesmo tipo que `_stream_error` colocou dentro do `event: error` que o
+    # cliente recebeu: 502 no dialeto Anthropic e `api_error`.
+    assert linha["error_type"] == "api_error"
+
+
+@respx.mock
+async def test_a_size_dropped_candidate_is_named_in_the_trace(caplog):
+    """Um candidato pulado por context window tem que aparecer no `attempts` da
+    linha do banco: o rastro sem ele diz que o pedido foi atendido pela
+    segunda opcao e esconde que a primeira nem foi tentada."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            )
+        },
+        models={
+            "tiny": ModelConfig(
+                provider="openrouter",
+                model="vendor/tiny",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "free": ModelConfig(
+                provider="openrouter",
+                model="vendor/free",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
+        },
+        routes=[("opus", ["tiny", "free"])],
+        default_model=None,
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            text=sse('{"choices": [{"delta": {"content": "ok"}}]}'),
+        )
+    )
+    body = {
+        "model": "claude-opus-4-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+    }
+    pool = UpstreamPool(settings)
+    stream = dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "a requisicao nao foi registrada"
+    linha = linhas[-1]
+    assert any("context window too small" in line for line in linha["attempts"])
+    assert any("vendor/tiny" in line for line in linha["attempts"])
+    assert linha["candidate"] == "vendor/free"
+
+
+@respx.mock
+async def test_a_mixed_size_and_capability_drop_does_not_take_the_ladder(caplog):
+    """Cadeia: primeiro cai por tamanho, segundo cai por capacidade, terceiro
+    caberia. A condicao da escada e `all(r == SIZE_DROP)` -- so fecha se TODOS
+    os descartes forem de tamanho. Com um de capacidade, a escada NAO fecha e o
+    terceiro candidato e chamado. Antes o `if not chain or not all(...)` (bug
+    de negacao) ou `any` faria a escada fechar errado e o terceiro seria
+    pulado."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            )
+        },
+        models={
+            "tiny": ModelConfig(
+                provider="openrouter",
+                model="vendor/tiny",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "sem_tools": ModelConfig(
+                provider="openrouter",
+                model="vendor/sem_tools",
+                context_window=64000,
+                max_output_tokens=8192,
+                supports=ModelCaps(tools=False),
+            ),
+            "completo": ModelConfig(
+                provider="openrouter",
+                model="vendor/completo",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
+        },
+        routes=[("opus", ["tiny", "sem_tools", "completo"])],
+        default_model=None,
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            text=sse('{"choices": [{"delta": {"content": "ok"}}]}'),
+        )
+    )
+    body = {
+        "model": "claude-opus-4-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+        "tools": [{"type": "function", "function": {"name": "grep"}}],
+    }
+    pool = UpstreamPool(settings)
+    stream = dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "a requisicao nao foi registrada"
+    linha = linhas[-1]
+    # O terceiro (completo) respondeu; o segundo foi descartado por "no tool support"
+    assert any("context window too small" in line for line in linha["attempts"])
+    assert any("no tool support" in line for line in linha["attempts"])
+    assert linha["candidate"] == "vendor/completo"
+
+
+@respx.mock
+async def test_an_empty_chain_with_mixed_drops_errors_with_the_trace(caplog):
+    """Cadeia inteira descartada com motivo misto (tamanho + capacidade) e
+    sem escada resolvel: o erro do fio leva os dois motivos e a linha do
+    banco fica sem candidato. Antes do fix de integridade o descarte por
+    tamanho nem entrava no rastro, e o erro dizia so `no tool support`."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            )
+        },
+        models={
+            "tiny": ModelConfig(
+                provider="openrouter",
+                model="vendor/tiny",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "sem_tools": ModelConfig(
+                provider="openrouter",
+                model="vendor/sem_tools",
+                context_window=64000,
+                max_output_tokens=8192,
+                supports=ModelCaps(tools=False),
+            ),
+        },
+        routes=[("opus", ["tiny", "sem_tools"])],
+        default_model=None,
+    )
+    # "my-opus" casa na rota "opus" sem derivar provedor: com `claude-*` e
+    # sem default, o degrau transparente oficial entraria na cadeia e o
+    # teste cobriria a queda dele, nao o rastro dos dois descartes.
+    body = {
+        "model": "my-opus",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+        "tools": [{"type": "function", "function": {"name": "grep"}}],
+    }
+    pool = UpstreamPool(settings)
+    stream = dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+    chunks: list[bytes] = []
+    with caplog.at_level("INFO", logger="shunt"):
+        async for chunk in stream:
+            chunks.append(chunk)
+    await pool.aclose()
+    fio = b"".join(chunks).decode()
+    assert "no candidate can serve this request" in fio
+    assert "context window too small" in fio
+    assert "no tool support" in fio
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas
+    assert linhas[-1]["candidate"] is None
+
+
+async def collect_into(stream) -> None:
+    # Consome ate o fim e descarta os bytes: so a linha de log interessa aqui.
+    async for _ in stream:
+        pass
+
+
+# -- Guarda 400 do caminho streaming: cadeia esvaziada por skip T4/T5 ---------
+# Espelho do caminho bufferizado (test_transparent_with_only_the_shunt_token_
+# is_skipped_and_answers_400 e test_anthropic_caller_gpt5_no_default_returns_400):
+# quando TODA a cadeia foi pulada por `_transparent_skip_reason` e nenhum
+# upstream foi chamado, o erro no fio e 400 no envelope do chamador, nao o 502
+# generico de "nada respondeu" (que seria mentira: nada foi chamado).
+
+@respx.mock
+async def test_stream_with_only_the_shunt_token_is_skipped_and_answers_400(caplog):
+    """Streaming T4: cadeia so com o transparente e a unica credencial era o
+    token do Shunt: nenhum upstream e chamado, 400 no fio no envelope do
+    chamador e a linha do banco registra 400, nao 502."""
+    route = respx.post("https://api.anthropic.com/v1/messages")
+    body = {
+        "model": "claude-sonnet-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "oi"}],
+    }
+    req = ShuntRequest(
+        "anthropic", body, {"x-api-key": "token-do-shunt"}, endpoint="messages",
+        credential_is_token=True,
+    )
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    chunks: list[bytes] = []
+    with caplog.at_level("INFO", logger="shunt"):
+        try:
+            stream = dispatch_stream(req, NO_ANTHROPIC_DECLARED, pool)
+            async for chunk in stream:
+                chunks.append(chunk)
+        finally:
+            await pool.aclose()
+    fio = b"".join(chunks).decode()
+    assert route.call_count == 0
+    # envelope Anthropic: o erro sai num `event: error` com o motivo do pulo
+    assert "event: error" in fio
+    assert "shunt token" in fio
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream pulado inteiro nao foi registrado"
+    assert linhas[-1]["status"] == 400
+    assert linhas[-1]["candidate"] is None
+
+
+@respx.mock
+async def test_stream_anthropic_caller_gpt5_no_default_answers_400(caplog):
+    """Streaming T5, o exemplo canonico: Claude Code pedindo gpt-5 sem default.
+    O transparente openai NAO e elegivel para a credencial anthropic: pulado,
+    sem outro candidato, 400 no fio no envelope Anthropic, upstream zero."""
+    route = respx.post("https://api.openai.com/v1/chat/completions")
+    body = {
+        "model": "gpt-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "oi"}],
+    }
+    req = ShuntRequest("anthropic", body, {"x-api-key": "sk-do-cliente"}, endpoint="messages")
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    chunks: list[bytes] = []
+    with caplog.at_level("INFO", logger="shunt"):
+        try:
+            stream = dispatch_stream(req, NO_ANTHROPIC_DECLARED, pool)
+            async for chunk in stream:
+                chunks.append(chunk)
+        finally:
+            await pool.aclose()
+    fio = b"".join(chunks).decode()
+    assert route.call_count == 0
+    assert "event: error" in fio
+    assert "gpt-5" in fio
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream pulado inteiro nao foi registrado"
+    assert linhas[-1]["status"] == 400
+
+
+@respx.mock
+async def test_stream_path_mismatch_alone_does_not_trigger_the_400_guard(caplog):
+    """O pulo por PATH sem entrada (endpoint sem path) NAO conta como skip de
+    elegibilidade: so um pulo desses nao pode disparar o 400 da guarda -- o
+    erro continua o 502 generico, como antes do fix. Antes do fix o contador
+    misturava os dois tipos de pulo e devolvia 400."""
+    route = respx.post("https://api.anthropic.com/v1/messages")
+    body = {
+        "model": "claude-sonnet-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "oi"}],
+    }
+    # ("anthropic", "embeddings") nao existe em PATHS: o unico candidato da
+    # cadeia cai no "endpoint not supported", que nao e skip T4/T5.
+    req = ShuntRequest("anthropic", body, {}, endpoint="embeddings")
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    chunks: list[bytes] = []
+    with caplog.at_level("INFO", logger="shunt"):
+        try:
+            stream = dispatch_stream(req, NO_ANTHROPIC_DECLARED, pool)
+            async for chunk in stream:
+                chunks.append(chunk)
+        finally:
+            await pool.aclose()
+    fio = b"".join(chunks).decode()
+    assert route.call_count == 0
+    assert "endpoint not supported" in fio
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "a requisicao sem path nao foi registrada"
+    assert linhas[-1]["status"] == 502
 
 
 @respx.mock

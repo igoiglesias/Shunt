@@ -104,8 +104,13 @@ def test_exhausted_chain_omits_the_shunt_model_header():
     respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(400, json={"error": {"message": "sem sorte"}})
     )
+    # "my-opus" casa na rota "opus" sem derivar provedor: com `claude-*`, o
+    # degrau transparente oficial (spec R1) entraria na cadeia e chamaria o
+    # host oficial nao mockado -- o teste mede o header do 400, nao a rota.
     with client() as c:
-        response = c.post("/v1/messages", json=ASK, headers={"x-api-key": "sk-do-cliente"})
+        response = c.post(
+            "/v1/messages", json={**ASK, "model": "my-opus"}, headers={"x-api-key": "sk-do-cliente"}
+        )
     assert response.status_code == 400
     assert "x-shunt-model" not in response.headers
 
@@ -277,6 +282,35 @@ def test_count_tokens_falls_back_locally_when_the_anthropic_upstream_refuses():
         )
     assert response.status_code == 200
     assert 0 < response.json()["input_tokens"] < 4321
+
+
+@respx.mock
+def test_count_tokens_forward_to_official_host_when_anthropic_undeclared(monkeypatch):
+    """Provider "anthropic" FORA do catalogo: o transparente vai para o host
+    oficial embutido -- antes disso era `settings.providers[provider]` direto
+    e o KeyError virava um 500 `text/plain` fora do envelope do protocolo."""
+    no_anthropic = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    route = respx.post("https://api.anthropic.com/v1/messages/count_tokens").mock(
+        return_value=httpx.Response(200, json={"input_tokens": 4321})
+    )
+    with client(no_anthropic) as c:
+        response = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-haiku-4-5", "messages": [{"role": "user", "content": "oi"}]},
+            headers={"x-api-key": "sk-do-cliente"},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 4321}
+    assert route.call_count == 1
 
 
 @respx.mock
