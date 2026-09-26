@@ -83,6 +83,25 @@ def _request_with_token_cache(headers: dict, path: str = "/v1/messages") -> Requ
     return Request(scope)
 
 
+def test_the_headers_where_the_token_matched_are_recorded():
+    """`token_headers` lista os nomes onde o token do Shunt casou (T5 remove
+    esses headers antes de repassar ao upstream). A `authorization` aqui NAO
+    casou (e a credencial real do harness) e fica fora da lista."""
+    req = _request_with_token_cache({"x-api-key": TEST_SHUNT_TOKEN, "authorization": "Bearer sk-real"})
+
+    asyncio.run(require_shunt_token(req))
+    assert req.state.token_headers == frozenset({"x-api-key"})
+
+
+def test_no_token_in_the_credential_gives_an_empty_token_headers():
+    """Sem token na credencial (aqui: so a forma explicita + `x-api-key` que
+    nao e token) a lista fica vazia: nao ha nada a remover no repasse."""
+    req = _request_with_token_cache({"x-shunt-token": TEST_SHUNT_TOKEN, "x-api-key": "sk-do-harness"})
+
+    asyncio.run(require_shunt_token(req))
+    assert req.state.token_headers == frozenset()
+
+
 def test_a_shunt_token_passed_as_credential_marks_credential_is_token():
     """`x-api-key`/`Authorization` que CASOU com um token do Shunt nao e a
     credencial do provedor: a flag manda o dispatcher injetar a chave
