@@ -1,0 +1,43 @@
+# Roda a suite inteira (unitarios, tests/e2e e tests/browser com Chromium headless).
+# Este workflow so BLOQUEIA merge em master quando o check `tests` estiver marcado
+# como obrigatorio na branch protection / ruleset do repositorio.
+# Com o check obrigatorio, toda mudanca entra em master por PR; push direto e recusado.
+# setup-uv deixou de publicar tag major flutuante a partir da v8; por isso a tag completa.
+name: tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: uv sync --locked
+
+      - name: Instalar Chromium do Playwright
+        run: uv run playwright install --with-deps chromium
+
+      - name: Rodar a suite
+        run: uv run pytest -q -rs tests
