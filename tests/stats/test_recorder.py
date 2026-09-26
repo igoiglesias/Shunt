@@ -273,3 +273,23 @@ async def test_a_token_touch_never_reaches_the_panel_bus(make_engine):
     queue = recorder.subscribe()
     recorder.touch_token(1)
     assert queue.empty()
+
+
+async def test_store_writes_the_row_without_touching_the_panel_bus(make_engine, tmp_path):
+    """`store` e a escrita do relay: vai para o banco e PARA.
+
+    O relay nao existe no painel ao vivo (SSE) nem em `recent`: ele e trafego
+    de passagem, e publicar no barramento faria cada repasse aparecer na tela
+    como se fosse uma requisicao de modelo.
+    """
+    engine = engine_for(make_engine, tmp_path)
+    recorder = Recorder(engine, max_queue=1000, interval=10.0)
+    await recorder.start()
+    queue = recorder.subscribe()
+    recorder.store(event(request_id="relay-1", kind="relay"))
+    await recorder.aclose()
+    assert count(engine) == 1
+    with Session(engine) as session:
+        guardado = session.scalar(select(RequestEvent.kind).where(RequestEvent.request_id == "relay-1"))
+    assert guardado == "relay"
+    assert queue.empty(), "o relay nao pode aparecer no barramento do painel"

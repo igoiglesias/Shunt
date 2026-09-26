@@ -18,9 +18,12 @@ import json
 import logging
 import os
 import sys
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from app.core.official_hosts import Protocol
+from app.core.token_auth import mask_path
 from app.stats.recorder import Recorder
 
 logger = logging.getLogger("shunt")
@@ -78,6 +81,26 @@ class RequestLog:
     body: dict | None = None
 
 
+@dataclass
+class RelayLog:
+    """O que se quer saber de um repasse de rota desconhecida.
+
+    `path` e o path que o CLIENTE pediu (o prefixo `/t/<token>/` ja reescrito
+    pela middleware, quando veio por la); `target` e o protocolo do host
+    oficial que recebeu a requisicao. `error_type` e o que o chamador ja sabe:
+    as unicas falhas que o repasse responde ANTES de o status do upstream
+    existir sao timeout (504) e upstream fora de alcance (502), e quem as
+    causa as nomeia na hora. Ausente, `log_relay` deriva do status o mesmo
+    nome -- 504 vira `upstream_timeout`, 502 vira `upstream_unreachable`.
+    """
+
+    path: str
+    target: Protocol
+    status: int
+    error_type: str | None = None
+    duration_ms: int = 0
+
+
 def redact(headers: dict[str, str]) -> dict[str, str]:
     """Os mesmos cabecalhos, com o VALOR das credenciais trocado.
 
@@ -116,6 +139,69 @@ def log_request(entry: RequestLog) -> None:
     _recorder.record(as_event(entry))
 
 
+def log_relay(entry: RelayLog) -> None:
+    """A linha de log do repasse, e o evento gravado pelo `store`.
+
+    `store` e nao `record`: o trafego repassado nao entra no barramento do
+    painel (SSE/`recent`), que mostra requisicoes de modelo. A linha de log e
+    a unica janela para o que o repasse decidiu, e nela NAO sobe a query nem
+    os headers: um dos lugares onde `?token=` podia ter sido deixado em claro
+    era justamente a query, e `mask_path` so esconde o prefixo `/t/<token>/`.
+    """
+    status = entry.status
+    error_type = entry.error_type
+    if error_type is None:
+        if status == 504:
+            error_type = "upstream_timeout"
+        elif status == 502:
+            error_type = "upstream_unreachable"
+    route = mask_path(entry.path)
+    logger.info(
+        json.dumps(
+            {
+                "kind": "relay",
+                "route": route,
+                "dialect": entry.target,
+                "status": status,
+                "error_type": error_type,
+                "duration_ms": entry.duration_ms,
+            },
+            ensure_ascii=False,
+        )
+    )
+    _recorder.store(
+        {
+            "kind": "relay",
+            "request_id": uuid.uuid4().hex,
+            "started_at": datetime.now(UTC) - timedelta(milliseconds=entry.duration_ms),
+            "route": route,
+            "dialect": entry.target,
+            "stream": False,
+            "requested_model": "",
+            "rule": "none",
+            "matched": None,
+            "provider": None,
+            "candidate_model": None,
+            "status": status,
+            "error_type": error_type,
+            # NOT NULL no banco: o repasse nao tem uso de tokens.
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "ttft_ms": None,
+            "duration_ms": entry.duration_ms,
+            "attempts": [],
+            "fell_back": False,
+            "tools_offered": [],
+            "tools_called": [],
+            "thinking_blocks": 0,
+            "project": None,
+            "session_id": None,
+            "cached_input_tokens": None,
+            "cache_write_tokens": None,
+        }
+    )
+
+
 def as_event(entry: RequestLog) -> dict:
     """O registro do jeito que a tabela guarda.
 
@@ -128,6 +214,10 @@ def as_event(entry: RequestLog) -> dict:
     """
     return {
         "request_id": entry.request_id,
+        # `kind` marca a linha como requisicao de modelo. As linhas antigas
+        # ficaram NULL na migracao, e NULL tambem significa modelo -- mas a
+        # escrita nova deixa o tipo explicito.
+        "kind": "model",
         "started_at": datetime.now(UTC) - timedelta(milliseconds=entry.duration_ms),
         "route": entry.route,
         "dialect": entry.dialect,

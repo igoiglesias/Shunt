@@ -55,6 +55,16 @@ class RequestEvent(Base):
     provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     candidate_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # Que tipo de trafego gerou a linha. `kind` e NULLABLE de proposito: a
+    # migracao (`add_missing_columns`) so compila o tipo, sem default, entao as
+    # linhas antigas ficam NULL -- e NULL significa MODELO. O filtro do painel
+    # por isso e `or_(kind IS NULL, kind != 'relay')`, nunca a comparacao sozinha:
+    # medido em SQLite, `k != 'relay'` exclui o NULL e apagaria o historico.
+    # Nao reutilizar `rule`: ela significa "que regra de rota casou" e aparece
+    # na tela como "Regra de rota". Sem indice: o painel filtra por tempo e
+    # provedor, nunca so por `kind`.
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     status: Mapped[int] = mapped_column(Integer)
     error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

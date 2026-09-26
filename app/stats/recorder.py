@@ -151,6 +151,16 @@ class Recorder:
         self._publish(event)
         self._enqueue(event)
 
+    def store(self, event: dict) -> None:
+        """Grava no banco SEM anunciar no barramento do painel.
+
+        E a escrita do repasse de rotas desconhecidas: trafego de passagem nao
+        e requisicao de modelo, e publicar o faria aparecer no SSE e em
+        `recent` como se o proxy tivesse chamado um modelo. O caminho de
+        enfileirar e o mesmo de `record` -- nunca espera, nunca levanta.
+        """
+        self._enqueue(event)
+
     def touch_token(self, token_id: int) -> None:
         """`last_used_at` do token vai pela fila: nunca uma escrita no caminho da requisicao."""
         self._enqueue({"kind": "token_used", "token_id": token_id, "at": datetime.now(UTC)})
