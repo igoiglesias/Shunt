@@ -1,12 +1,9 @@
 """Testes de boot: settings vem do banco (seedado) ou vazio quando sem engine."""
 
 import os
-import sys
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, "/home/iglesias/Documents/Projetos_Pessoais/Shunt")
 
 # Chaves para o seed
 os.environ["LOCAL_API_KEY"] = "local-test"

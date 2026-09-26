@@ -43,10 +43,11 @@ from app.config.config import (
     TIMEOUT_WRITE,
     TOTAL_DEADLINE,
 )
-from app.config.settings import Settings
+from app.config.settings import ProviderConfig, Settings
 from app.core.attempt import Outcome, backoff, classify
 from app.core.capabilities import requirements_of
 from app.core.observability import RequestLog, log_request
+from app.core.official_hosts import OFFICIAL_HOSTS
 from app.core.project import project_and_session
 from app.core.resolver import Candidate, Resolution, last_resort, resolve
 from app.core.upstream import UpstreamPool
@@ -83,8 +84,19 @@ READ_FLOOR = 0.5
 
 # `host` names the wrong destination once we re-address the request; the other
 # four all describe the inbound body, which we re-serialise before sending.
+# `x-shunt-token` and `cookie` NEVER leave Shunt: o primeiro autentica aqui,
+# e o segundo carrega a sessao do admin (Task 1.5, A11: o filtro completo de
+# credenciais e da Task 2.4).
 TRANSPARENT_DROP = frozenset(
-    {"host", "content-length", "content-encoding", "transfer-encoding", "accept-encoding"}
+    {
+        "host",
+        "content-length",
+        "content-encoding",
+        "transfer-encoding",
+        "accept-encoding",
+        "x-shunt-token",
+        "cookie",
+    }
 )
 
 # Nomes de erro da OpenAI. A tabela equivalente da Anthropic vive em
@@ -145,9 +157,10 @@ class ShuntRequest:
     body: dict
     headers: dict[str, str]
     endpoint: str = "messages"  # "messages" | "chat" | "completions" | "embeddings"
-    # True quando a requisicao foi autenticada por um token do painel admin.
-    # Nao confia na transparencia da rota: injeta a chave do provedor configurada.
-    shunt_token: bool = False
+    # True quando a credencial APRESENTADA (x-api-key/Authorization) casou com
+    # um token do Shunt: ela NAO e a credencial do provedor, e a chave
+    # configurada a substitui. Setada pela dependencia `require_shunt_token`.
+    credential_is_token: bool = False
 
 
 @dataclass
@@ -159,27 +172,27 @@ class ShuntResult:
     real_provider: str | None = None
 
 
+def _client_presented_credential(req: ShuntRequest) -> bool:
+    """O cliente trouxe `x-api-key`/`Authorization`? So neste caso o transparente
+    a repassa crua; sem ela, a chave configurada e a unica que pode sair.
+    A casinha do nome do cabecalho nao importa (HTTP e case-insensitive)."""
+    lower = {k.lower() for k in req.headers}
+    return "x-api-key" in lower or "authorization" in lower
+
+
 def outbound_headers(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
-    # Se a requisicao veio autenticada por token Shunt, NAO usa modo transparente:
-    # injeta a chave configurada do provedor. Isso garante que o token do admin
-    # controle o acesso e a chave do provedor fique do lado do proxy.
-    if req.shunt_token:
-        key = settings.api_key(candidate.provider)
-        headers = {"content-type": "application/json"}
-        if key and candidate.protocol == "anthropic":
-            headers["x-api-key"] = key
-            headers["anthropic-version"] = "2023-06-01"
-        elif key:
-            headers["authorization"] = f"Bearer {key}"
-        return headers
-    if candidate.transparent:
+    if candidate.transparent and _client_presented_credential(req) and not req.credential_is_token:
         # The client's own credentials go verbatim to whatever `base_url` this
         # provider entry names. That is the user's declared intent: they wrote
         # the entry. Do not read a protocol mismatch as evidence that the
         # destination is Anthropic -- `ProviderConfig.protocol` is free, so a
         # provider named `anthropic` may well be an OpenAI-compatible gateway.
         return {k: v for k, v in req.headers.items() if k.lower() not in TRANSPARENT_DROP}
-    key = settings.api_key(candidate.provider)
+    # `_provider_config` e o acesso unico a `settings.providers`: para um
+    # transparente cujo provedor nao esta no catalogo ele devolve o host
+    # oficial embutido (api_key=None), e a chamada sai sem credencial propria
+    # em vez de KeyError 500.
+    key = _provider_config(candidate, settings).api_key
     headers = {"content-type": "application/json"}
     if key and candidate.protocol == "anthropic":
         headers["x-api-key"] = key
@@ -235,6 +248,77 @@ def _translate_response(data: dict, req: ShuntRequest, candidate: Candidate) -> 
     if req.protocol == "anthropic":
         return openai_response_to_anthropic(data, requested)
     return anthropic_response_to_openai(data, requested)
+
+
+def _provider_config(candidate: Candidate, settings: Settings) -> ProviderConfig:
+    """A config que a chamada usa.
+
+    Provedor declarado no catalogo: a entrada do operador. Transparente com
+    provedor ausente: o host oficial embutido em `official_hosts` (spec R1) --
+    antes disso era `settings.providers[provider]` direto e o seed, que nao
+    declara "anthropic", virava KeyError 500 na hora de despachar um
+    `claude-*` transparente (medido no bug do harness).
+    """
+    if candidate.provider in settings.providers:
+        return settings.providers[candidate.provider]
+    official = OFFICIAL_HOSTS.get(candidate.provider)
+    if candidate.transparent and official is not None:
+        return ProviderConfig(base_url=official.base_url, protocol=official.protocol)
+    raise KeyError(candidate.provider)
+
+
+def _transparent_skip_reason(
+    candidate: Candidate, req: ShuntRequest, settings: Settings
+) -> str | None:
+    """None se o candidato transparente e elegivel; senao, o motivo do pulo.
+
+    Duas regras da spec 2026-09-23 (R1/R2), aplicadas SOMENTE ao transparente:
+
+    - R2: a credencial do harness vale so no destino nativo do protocolo
+      (`anthropic` -> `anthropic`, `openai` -> `openai`). Um Claude Code
+      pedindo `gpt-*` nao leva a credencial Anthropic ate a OpenAI: o candidato
+      transparente do outro lado nem existe como opcao. Candidatos de rota
+      declarada NAO passam por aqui: o operador escreveu a rota inteira.
+    - R1 + Task 4: sem credencial de provedor que sair, a chamada segue
+      descrita no rastro. `credential_is_token=True` significa que a unica
+      credencial apresentada era o token do Shunt, que nunca sai; antes
+      disto a chamada ia para o upstream sem nada e o 401 dele voltava num
+      envelope estranho no meio da cadeia. A flag so e setada por
+      `require_shunt_token` quando UMA credencial casou com o token: sem ela
+      nenhuma credencial chegou, e o transparente segue como seguia.
+    """
+    if not candidate.transparent:
+        return None
+    if req.credential_is_token:
+        # A unica credencial que chegou era o token do Shunt, que nunca viaja.
+        # So pulo quando NAO ha chave de provedor configurada para sair: se o
+        # provedor e declarado com chave, aquela substitui e a chamada segue
+        # (o valor do token fica com o proxy) -- test_a_shunt_token_presented_
+        # as_credential_never_leaves_the_transparent_route mede esse 200.
+        if _provider_config(candidate, settings).api_key:
+            return None
+        return "no provider credential to forward: only the shunt token was presented"
+    # R2 so gateia quando HÁ credencial do cliente que sair: sem `x-api-key`/
+    # `Authorization` nenhuma chave de provedor chega e o transparente segue
+    # como seguia (a 401 do upstream volta no envelope traduzido, como antes).
+    # Aplicar a regra sem credencial mataria o fallback: um Claude Code sem
+    # chave pedindo `gpt-*` ja cai no openrouter configurado. E so vale para o
+    # destino do host oficial (provider NAO declarado): la a spec fecha o par
+    # (protocolo do harness, protocolo do destino). Provedor declarado e
+    # escolha escrita do operador -- um "anthropic" que fala openai existe de
+    # proposito (test_transparent_credentials_go_verbatim_to_the_declared_
+    # base_url) e nao passa por aqui. Medido: aplicar a regra ao declarado
+    # matou o gateway e o E2E de usage.
+    if _client_presented_credential(req) and candidate.provider not in settings.providers:
+        native = {"anthropic": "anthropic", "openai": "openai"}.get(req.protocol)
+        # O destino e o PROTOCOLO do candidato, nao o NOME do provedor:
+        # a chave do harness serve o protocolo, nunca o rotulo.
+        if native is not None and candidate.protocol != native:
+            return (
+                f"not eligible: the {req.protocol} credential does not serve "
+                f"destination protocol {candidate.protocol} (native destination: {native})"
+            )
+    return None
 
 
 def _missing_credential(candidate: Candidate, settings: Settings) -> str | None:
@@ -405,15 +489,14 @@ def _chain_for(
 ) -> tuple[list[Candidate], list[str]]:
     """A cadeia que sobra depois do filtro, ou o degrau de baixo.
 
-    Devolve tambem as linhas de rastro do que foi descartado, com o motivo.
-    Os descartes de tamanho ficam para o rastro do caminho (não antes),
-    para que o log reflita a ordem real de tentativas.
+    Devolve tambem as linhas de rastro do que foi descartado, com o motivo,
+    na ordem da cadeia: antes do fix de integridade o descarte por tamanho
+    nunca virava linha e o `attempts` do banco saia vazio.
     O default_model (último da cadeia) NÃO é descartado por tamanho aqui:
     é a escolha do operador para "quando nada serve" e deve ser tentado.
     """
     reqs = requirements_of(probe)
-    dropped_non_size: list[tuple[str, str]] = []
-    size_drops: set[str] = set()
+    dropped_lines: list[tuple[str, str]] = []
     kept: list[Candidate] = []
     # default_model é o último da cadeia original (adicionado por last_resort)
     default_alias = resolution.chain[-1].alias if resolution.chain else None
@@ -424,13 +507,13 @@ def _chain_for(
         model = settings.models[candidate.alias]
         dropped = False
         if reqs.tools and not model.supports.tools:
-            dropped_non_size.append((candidate.model, "no tool support"))
+            dropped_lines.append((candidate.model, "no tool support"))
             dropped = True
         elif reqs.vision and not model.supports.vision:
-            dropped_non_size.append((candidate.model, "no vision support"))
+            dropped_lines.append((candidate.model, "no vision support"))
             dropped = True
         elif reqs.streaming and not model.supports.streaming:
-            dropped_non_size.append((candidate.model, "no streaming support"))
+            dropped_lines.append((candidate.model, "no streaming support"))
             dropped = True
         elif reqs.input_tokens + reqs.output_tokens > model.context_window:
             # default_model NÃO é descartado por tamanho aqui: o operador
@@ -438,13 +521,20 @@ def _chain_for(
             if candidate.alias == default_alias:
                 kept.append(candidate)
                 continue
-            size_drops.add(candidate.alias or candidate.model)
+            dropped_lines.append((candidate.model, SIZE_DROP))
             dropped = True
         if not dropped:
             kept.append(candidate)
     chain = kept
-    trace = [f"{lbl}: {reason}" for lbl, reason in dropped_non_size]
-    if chain or not all(r.startswith(SIZE_DROP) for _, r in dropped_non_size):
+    # Uma so lista, na ordem da cadeia: o rastro reflete a ordem real dos
+    # descartes, e o descarte por tamanho agora vira linha tambem -- antes
+    # ele era coletado em separado e nunca emitido, entao o `attempts` do
+    # banco saia vazio e o operador nao via que o primeiro modelo nem tentou.
+    trace = [f"{lbl}: {reason}" for lbl, reason in dropped_lines]
+    # A escada so fecha quando TUDO o que sobrou da cadeia saiu por tamanho
+    # (ou nada): se um candidato caiu por capacidade, o degrau de baixo nem
+    # sabe de ferramenta/visao/streaming e o erro seria pior.
+    if chain or not all(r == SIZE_DROP for _, r in dropped_lines):
         return chain, trace
     ladder = last_resort(str(req.body.get("model", "")), settings)
     if ladder:
@@ -486,6 +576,10 @@ async def _dispatch(
     # O primeiro candidato pulado por estar cheio, com o payload ja montado:
     # e nele que o ultimo recurso espera, se ninguem mais for tentado.
     first_busy: tuple[Candidate, dict] | None = None
+    # Candidatos pulados por `_transparent_skip_reason` (T4/T5). Quando esse
+    # numero cobre a cadeia inteira e nenhum upstream foi chamado, o erro e 400
+    # no envelope do chamador, nao o 502 generico de "nada respondeu".
+    transparent_skips = 0
 
     for candidate in chain:
         # O rotulo canonico e o MODELO. Pelo alias, o mesmo candidato fisico
@@ -494,6 +588,11 @@ async def _dispatch(
         label = candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
+            continue
+        skip = _transparent_skip_reason(candidate, req, settings)
+        if skip is not None:
+            trace.append(f"{label}: {skip}")
+            transparent_skips += 1
             continue
         missing = _missing_credential(candidate, settings)
         if missing is not None:
@@ -532,7 +631,9 @@ async def _dispatch(
             continue
         tally.tried = True
         with slot:
-            async with pool.client(candidate.provider) as client:
+            async with pool.client(
+                candidate.provider, _provider_config(candidate, settings)
+            ) as client:
                 result = await _attempts(
                     req, settings, client, candidate, payload, deadline, trace, tally
                 )
@@ -549,13 +650,23 @@ async def _dispatch(
             trace.append(f"{candidate.model}: still busy at the deadline")
         else:
             with slot:
-                async with pool.client(candidate.provider) as client:
+                async with pool.client(
+                    candidate.provider, _provider_config(candidate, settings)
+                ) as client:
                     result = await _attempts(
                         req, settings, client, candidate, payload, deadline, trace, tally
                     )
             if result is not None:
                 return result
 
+    # Cadeia esvaziada por skip R2/token (T4/T5) SEM nenhuma tentativa: o 502
+    # generico do `_Buffered` diria "nada respondeu", mentira -- nada foi
+    # chamado. 400 no envelope do chamador; o rastro ja diz o motivo de cada
+    # pulo. So para skip transparente: pulos antigos (endpoint sem path, falta
+    # de chave) continuam 502, como o teste existente mede.
+    if not tally.tried and first_busy is None and transparent_skips == len(chain):
+        message = "no candidate answered: " + "; ".join(trace)
+        return ShuntResult(400, error_body(req.protocol, 400, message), None, trace)
     message = f"{tally.last_message} - tried: " + "; ".join(trace)
     return ShuntResult(
         tally.last_status, error_body(req.protocol, tally.last_status, message), None, trace
@@ -785,8 +896,8 @@ def _keepalive() -> bytes:
     return b": ping\n\n"
 
 
-def _stream_error(req: ShuntRequest, message: str) -> bytes:
-    body = error_body(req.protocol, 502, message)
+def _stream_error(req: ShuntRequest, message: str, status: int = 502) -> bytes:
+    body = error_body(req.protocol, status, message)
     if req.protocol == "anthropic":
         return _sse("error", body)
     return _data(body)
@@ -813,6 +924,9 @@ class _Reading:
     started: bool = False
     failed: str | None = None  # abandon this candidate; the next one gets a turn
     committed: bool = False  # this candidate answered; do not try another
+    # `committed` por causa de um `{"error": ...}` dentro do proprio stream:
+    # o candidato respondeu, mas a resposta morreu -- nao e um sucesso.
+    erro_em_band: bool = False
 
 
 @dataclass
@@ -916,6 +1030,7 @@ def _drain(
         yield from handled.payloads
         if handled.fatal:
             state.committed = True
+            state.erro_em_band = True
             return
         if handled.failed is not None:
             state.failed = handled.failed
@@ -973,12 +1088,22 @@ async def _stream_chain(
     # para o ultimo recurso, que so vale se nenhum outro chegou a ser tentado.
     first_busy: tuple[Candidate, dict] | None = None
     tried = False
+    # Candidatos pulados por `_transparent_skip_reason` (T4/T5). Quando esse
+    # numero cobre a cadeia inteira e nenhum upstream foi chamado, o erro e 400
+    # no envelope do chamador, nao o 502 generico de "nada respondeu" --
+    # espelho exato do caminho bufferizado.
+    transparent_skips = 0
 
     for candidate in chain:
         # Mesmo rotulo canonico do caminho bufferizado: o MODELO, nunca o alias.
         label = candidate.model
         if (candidate.protocol, req.endpoint) not in PATHS:
             trace.append(f"{label}: endpoint not supported")
+            continue
+        skip = _transparent_skip_reason(candidate, req, settings)
+        if skip is not None:
+            trace.append(f"{label}: {skip}")
+            transparent_skips += 1
             continue
         missing = _missing_credential(candidate, settings)
         if missing is not None:
@@ -1020,7 +1145,9 @@ async def _stream_chain(
         # entao sai do `with`.
         with slot:
             async with (
-                pool.client(candidate.provider) as client,
+                pool.client(
+                    candidate.provider, _provider_config(candidate, settings)
+                ) as client,
                 aclosing(
                     _stream_candidate(
                         req, settings, client, candidate, payload, passthrough, tally, leg
@@ -1058,7 +1185,9 @@ async def _stream_chain(
             leg = _Leg()
             with slot:
                 async with (
-                    pool.client(candidate.provider) as client,
+                    pool.client(
+                        candidate.provider, _provider_config(candidate, settings)
+                    ) as client,
                     aclosing(
                         _stream_candidate(
                             req, settings, client, candidate, payload, passthrough, tally, leg
@@ -1072,6 +1201,15 @@ async def _stream_chain(
             if leg.done:
                 return
 
+    # Espelho do caminho bufferizado: cadeia esvaziada por skip R2/token (T4/T5)
+    # SEM nenhuma tentativa e 400 no envelope do chamador, nao o 502 generico
+    # de "nada respondeu" (que seria mentira -- nada foi chamado).
+    if not tried and first_busy is None and transparent_skips == len(chain):
+        message = "no candidate answered: " + "; ".join(trace)
+        tally.status = 400
+        tally.error_type = "api_error"
+        yield _stream_error(req, message, 400)
+        return
     tally.status = 502
     tally.error_type = "api_error"
     yield _stream_error(req, f"{last_message} - tried: " + "; ".join(trace))
@@ -1200,7 +1338,12 @@ async def _stream_candidate(
             # `{"error": ...}` deliberately gets no such close: that is the
             # provider terminating its own stream in its own protocol
             # (Anthropic's API does exactly that), and a `message_stop`
-            # after it would tell the client the message completed.
+            # after it would tell the client the message completed. O mesmo
+            # `event: error` (502/api_error) que o cliente recebe no fio e o
+            # que a linha do banco guarda: registrar 200 aqui declararia
+            # sucesso sobre um stream que o cliente viu morrer.
+            tally.status = 502
+            tally.error_type = "api_error"
             yield _stream_error(req, _exception_text(err))
         else:
             state.failed = _exception_text(err)
@@ -1209,6 +1352,12 @@ async def _stream_candidate(
 
     if state.committed:
         tally.candidate = candidate.model
+        if state.erro_em_band:
+            # O provedor terminou o stream com um `{"error": ...}` proprio e o
+            # `event: error` (502/api_error) ja saiu para o cliente: a linha
+            # do banco guarda o mesmo que o fio levou.
+            tally.status = 502
+            tally.error_type = "api_error"
         tally.usage = translator.usage()
         _absorb(tally, translator, candidate)
         leg.done = True
@@ -1263,12 +1412,21 @@ async def dispatch_stream(
                 yield chunk
         if req.protocol != "anthropic" and not passthrough.happened:
             yield DONE
-    except GeneratorExit:
+    except (GeneratorExit, asyncio.CancelledError):
         # O cliente foi embora no meio. Isso nao e sucesso nem falha do
         # provedor, e registrar como 200 escondia justamente as requisicoes que
         # o harness cancelou -- que sao as que interessam quando alguem
         # pergunta por que a cadeia parou no meio. 499 e a convencao do nginx
         # para "o cliente fechou antes da resposta".
+        # Starlette 1.6 cancela a task que consome o stream (CancelledError);
+        # aclose() do ClosingStreamingResponse lancaria GeneratorExit, mas
+        # roda quando o gerador ja foi finalizado. Capturar os dois cobre
+        # ambos os caminhos sem rotular cancelamento proprio como 499:
+        # o dispatcher nunca cancela a propria task -- so o framework faz.
+        # NAO engolimos o cancelamento: o finally loga 499/client_disconnected
+        # e o `raise` devolve a signalizacao ao framework (o teste de
+        # cancelamento fixa a propagacao). O `Exception in ASGI application`
+        # no uvicorn e ruison conhecida deste caminho, nao defeito.
         tally.status = 499
         tally.error_type = "client_disconnected"
         raise

@@ -1,12 +1,9 @@
 """Testes do seed do catálogo: insere se vazio, idempotente, chaves vêm do env."""
 
 import os
-import sys
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
-
-sys.path.insert(0, "/home/iglesias/Documents/Projetos_Pessoais/Shunt")
 
 # Define chaves de teste ANTES de importar seed
 os.environ["LOCAL_API_KEY"] = "local-test"

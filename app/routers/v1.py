@@ -20,26 +20,23 @@ Streaming so existe em `/v1/messages` e `/v1/chat/completions`. `/v1/completions
 e `/v1/embeddings` respondem um unico documento JSON neste proxy.
 """
 
-import hashlib
 import time
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from json import JSONDecodeError
 
 import anyio
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import select
-from sqlalchemy.orm import Session
 from starlette.types import Receive, Scope, Send
 
 from app.config.settings import Settings
 from app.core.dispatcher import (
     ROUTES,
     ShuntRequest,
+    _provider_config,
     dispatch,
     dispatch_stream,
     error_body,
@@ -47,6 +44,7 @@ from app.core.dispatcher import (
 )
 from app.core.observability import RequestLog, log_request
 from app.core.resolver import UnknownProviderError, resolve
+from app.core.token_auth import require_shunt_token
 from app.core.tokens import estimate_input_tokens
 from app.schemas.anthropic import (
     AnthropicErrorResponse,
@@ -64,7 +62,6 @@ from app.schemas.openai import (
     OpenAIModel,
     OpenAIModelList,
 )
-from app.stats.models import ApiToken
 
 # Teto do fechamento do gerador do stream quando o pedido termina. O
 # fechamento e blindado contra cancelamento (e ele que devolve o slot do
@@ -100,7 +97,9 @@ class ClosingStreamingResponse(StreamingResponse):
                     await aclose()
 
 
-router = APIRouter(prefix="/v1")
+# A dependencia exige o token em toda a familia `/v1`: o envelope do 401/400/
+# 503 e decidido pelo handler de `TokenRejected` em `app.main`, pela rota.
+router = APIRouter(prefix="/v1", dependencies=[Depends(require_shunt_token)])
 
 
 class BadBody(ValueError):
@@ -133,6 +132,16 @@ def detect_protocol(headers: Mapping[str, str]) -> str:
     if "authorization" in lower:
         return "openai"
     return "unknown"
+
+
+# Que envelope usa o 401/400/503 do token, pela rota que o cliente chamou.
+def protocol_of(path: str, headers: Mapping[str, str]) -> str:
+    if path.startswith("/v1/messages"):
+        return "anthropic"
+    if path.startswith("/v1/models"):
+        found = detect_protocol(headers)
+        return "openai" if found == "unknown" else found
+    return "openai"
 
 
 
@@ -211,18 +220,23 @@ def _ref(model: type[BaseModel]) -> dict:
     return {"$ref": f"#/components/schemas/{model.__name__}"}
 
 
-# `{}` e a alternativa sem credencial: o Shunt nao exige autenticacao do
-# cliente. So `x-shunt-token` e conferido; as outras duas seguem adiante.
+# `PROXY_SECURITY` documenta, para o OpenAPI, os veiculos que um token valido
+# do Shunt pode chegar em: o cabecalho `x-shunt-token`, o prefixo `/t/<token>/`
+# e o `?token=`. A execucao nao depende desta lista: `require_shunt_token`
+# (dependencia do router) exige um token valido em toda a familia `/v1` e
+# recusa com 401 quando nao ha token em nenhum veiculo.
 PROXY_SECURITY: list[dict[str, list[str]]] = [
     {"anthropicApiKey": []},
     {"bearerAuth": []},
     {"shuntToken": []},
     {},
 ]
-# `count_tokens` nao le `x-shunt-token`.
+# `count_tokens` tambem exige o token Shunt: a dependencia do router cobre a
+# rota, e `shuntToken` e uma das formas declaradas aqui.
 COUNT_TOKENS_SECURITY: list[dict[str, list[str]]] = [
     {"anthropicApiKey": []},
     {"bearerAuth": []},
+    {"shuntToken": []},
     {},
 ]
 
@@ -377,31 +391,17 @@ async def _serve(request: Request, protocol: str, endpoint: str, streaming: bool
         _record(route, protocol, 400, started, error_type="invalid_request_error")
         return JSONResponse(status_code=400, content=error_body(protocol, 400, str(err)))
     settings, pool = request.app.state.settings, request.app.state.pool
-    # Token Shunt: quando o cliente apresenta um token da area admin, valida
-    # e o proxy injeta a chave configurada do provedor. Sem token, pass-through.
-    shunt_token_used = False
-    # So `x-shunt-token` e o token da area admin. `x-api-key` e a credencial do
-    # CLIENTE, que passa adiante: tratar como token viria toda requisicao
-    # autenticada em uma consulta de banco (e 503 sem banco).
-    shunt_token = request.headers.get("x-shunt-token")
-    if shunt_token:
-        token_hash = hashlib.sha256(shunt_token.encode()).hexdigest()
-        recorder = getattr(request.app.state, "recorder", None)
-        engine = recorder.engine if recorder is not None else None
-        if engine is None:
-            return JSONResponse(status_code=503, content={"detail": "Persistencia desligada"})
-        with Session(engine) as session:
-            row = session.execute(
-                select(ApiToken).where(ApiToken.token_hash == token_hash)
-            ).scalars().first()
-            if row is None:
-                return JSONResponse(status_code=401, content={"detail": "Token Shunt invalido"})
-            if row.expires_at is not None and row.expires_at < datetime.now(UTC):
-                return JSONResponse(status_code=401, content={"detail": "Token Shunt expirado"})
-            row.last_used_at = datetime.now(UTC)
-            session.commit()
-        shunt_token_used = True
-    shunt_request = ShuntRequest(protocol, body, dict(request.headers), endpoint=endpoint, shunt_token=shunt_token_used)
+    # A validacao do token e da dependencia `require_shunt_token` (rodou antes
+    # deste handler): `credential_is_token` diz se a credencial apresentada
+    # FOI um token do Shunt, e entao a chave configurada do provedor o
+    # substitui. O campo `shunt_token` do dataclass foi removido (Task 1.5).
+    shunt_request = ShuntRequest(
+        protocol,
+        body,
+        dict(request.headers),
+        endpoint=endpoint,
+        credential_is_token=request.state.credential_is_token,
+    )
     try:
         resolve(body.get("model", ""), settings)
     except UnknownProviderError as err:
@@ -481,8 +481,8 @@ async def create_embeddings(request: Request):
     description=(
         "Counts the input tokens of an Anthropic Messages request. When the first "
         "candidate for `model` speaks Anthropic, its own count is returned; otherwise, "
-        "or when it fails, Shunt returns a local estimate. `x-shunt-token` is not read "
-        "on this route."
+        "or when it fails, Shunt returns a local estimate. Requires a valid Shunt "
+        "token (401 without one), like every other `/v1` route."
     ),
     tags=["Anthropic"],
     responses={
@@ -534,13 +534,23 @@ async def count_tokens(request: Request):
         )
         return JSONResponse(status_code=400, content=error_body("anthropic", 400, str(err)))
     if candidate.protocol == "anthropic":
-        shunt_request = ShuntRequest("anthropic", body, dict(request.headers), endpoint="messages")
+        # Mesma guarda de `_serve`: o valor do token nunca e credencial que sai.
+        shunt_request = ShuntRequest(
+            "anthropic",
+            body,
+            dict(request.headers),
+            endpoint="messages",
+            credential_is_token=request.state.credential_is_token,
+        )
         try:
-            upstream = await pool.get(candidate.provider).post(
-                "/v1/messages/count_tokens",
-                json={**body, "model": candidate.model},
-                headers=outbound_headers(shunt_request, candidate, settings),
-            )
+            async with pool.client(
+                candidate.provider, _provider_config(candidate, settings)
+            ) as upstream_client:
+                upstream = await upstream_client.post(
+                    "/v1/messages/count_tokens",
+                    json={**body, "model": candidate.model},
+                    headers=outbound_headers(shunt_request, candidate, settings),
+                )
         except httpx.HTTPError:
             # Conexao que morre e a mesma situacao de um status diferente de
             # 200: a contagem autoritativa nao veio, e a estimativa local e uma

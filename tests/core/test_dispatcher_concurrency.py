@@ -719,9 +719,9 @@ def _track_clients(monkeypatch) -> list[httpx.AsyncClient]:
 
 @respx.mock
 async def test_a_buffered_last_resort_across_a_reload_leaks_no_client(monkeypatch):
-    """`apply_settings` fecha o pool antigo enquanto um pedido ainda espera o
-    slot nele. O pedido segue sendo servido, mas o cliente httpx que ele usa
-    nao pode ficar vivo dentro de um pool que ninguem mais vai fechar."""
+    """O shutdown (`aclose`) chega enquanto um pedido ainda espera o slot. O
+    pedido segue sendo servido, mas o cliente httpx que ele usa nao pode
+    ficar vivo dentro de um pool que ninguem mais vai fechar."""
     created = _track_clients(monkeypatch)
     settings = _settings("loc")
     respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
@@ -762,7 +762,7 @@ async def test_a_streaming_last_resort_across_a_reload_leaks_no_client(monkeypat
 async def test_a_client_lent_by_an_open_pool_is_shared_and_stays_open():
     pool = UpstreamPool(LOCAL_THEN_CLOUD)
     try:
-        async with pool.client("local") as lent:
+        async with pool.client("local", LOCAL_THEN_CLOUD.providers["local"]) as lent:
             assert lent is pool.get("local")
         assert not lent.is_closed
     finally:
@@ -814,3 +814,195 @@ async def test_the_streaming_last_resort_stops_exactly_at_the_deadline(monkeypat
         await pool.aclose()
     assert b": ping" not in body
     assert b"still busy at the deadline" in body
+
+
+# ---------------------------------------------------------------------------
+# Catalogo trocado com o pedido em voo: o pedido segue o snapshot dele
+# ---------------------------------------------------------------------------
+# O revisor mediu no ramo: o waiter do ultimo recurso liberado por
+# `release_all` (provedor removido) levantava `KeyError 'local'`; e um pedido
+# com o snapshot antigo mandava a chave antiga ("k") ao host NOVO.
+
+NEW_LOCAL_URL = "http://new-host.test/v1/chat/completions"
+
+
+def _without_local() -> Settings:
+    full = _settings("loc2")
+    return Settings(
+        providers={k: v for k, v in full.providers.items() if k != "local"},
+        models={k: v for k, v in full.models.items() if k != "loc"},
+        routes=[("opus", ["loc2"])],
+        default_model=None,
+    )
+
+
+def _local_moved() -> Settings:
+    moved = _settings("loc").model_copy(deep=True)
+    moved.providers["local"].base_url = "http://new-host.test/v1"
+    moved.providers["local"].api_key = "NEW-KEY"
+    return moved
+
+
+async def _until_waiting(pool: UpstreamPool, provider: str) -> None:
+    for _ in range(50):
+        if pool._gates[provider]._waiters:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("o pedido nao chegou a fila do ultimo recurso")
+
+
+@respx.mock
+async def test_a_last_resort_waiter_released_by_removing_its_provider_is_still_served():
+    settings = _settings("loc")
+    respx.post(LOCAL_URL).mock(return_value=httpx.Response(200, json=ok_payload("vendor/local")))
+    pool = UpstreamPool(settings)
+    held = _occupy(pool, "local")
+    task = asyncio.ensure_future(dispatch(ShuntRequest("anthropic", BODY, {}), settings, pool))
+    try:
+        await _until_waiting(pool, "local")
+        await pool.update(_without_local())  # release_all entrega o lugar ao waiter
+        result = await asyncio.wait_for(task, 5.0)
+    finally:
+        held.release()
+        await pool.aclose()
+    assert result.status == 200
+    assert result.real_model == "vendor/local"
+
+
+@respx.mock
+async def test_a_request_in_flight_across_a_base_url_and_key_change_keeps_host_and_key_together():
+    settings = _settings("loc")
+    old = respx.post(LOCAL_URL).mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/local"))
+    )
+    new = respx.post(NEW_LOCAL_URL).mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/local"))
+    )
+    pool = UpstreamPool(settings)
+    held = _occupy(pool, "local")
+    task = asyncio.ensure_future(dispatch(ShuntRequest("anthropic", BODY, {}), settings, pool))
+    try:
+        await _until_waiting(pool, "local")
+        moved = _local_moved()
+        await pool.update(moved)
+        held.release()  # o lugar passa ao pedido que carrega o snapshot antigo
+        result = await asyncio.wait_for(task, 5.0)
+        assert result.status == 200
+        assert old.call_count == 1
+        assert new.call_count == 0
+        assert old.calls[0].request.headers["authorization"] == "Bearer k"
+        # Pedido novo, snapshot novo: host novo com a chave nova.
+        fresh = await dispatch(ShuntRequest("anthropic", BODY, {}), moved, pool)
+    finally:
+        await pool.aclose()
+    assert fresh.status == 200
+    assert new.call_count == 1
+    assert new.calls[0].request.headers["authorization"] == "Bearer NEW-KEY"
+    assert old.call_count == 1
+
+
+def _moving_while_answering(pool: UpstreamPool, response: httpx.Response):
+    """Side effect do candidato anterior da cadeia: o admin troca o catalogo
+    enquanto ele responde, e o pedido segue no fallback com o snapshot dele."""
+
+    async def answer(request):
+        await pool.update(_local_moved())
+        return response
+
+    return answer
+
+
+@respx.mock
+async def test_a_fallback_after_a_base_url_and_key_change_keeps_host_and_key_together():
+    settings = _settings("loc2", "loc")
+    pool = UpstreamPool(settings)
+    respx.post(LOCAL2_URL).mock(
+        side_effect=_moving_while_answering(
+            pool, httpx.Response(400, json={"error": {"message": "nao"}})
+        )
+    )
+    old = respx.post(LOCAL_URL).mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/local"))
+    )
+    new = respx.post(NEW_LOCAL_URL).mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/local"))
+    )
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    assert result.status == 200
+    assert new.call_count == 0
+    assert old.call_count == 1
+    assert old.calls[0].request.headers["authorization"] == "Bearer k"
+
+
+@respx.mock
+async def test_a_streaming_fallback_after_a_base_url_and_key_change_keeps_host_and_key_together():
+    settings = _settings("loc2", "loc")
+    pool = UpstreamPool(settings)
+    respx.post(LOCAL2_URL).mock(
+        side_effect=_moving_while_answering(
+            pool, httpx.Response(400, json={"error": {"message": "nao"}})
+        )
+    )
+    old = respx.post(LOCAL_URL).mock(
+        return_value=httpx.Response(200, text=_sse("do-antigo"), headers=SSE_HEADERS)
+    )
+    new = respx.post(NEW_LOCAL_URL).mock(
+        return_value=httpx.Response(200, text=_sse("do-novo"), headers=SSE_HEADERS)
+    )
+    try:
+        body = await _collect(settings, pool)
+    finally:
+        await pool.aclose()
+    assert b"do-antigo" in body
+    assert new.call_count == 0
+    assert old.calls[0].request.headers["authorization"] == "Bearer k"
+
+
+@respx.mock
+async def test_a_streaming_last_resort_waiter_released_by_removing_its_provider_is_served(
+    monkeypatch,
+):
+    settings = _settings("loc")
+    respx.post(LOCAL_URL).mock(
+        return_value=httpx.Response(200, text=_sse("do-local"), headers=SSE_HEADERS)
+    )
+    pool = UpstreamPool(settings)
+    held = _occupy(pool, "local")
+    stream = await _enter_last_resort(monkeypatch, settings, pool)
+    try:
+        await pool.update(_without_local())
+        body = b"".join([chunk async for chunk in stream])
+    finally:
+        await stream.aclose()
+        held.release()
+        await pool.aclose()
+    assert b"do-local" in body
+
+
+@respx.mock
+async def test_a_stream_in_flight_across_a_base_url_and_key_change_keeps_host_and_key_together(
+    monkeypatch,
+):
+    settings = _settings("loc")
+    old = respx.post(LOCAL_URL).mock(
+        return_value=httpx.Response(200, text=_sse("do-antigo"), headers=SSE_HEADERS)
+    )
+    new = respx.post(NEW_LOCAL_URL).mock(
+        return_value=httpx.Response(200, text=_sse("do-novo"), headers=SSE_HEADERS)
+    )
+    pool = UpstreamPool(settings)
+    held = _occupy(pool, "local")
+    stream = await _enter_last_resort(monkeypatch, settings, pool)
+    try:
+        await pool.update(_local_moved())
+        held.release()
+        body = b"".join([chunk async for chunk in stream])
+    finally:
+        await stream.aclose()
+        await pool.aclose()
+    assert b"do-antigo" in body
+    assert new.call_count == 0
+    assert old.calls[0].request.headers["authorization"] == "Bearer k"

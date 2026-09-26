@@ -425,6 +425,7 @@
 <script>
 const REFRESH_MS = 15000;
 let hours = 24;
+const WINDOW_KEY = "shunt.painel.hours";
 let snapshot = null;
 
 const el = (id) => document.getElementById(id);
@@ -1312,12 +1313,25 @@ el("widen").addEventListener("click", () => {
 el("windows").addEventListener("click", (clicked) => {
   const button = clicked.target.closest("button");
   if (!button) return;
+  chooseWindow(button);
+  try { localStorage.setItem(WINDOW_KEY, button.dataset.hours); } catch {}
+  load();
+});
+
+function chooseWindow(button) {
   hours = Number(button.dataset.hours);
   for (const other of el("windows").querySelectorAll("button")) {
     other.setAttribute("aria-pressed", String(other === button));
   }
-  load();
-});
+}
+
+// A janela escolhida sobrevive a ida para outra tela do admin. So vale o que
+// ainda e um botao: a lista branca e o proprio markup.
+let guardada = null;
+try { guardada = localStorage.getItem(WINDOW_KEY); } catch {}
+const guardado = [...el("windows").querySelectorAll("button")]
+  .find((b) => b.dataset.hours === guardada);
+if (guardado) chooseWindow(guardado);
 
 load();
 live();

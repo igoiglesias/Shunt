@@ -83,10 +83,11 @@ def test_proxied_routes_accept_any_of_the_three_credentials_or_none(spec, path):
     ]
 
 
-def test_count_tokens_does_not_claim_to_check_the_shunt_token(spec):
-    """`count_tokens` nunca le `x-shunt-token` (v1.py, rota `count_tokens`)."""
+def test_count_tokens_now_requires_the_shunt_token_like_all_v1_routes(spec):
+    """Todas as rotas `/v1` exigem o token Shunt (Task 1.5), inclusive
+    `count_tokens`. O security scheme `shuntToken` e declarado."""
     security = spec["paths"]["/v1/messages/count_tokens"]["post"]["security"]
-    assert {"shuntToken": []} not in security
+    assert {"shuntToken": []} in security
     assert {} in security
 
 

@@ -1,8 +1,10 @@
+import asyncio
+
 import httpx
 import pytest
 
 from app.config.settings import ProviderConfig, Settings
-from app.core.upstream import UpstreamPool
+from app.core.upstream import TIMEOUT, UpstreamPool
 
 SETTINGS = Settings(
     providers={
@@ -315,3 +317,423 @@ async def test_cancelling_an_unused_request_twice_returns_its_place_once():
     assert pool.in_use("local") == 1
     assert other is not None
     other.release()
+
+
+# ---------------------------------------------------------------------------
+# update(): gates reconciliados no lugar, sem zerar in_use
+# ---------------------------------------------------------------------------
+
+
+def _limited(**limits: int | None) -> Settings:
+    return Settings(
+        providers={
+            name: ProviderConfig(
+                base_url=f"http://{name}.test/v1", protocol="openai", max_concurrency=limit
+            )
+            for name, limit in limits.items()
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+
+
+async def test_update_raising_the_limit_wakes_waiters_up_to_the_new_capacity():
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    first = pool.request_slot("local")
+    second = pool.request_slot("local")
+    third = pool.request_slot("local")
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert await first.wait(0) is not None
+    assert await second.wait(0) is not None
+    # Capacidade nova (3) ja ocupada: o terceiro continua na fila.
+    assert await third.wait(0) is None
+    assert pool.in_use("local") == 3
+    third.cancel()
+    held.release()
+    await pool.aclose()
+
+
+async def test_update_raising_the_limit_with_no_waiters_does_not_raise():
+    # `resize` so deve tentar tirar da fila enquanto ela tiver gente: sem
+    # ninguem esperando, subir o limite nao pode estourar a deque vazia.
+    pool = UpstreamPool(_limited(local=1))
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+async def test_update_raising_the_limit_with_fewer_waiters_than_new_capacity_serves_them_without_raising():
+    # Capacidade nova (3) maior que o total de candidatos a receber lugar (1
+    # em uso + 1 esperando = 2): o loop tem de parar quando a fila esvazia,
+    # nao quando a capacidade enche.
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(local=3))
+    assert pool.limit("local") == 3
+    assert pool.in_use("local") == 2
+    got = await waiting.wait(0)
+    assert got is not None
+    got.release()
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+async def test_update_lowering_the_limit_keeps_in_flight_and_holds_new_requests():
+    pool = UpstreamPool(_limited(local=2))
+    a = pool.try_slot("local")
+    b = pool.try_slot("local")
+    assert a is not None and b is not None
+    await pool.update(_limited(local=1))
+    assert pool.in_use("local") == 2  # preservado, nao zerado
+    assert pool.try_slot("local") is None
+    waiting = pool.request_slot("local")
+    a.release()  # 2 -> 1: ainda nao cabe entregar acima do limite novo
+    assert pool.in_use("local") == 1
+    assert await waiting.wait(0) is None
+    b.release()  # 1 <= 1: agora o lugar passa direto a quem espera
+    got = await waiting.wait(0)
+    assert got is not None
+    assert pool.in_use("local") == 1
+    got.release()
+    await pool.aclose()
+
+
+async def test_update_removing_the_limit_releases_waiters_at_once():
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(local=None))
+    assert pool.limit("local") is None
+    got = await waiting.wait(0)
+    assert got is not None
+    got.release()  # devolve num gate orfao: sem efeito no pool
+    held.release()
+    assert pool.in_use("local") == 0
+    assert pool.try_slot("local") is not None
+    await pool.aclose()
+
+
+async def test_update_adding_a_limit_to_a_provider_creates_its_gate():
+    pool = UpstreamPool(_limited(local=None))
+    assert pool.limit("local") is None
+    await pool.update(_limited(local=1))
+    assert pool.limit("local") == 1
+    assert pool.try_slot("local") is not None
+    assert pool.try_slot("local") is None
+    await pool.aclose()
+
+
+async def test_update_removing_the_provider_drops_its_gate_and_frees_waiters():
+    pool = UpstreamPool(_limited(local=1, cloud=None))
+    held = pool.try_slot("local")
+    assert held is not None
+    waiting = pool.request_slot("local")
+    await pool.update(_limited(cloud=None))
+    assert pool.limit("local") is None
+    assert await waiting.wait(0) is not None
+    held.release()
+    await pool.aclose()
+
+
+async def test_update_removing_the_limit_releases_every_waiter_not_just_the_first():
+    # Com uma unica espera, um `release_all` que so libera a primeira (e nao
+    # esvazia a fila toda) passaria despercebido: duas esperas tornam isso
+    # observavel.
+    pool = UpstreamPool(_limited(local=1))
+    held = pool.try_slot("local")
+    assert held is not None
+    first = pool.request_slot("local")
+    second = pool.request_slot("local")
+    await pool.update(_limited(local=None))
+    assert pool.limit("local") is None
+    got_first = await first.wait(0)
+    got_second = await second.wait(0)
+    assert got_first is not None
+    assert got_second is not None
+    got_first.release()
+    got_second.release()
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+async def test_in_use_survives_an_update_that_changes_nothing_relevant():
+    pool = UpstreamPool(_limited(local=2))
+    held = pool.try_slot("local")
+    assert held is not None
+    await pool.update(_limited(local=2))
+    assert pool.in_use("local") == 1
+    assert pool.limit("local") == 2
+    held.release()
+    assert pool.in_use("local") == 0
+    await pool.aclose()
+
+
+# ---------------------------------------------------------------------------
+# update(): clientes aposentados fecham quando o ultimo uso termina
+# ---------------------------------------------------------------------------
+
+
+def _moved() -> Settings:
+    moved = SETTINGS.model_copy(deep=True)
+    moved.providers["local"].base_url = "http://localhost:9090/v1"
+    return moved
+
+
+async def test_update_with_a_new_base_url_serves_a_new_client_and_closes_the_idle_old_one():
+    pool = UpstreamPool(SETTINGS)
+    old = pool.get("local")
+    await pool.update(_moved())
+    new = pool.get("local")
+    assert new is not old
+    assert str(new.base_url).rstrip("/") == "http://localhost:9090/v1"
+    assert old.is_closed
+    await pool.aclose()
+
+
+async def test_a_retired_client_stays_open_while_a_request_uses_it_and_closes_after():
+    pool = UpstreamPool(SETTINGS)
+    async with pool.client("local", SETTINGS.providers["local"]) as lent:
+        await pool.update(_moved())
+        assert not lent.is_closed  # em uso: o update nao fecha
+        async with pool.client("local", _moved().providers["local"]) as fresh:
+            assert fresh is not lent  # requisicao nova ja recebe o endereco novo
+    assert lent.is_closed  # ultimo uso terminou: fechou
+    assert pool._retired == []
+    assert not pool.get("local").is_closed
+    await pool.aclose()
+
+
+async def test_a_retired_client_shared_by_two_requests_closes_only_after_both():
+    pool = UpstreamPool(SETTINGS)
+    first = pool.client("local", SETTINGS.providers["local"])
+    second = pool.client("local", SETTINGS.providers["local"])
+    a = await first.__aenter__()
+    b = await second.__aenter__()
+    assert a is b
+    await pool.update(_moved())
+    await first.__aexit__(None, None, None)
+    assert not a.is_closed  # o segundo ainda usa
+    await second.__aexit__(None, None, None)
+    assert a.is_closed
+    assert pool._retired == []
+    await pool.aclose()
+
+
+async def test_an_exception_inside_a_retired_lease_still_closes_it_and_clears_uses():
+    # Uma excecao dentro do `async with` (desconexao do cliente no meio de um
+    # stream, `dispatcher.py:535`) tem de passar pelo mesmo `finally` que o
+    # caminho feliz: sem isso `uses` fica inflado para sempre e um cliente
+    # aposentado nunca fecha.
+    pool = UpstreamPool(SETTINGS)
+    lent = None
+    with pytest.raises(RuntimeError, match="stream quebrou"):
+        async with pool.client("local", SETTINGS.providers["local"]) as leased:
+            lent = leased
+            await pool.update(_moved())
+            assert not lent.is_closed
+            raise RuntimeError("stream quebrou no meio")
+    assert lent is not None
+    assert lent.is_closed
+    assert pool._retired == []
+    # uses voltou a 0: um novo lease do provedor novo funciona normalmente.
+    async with pool.client("local", _moved().providers["local"]) as fresh:
+        assert not fresh.is_closed
+    await pool.aclose()
+
+
+async def test_update_keeps_the_client_when_only_key_or_limit_changes():
+    pool = UpstreamPool(SETTINGS)
+    same = pool.get("local")
+    changed = SETTINGS.model_copy(deep=True)
+    changed.providers["local"].api_key = "nova"
+    changed.providers["local"].max_concurrency = 4
+    await pool.update(changed)
+    assert pool.get("local") is same
+    assert not same.is_closed
+    assert pool.limit("local") == 4
+    await pool.aclose()
+
+
+async def test_update_removing_a_provider_retires_its_client():
+    pool = UpstreamPool(SETTINGS)
+    old = pool.get("local")
+    only_openrouter = Settings(
+        providers={"openrouter": SETTINGS.providers["openrouter"]},
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    await pool.update(only_openrouter)
+    assert old.is_closed
+    with pytest.raises(KeyError):
+        pool.get("local")
+    await pool.aclose()
+
+
+async def test_aclose_closes_retired_clients_still_in_use():
+    pool = UpstreamPool(SETTINGS)
+    lease = pool.client("local", SETTINGS.providers["local"])
+    lent = await lease.__aenter__()
+    await pool.update(_moved())
+    await pool.aclose()
+    assert lent.is_closed
+    assert pool._retired == []  # aclose esvaziou tambem os aposentados
+    await lease.__aexit__(None, None, None)  # nao levanta com o cliente ja fechado
+
+
+# ---------------------------------------------------------------------------
+# update() concorrente: dois updates() no mesmo pool nao podem corromper
+# o mapa de clientes (admin + vigia de versao chamam update() do mesmo pool)
+# ---------------------------------------------------------------------------
+
+
+class _GatedCloseClient(httpx.AsyncClient):
+    """Cliente cujo `aclose` so libera quando o teste manda -- imita uma
+    conexao poolada de verdade cedendo o loop (o revisor mediu: `aclose`
+    com conexao poolada cede; uma ociosa nao). Um `asyncio.Event` controlado
+    pelo teste torna a corrida entre dois `update()` reproduzivel sem
+    depender da ordem de agendamento do loop."""
+
+    gate: asyncio.Event
+
+    async def aclose(self) -> None:
+        await self.gate.wait()
+        await super().aclose()
+
+
+class _GatedClosePool(UpstreamPool):
+    def __init__(self, settings: Settings, gate: asyncio.Event) -> None:
+        super().__init__(settings)
+        self._gate = gate
+
+    def _new_client(self, base_url: str) -> httpx.AsyncClient:
+        client = _GatedCloseClient(base_url=base_url, timeout=TIMEOUT, transport=self._transport)
+        client.gate = self._gate
+        return client
+
+
+async def test_two_concurrent_updates_do_not_corrupt_the_client_map():
+    # Corrida medida no review: duas chamadas a update() concorrentes no
+    # mesmo pool (admin + vigia de versao). Um `asyncio.Event` controlado
+    # pelo teste segura o aclose das duas chamadas ate ambas ficarem
+    # suspensas -- no lugar de depender de haver uma conexao poolada de
+    # verdade cedendo o loop. Com as duas presas, uma requisicao de verdade
+    # pede "openrouter" de novo (`fresh`): esse cliente novo nao pode se
+    # perder -- nem por um `del`/`pop` que apague quem esta la agora usando
+    # a decisao de um snapshot antigo (o bug que a corrida original
+    # reproduzia como `KeyError`), nem por um fechamento parcial que so
+    # fecha o primeiro cliente aposentado da lista.
+    gate = asyncio.Event()
+    pool = _GatedClosePool(SETTINGS, gate)
+    local_before = pool.get("local")
+    openrouter_before = pool.get("openrouter")
+
+    settings_a = SETTINGS.model_copy(deep=True)
+    settings_a.providers["local"].base_url = "http://localhost:9090/v1"
+    settings_a.providers["openrouter"].base_url = "https://openrouter-a.test/v1"
+
+    settings_b = SETTINGS.model_copy(deep=True)
+    settings_b.providers["openrouter"].base_url = "https://openrouter-b.test/v1"
+
+    task_a = asyncio.ensure_future(pool.update(settings_a))
+    await asyncio.sleep(0)  # task_a aposenta local+openrouter e suspende no primeiro aclose
+    task_b = asyncio.ensure_future(pool.update(settings_b))
+    await asyncio.sleep(0)  # task_b roda ate onde conseguir, com as duas chamadas ainda presas
+
+    fresh = pool.get("openrouter")  # uma requisicao de verdade, no meio da corrida
+    assert "openrouter" in pool._clients
+    assert pool._clients["openrouter"].client is fresh
+    assert not fresh.is_closed
+
+    gate.set()  # libera os aclose() presos
+    await asyncio.gather(task_a, task_b)  # nao pode levantar
+
+    assert local_before.is_closed
+    assert openrouter_before.is_closed
+    # o fresh sobrevive a corrida: ninguem o tocou, ele nao e um dos clientes
+    # que as duas chamadas estavam aposentando.
+    assert "openrouter" in pool._clients
+    assert pool._clients["openrouter"].client is fresh
+    assert not fresh.is_closed
+
+    await pool.aclose()
+    assert fresh.is_closed
+    assert pool._clients == {}
+    assert pool._retired == []
+
+
+# ---------------------------------------------------------------------------
+# client(provider, config): o pedido usa o catalogo que ele resolveu
+# ---------------------------------------------------------------------------
+# Cada pedido carrega o seu snapshot de `Settings` (resolucao, cabecalhos,
+# chave). O revisor mediu dois defeitos de ler o catalogo VIVO em `client()`:
+# provedor removido entre `resolve` e o `client()` virava `KeyError`, e um
+# `base_url` trocado mandava a chave antiga para o host novo.
+
+
+def _without_local() -> Settings:
+    return Settings(
+        providers={"openrouter": SETTINGS.providers["openrouter"]},
+        models={},
+        routes=[],
+        default_model=None,
+    )
+
+
+async def test_a_provider_removed_from_the_live_catalog_is_served_from_the_snapshot():
+    snapshot = SETTINGS.providers["local"]
+    pool = UpstreamPool(SETTINGS)
+    await pool.update(_without_local())
+    async with pool.client("local", snapshot) as own:
+        assert str(own.base_url).rstrip("/") == "http://localhost:8080/v1"
+        assert not own.is_closed
+        assert "local" not in pool._clients  # nao entra no mapa compartilhado
+    assert own.is_closed  # cliente so deste uso: fecha na saida
+    assert "local" not in pool._clients
+    assert pool._retired == []
+    await pool.aclose()
+
+
+async def test_an_old_snapshot_after_a_base_url_change_keeps_the_old_address():
+    old_snapshot = SETTINGS.providers["local"]
+    moved = _moved()
+    pool = UpstreamPool(SETTINGS)
+    await pool.update(moved)
+    async with pool.client("local", old_snapshot) as old:
+        assert str(old.base_url).rstrip("/") == "http://localhost:8080/v1"
+        async with pool.client("local", moved.providers["local"]) as new:
+            assert str(new.base_url).rstrip("/") == "http://localhost:9090/v1"
+            assert new is pool.get("local")  # o snapshot novo usa o compartilhado
+        assert old is not pool.get("local")
+    assert old.is_closed
+    assert not pool.get("local").is_closed
+    await pool.aclose()
+
+
+async def test_a_snapshot_matching_the_live_catalog_uses_the_shared_client():
+    pool = UpstreamPool(SETTINGS)
+    async with pool.client("local", SETTINGS.providers["local"]) as lent:
+        assert lent is pool.get("local")
+        assert pool._clients["local"].uses == 1
+    assert not lent.is_closed
+    assert pool._clients["local"].uses == 0
+    await pool.aclose()
+
+
+async def test_a_closed_pool_serves_the_snapshot_address():
+    pool = UpstreamPool(_moved())
+    await pool.aclose()
+    async with pool.client("local", SETTINGS.providers["local"]) as own:
+        assert str(own.base_url).rstrip("/") == "http://localhost:8080/v1"
+    assert own.is_closed
+    assert pool._clients == {}

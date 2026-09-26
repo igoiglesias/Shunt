@@ -20,6 +20,7 @@ from starlette.requests import ClientDisconnect
 from app.config.settings import ModelConfig, ProviderConfig, Settings
 from app.core.upstream import UpstreamPool
 from app.main import app
+from tests.conftest import TEST_SHUNT_TOKEN
 
 LIMITED = Settings(
     providers={
@@ -160,7 +161,7 @@ async def _disconnect_mid_stream(
         "raw_path": b"/v1/messages",
         "query_string": b"",
         "root_path": "",
-        "headers": [(b"content-type", b"application/json"), (b"host", b"test")],
+        "headers": [(b"content-type", b"application/json"), (b"host", b"test"), (b"x-shunt-token", TEST_SHUNT_TOKEN.encode())],
         "client": ("127.0.0.1", 1),
         "server": ("test", 80),
         "state": {},

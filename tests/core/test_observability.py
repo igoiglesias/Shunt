@@ -53,6 +53,7 @@ def test_every_credential_header_is_covered_whatever_its_casing():
             "X-Api-Key": "b",
             "Api-Key": "c",
             "Proxy-Authorization": "d",
+            "X-Shunt-Token": "e",
         }
     )
     assert set(out.values()) == {"[redacted]"}

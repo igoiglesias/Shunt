@@ -100,4 +100,9 @@ async def revoke_token(request: Request, token_id: int, _: int = Depends(require
             raise HTTPException(status_code=404, detail="Token nao encontrado")
         session.delete(token)
         session.commit()
+    # Invalida o cache de validacao em processo: o token revogado deixa de ser
+    # aceito imediatamente, sem esperar o TTL do cache.
+    cache = getattr(request.app.state, "token_cache", None)
+    if cache is not None:
+        cache.invalidate(token_id)
     return await list_tokens(request)

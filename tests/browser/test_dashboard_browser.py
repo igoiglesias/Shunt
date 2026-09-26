@@ -20,10 +20,22 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.stats.models import Base, RequestEvent
+from app.config.config import ADMIN_COOKIE
+from app.core.security import issue_jwt
+from app.core.token_auth import token_hash
+from app.stats.models import ApiToken, Base, RequestEvent
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import sync_playwright
+
+# Segredo fixo so deste modulo: o painel exige sessao admin, e com o segredo
+# conhecido o teste assina o proprio cookie em vez de passar pela tela de login.
+# So precisa ser estavel dentro do modulo; nao e segredo de producao.
+SESSION_SECRET = "segredo-fixo-do-teste-do-painel"
+
+# `/v1` exige token (Task 1.5): o servidor de verdade confere no banco semeado.
+BROWSER_TOKEN = "token-do-teste-de-navegador"
+V1 = {"x-shunt-token": BROWSER_TOKEN}
 
 
 def free_port() -> int:
@@ -70,6 +82,7 @@ def seed(path) -> None:
         )
     with Session(engine) as session:
         session.add_all(rows)
+        session.add(ApiToken(name="navegador", token_hash=token_hash(BROWSER_TOKEN)))
         session.commit()
     engine.dispose()
 
@@ -81,7 +94,11 @@ def server(tmp_path_factory):
     port = free_port()
     process = subprocess.Popen(
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env={**os.environ, "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}"},
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -115,8 +132,13 @@ def browser():
         instance.close()
 
 
-def open_panel(browser, base, width, height):
+def open_panel(browser, base, width, height, init_script=None):
     page = browser.new_page(viewport={"width": width, "height": height})
+    page.context.add_cookies(
+        [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
+    )
+    if init_script:
+        page.add_init_script(init_script)
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
@@ -187,7 +209,7 @@ def test_a_request_served_right_now_lands_on_the_tape(browser, server):
     """O SSE: o painel aberto tem de mostrar a requisicao chegando."""
     page, _ = open_panel(browser, server, 1440, 1000)
     before = page.locator("#tape li").count()
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.wait_for_function(f"document.querySelectorAll('#tape li').length > {before}", timeout=10_000)
     first = page.locator("#tape li").first.inner_text()
     page.close()
@@ -214,7 +236,13 @@ def test_the_panel_says_so_when_there_is_no_database(browser, tmp_path_factory):
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
         # Vazio, e nao ausente: `load_dotenv` nao sobrescreve variavel ja
         # definida, entao so assim o `.env` do repositorio nao repoe o banco.
-        env={**os.environ, "TURSO_DATABASE_URL": "", "TURSO_AUTH_TOKEN": ""},
+        # O segredo fixo casa com o cookie que `open_panel` assina.
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": "",
+            "TURSO_AUTH_TOKEN": "",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -267,7 +295,7 @@ def test_a_single_hour_of_traffic_draws_bars_instead_of_a_flat_line(browser, ser
 def test_a_route_with_no_model_never_appears_as_a_requested_model(browser, server):
     """`/v1/models` nao pede modelo; o diagrama nao pode ganhar uma linha sem nome."""
     page, _ = open_panel(browser, server, 1400, 900)
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.reload(wait_until="networkidle")
     page.wait_for_selector("#flow .flow-label")
     labels = page.evaluate(
@@ -305,7 +333,7 @@ def test_the_tape_fills_in_what_the_live_stream_could_not_see(browser, server):
 def test_the_tape_keeps_the_newest_request_on_top(browser, server):
     page, _ = open_panel(browser, server, 1400, 900)
     page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
-    httpx.get(f"{server}/v1/models", timeout=10)
+    assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page.wait_for_timeout(800)
     page.evaluate("() => load()")
     page.wait_for_timeout(600)
@@ -348,7 +376,7 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     # Nao depende do que outros testes deixaram: gera o proprio trafego, porque
     # o teste de limpeza pode ter zerado o banco antes deste rodar.
     for _ in range(3):
-        httpx.get(f"{server}/v1/models", timeout=10)
+        assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page, problems = open_panel(browser, server, 1400, 900)
     # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
     # vez de esperar por ela, depois de dar ao worker o tempo de um lote.
@@ -634,6 +662,75 @@ def test_the_way_out_of_an_empty_window_is_the_24h_button(browser, server):
             .find(b => b.getAttribute('aria-pressed') === 'true')?.textContent === '24h'"""
     )
     page.close()
+    assert problems == []
+
+
+def pressed_window(page):
+    return page.evaluate(
+        """() => [...document.querySelectorAll('#windows button')]
+            .filter(b => b.getAttribute('aria-pressed') === 'true').map(b => b.textContent)"""
+    )
+
+
+def test_the_chosen_window_survives_a_trip_to_another_screen(browser, server):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="1h").click()
+    page.wait_for_timeout(300)
+    page.goto(f"{server}/admin/requests", wait_until="networkidle")
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.goto(f"{server}/admin/painel")
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    pressed = pressed_window(page)
+    page.close()
+    assert "window=1&" in url or url.endswith("window=1"), url
+    assert pressed == ["1h"]
+    assert problems == []
+
+
+@pytest.mark.parametrize("guardado", ["999", "abc", ""])
+def test_a_stored_window_that_is_not_a_button_falls_back_to_24h(browser, server, guardado):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.evaluate(f"() => localStorage.setItem('shunt.painel.hours', {json.dumps(guardado)})")
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.reload()
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    pressed = pressed_window(page)
+    page.close()
+    assert "window=24&" in url or url.endswith("window=24"), url
+    assert pressed == ["24h"]
+    assert problems == []
+
+
+def test_clicking_a_window_stores_its_hours(browser, server):
+    page, problems = open_panel(browser, server, 1400, 900)
+    page.get_by_role("button", name="7d").click()
+    guardado = page.evaluate("() => localStorage.getItem('shunt.painel.hours')")
+    page.close()
+    assert guardado == "168"
+    assert problems == []
+
+
+def test_the_panel_still_opens_on_24h_when_storage_is_blocked(browser, server):
+    bloqueio = """Object.defineProperty(window, 'localStorage', {
+        get() { throw new DOMException('bloqueado', 'SecurityError'); }
+    });"""
+    page, problems = open_panel(browser, server, 1400, 900, init_script=bloqueio)
+    inicial = pressed_window(page)
+    with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
+        page.reload()
+    page.wait_for_selector("#state div")
+    url = primeira.value.url
+    recarregado = pressed_window(page)
+    page.get_by_role("button", name="1h").click()
+    page.wait_for_timeout(300)
+    pressed = pressed_window(page)
+    page.close()
+    assert inicial == ["24h"]
+    assert recarregado == ["24h"]
+    assert "window=24&" in url or url.endswith("window=24"), url
+    assert pressed == ["1h"]
     assert problems == []
 
 

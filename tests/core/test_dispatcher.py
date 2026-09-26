@@ -89,8 +89,9 @@ async def test_400_trace_line_carries_the_upstream_reason():
         )
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 400
@@ -171,8 +172,9 @@ async def test_exhausted_chain_returns_the_last_error_and_names_every_candidate(
         return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 400
@@ -316,12 +318,249 @@ def test_outbound_headers_transparent_drops_exactly_the_listed_headers():
         ShuntRequest(
             "anthropic",
             BODY,
-            {"Host": "x", "Content-Length": "1", "Accept-Encoding": "gzip", "X-Api-Key": "sk"},
+            {
+                "Host": "x",
+                "Content-Length": "1",
+                "Accept-Encoding": "gzip",
+                "X-Api-Key": "sk",
+                "X-Shunt-Token": "tok",
+                "Cookie": "shunt_admin=abc",
+            },
         ),
         candidate,
         TRANSPARENT,
     )
+    # x-shunt-token e cookie NAO saem; a credencial do cliente (x-api-key) sai.
     assert headers == {"X-Api-Key": "sk"}
+
+
+def test_transport_credentials_in_authorization_alone_stay_the_transparent_credential():
+    """So `authorization` na requisicao (OAuth de assinatura, sem `x-api-key`):
+    continua sendo a credencial do transparente, e a chave configurada nao
+    substitui."""
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="m", protocol="anthropic", transparent=True
+    )
+    headers = outbound_headers(
+        ShuntRequest("anthropic", BODY, {"authorization": "Bearer oauth-x"}), candidate, TRANSPARENT
+    )
+    assert headers["authorization"] == "Bearer oauth-x"
+    assert "x-api-key" not in headers
+
+
+# --- transparente com provedor FORA do catalogo: o host oficial embutido -----
+#
+# O seed nao declara "anthropic" nem "openai". Antes do mapa embutido, o
+# candidato transparente `claude-*` levantava KeyError em
+# `settings.providers[candidate.provider]` e o harness recebia um 500.
+
+NO_ANTHROPIC_DECLARED = Settings(
+    providers={
+        "local": ProviderConfig(
+            base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+        )
+    },
+    models={},
+    routes=[],
+    default_model=None,
+)
+
+OFFICIAL_ANTHROPIC_OK = {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "model": "claude-haiku-4-5",
+    "stop_reason": "end_turn",
+    "content": [{"type": "text", "text": "ok"}],
+    "usage": {"input_tokens": 1, "output_tokens": 1},
+}
+
+
+def test_provider_config_helper_falls_back_to_the_embedded_official_host():
+    """Candidato transparente com provider fora do catalogo: o helper devolve o
+    ProviderConfig do host oficial embutido (base_url certa, sem chave)."""
+    from app.core.dispatcher import _provider_config
+
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="claude-haiku-4-5", protocol="anthropic",
+        transparent=True,
+    )
+    config = _provider_config(candidate, NO_ANTHROPIC_DECLARED)
+    # Medido: o base do Anthropic fica SEM /v1 porque `PATHS` ja carrega o
+    # prefixo no path (`/v1/messages`); com /v1 no base o httpx 0.28 fazia
+    # `/v1/v1/messages`. O resultado e o host oficial certo na URL final.
+    assert config.base_url == "https://api.anthropic.com"
+    assert config.protocol == "anthropic"
+    assert config.api_key is None
+
+
+def test_provider_config_helper_prefers_the_declared_entry():
+    """Provider declarado no catalogo: a entrada do operador manda, o mapa
+    embutido nem olha."""
+    from app.core.dispatcher import _provider_config
+
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="claude-a", protocol="anthropic",
+        transparent=True,
+    )
+    config = _provider_config(candidate, TRANSPARENT)
+    assert config.base_url == "https://api.anthropic.test"
+    assert config.api_key == "sk-da-config"
+
+
+@respx.mock
+async def test_transparent_claude_request_reaches_the_official_anthropic_host():
+    """E2E no nivel do dispatcher: settings SEM "anthropic", candidato
+    transparente claude- -> a chamada sai para https://api.anthropic.com/v1
+    com os headers do cliente verbatim, sem 500."""
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(200, json=OFFICIAL_ANTHROPIC_OK)
+    )
+    body = {**BODY, "model": "claude-haiku-4-5"}
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    try:
+        result = await dispatch(
+            ShuntRequest("anthropic", body, dict(CLIENT_HEADERS)),
+            NO_ANTHROPIC_DECLARED,
+            pool,
+        )
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    sent = route.calls[0].request
+    assert str(sent.url) == "https://api.anthropic.com/v1/messages"
+    assert sent.headers["x-api-key"] == "sk-do-cliente"
+    assert sent.headers["authorization"] == "Bearer oauth-da-assinatura"
+    assert result.status == 200
+    assert result.real_model == "claude-haiku-4-5"
+    assert result.body["content"] == [{"type": "text", "text": "ok"}]
+
+
+# --- T4: token do Shunt nao e credencial de provedor -------------------------
+# --- T5: a credencial do harness so vale no destino nativo (spec R2) --------
+
+
+def test_transparent_skip_reason_is_the_shunt_token_when_it_was_the_only_credential():
+    """T4(a): a unica credencial apresentada era o token do Shunt -- nao ha
+    chave de provedor que sair, e o candidato transparente e pulado com motivo."""
+    from app.core.dispatcher import _transparent_skip_reason
+
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="claude-sonnet-5", protocol="anthropic",
+        transparent=True,
+    )
+    req = ShuntRequest(
+        "anthropic", BODY, {"x-api-key": "token-do-shunt"}, credential_is_token=True
+    )
+    reason = _transparent_skip_reason(candidate, req, NO_ANTHROPIC_DECLARED)
+    assert reason is not None
+    assert "shunt token" in reason
+
+
+def test_transparent_skip_reason_is_wrong_destination_for_a_foreign_protocol():
+    """T5: Claude Code (protocolo anthropic) pedindo gpt-*: a credencial
+    anthropic nao serve no destino openai -- candidato in elegivel."""
+    from app.core.dispatcher import _transparent_skip_reason
+
+    candidate = Candidate(
+        alias=None, provider="openai", model="gpt-5", protocol="openai", transparent=True
+    )
+    req = ShuntRequest("anthropic", BODY, {"x-api-key": "sk-do-cliente"})
+    reason = _transparent_skip_reason(candidate, req, NO_ANTHROPIC_DECLARED)
+    assert reason is not None
+    assert "openai" in reason  # o destino nativo da credencial entra no motivo
+
+
+def test_transparent_is_eligible_in_its_native_destination_with_a_real_credential():
+    from app.core.dispatcher import _transparent_skip_reason
+
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="claude-sonnet-5", protocol="anthropic",
+        transparent=True,
+    )
+    req = ShuntRequest("anthropic", BODY, {"x-api-key": "sk-do-cliente"})
+    assert _transparent_skip_reason(candidate, req, NO_ANTHROPIC_DECLARED) is None
+
+
+def test_the_skip_reason_does_not_apply_to_routed_candidates():
+    """Candidato de rota declarado nao passa pelo filtro: o comportamento
+    existente (credencial da config) e preservado."""
+    from app.core.dispatcher import _transparent_skip_reason
+
+    candidate = Candidate(
+        alias="free", provider="openrouter", model="vendor/free", protocol="openai"
+    )
+    req = ShuntRequest("anthropic", BODY, {"x-api-key": "token-do-shunt"}, credential_is_token=True)
+    assert _transparent_skip_reason(candidate, req, SETTINGS) is None
+
+
+@respx.mock
+async def test_transparent_with_only_the_shunt_token_is_skipped_and_answers_400():
+    """T4(b): cadeia so com o transparente e a unica credencial era o token do
+    Shunt: nenhum upstream e chamado, e o erro sai no envelope do protocolo do
+    chamador dizendo o que falta."""
+    route = respx.post("https://api.anthropic.com/v1/messages")
+    body = {**BODY, "model": "claude-sonnet-5"}
+    req = ShuntRequest(
+        "anthropic", body, {"x-api-key": "token-do-shunt"}, credential_is_token=True
+    )
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    try:
+        result = await dispatch(req, NO_ANTHROPIC_DECLARED, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 0
+    assert result.status == 400
+    assert result.real_model is None
+    assert result.body["type"] == "error"
+    assert "shunt token" in result.body["error"]["message"]
+
+
+@respx.mock
+async def test_anthropic_caller_gpt5_no_default_returns_400():
+    """T5(a), o exemplo canonico: Claude Code pedindo gpt-5 sem default. O
+    transparente openai NAO e elegivel para a credencial anthropic: pulado,
+    sem outro candidato, 400 no envelope Anthropic dizendo o que falta."""
+    route = respx.post("https://api.openai.com/v1/chat/completions")
+    body = {**BODY, "model": "gpt-5"}
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    try:
+        result = await dispatch(
+            ShuntRequest("anthropic", body, {"x-api-key": "sk-do-cliente"}),
+            NO_ANTHROPIC_DECLARED,
+            pool,
+        )
+    finally:
+        await pool.aclose()
+    assert route.call_count == 0
+    assert result.status == 400
+    assert result.body["type"] == "error"
+    assert result.body["error"]["type"] == "invalid_request_error"
+    # o erro aponta o caminho: credencial do destino certo ou default_model
+    assert "gpt-5" in result.body["error"]["message"]
+
+
+@respx.mock
+async def test_openai_caller_claude_model_no_default_returns_400_in_openai_envelope():
+    """T5(b), simetrico: cliente OpenAI pedindo claude-* sem default. O
+    transparente anthropic nao e elegivel para a credencial openai: 400 no
+    envelope OpenAI (sem `type` na raiz, `error.param` presente)."""
+    route = respx.post("https://api.anthropic.com/v1/messages")
+    body = {**BODY, "model": "claude-sonnet-5"}
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    try:
+        result = await dispatch(
+            ShuntRequest("openai", body, {"authorization": "Bearer sk-do-cliente"}, endpoint="chat"),
+            NO_ANTHROPIC_DECLARED,
+            pool,
+        )
+    finally:
+        await pool.aclose()
+    assert route.call_count == 0
+    assert result.status == 400
+    assert "type" not in result.body
+    assert result.body["error"]["type"] == "invalid_request_error"
+    assert "claude-sonnet-5" in result.body["error"]["message"]
 
 
 # --- escolha de caminho, corpo e tradução ------------------------------------
@@ -350,8 +589,15 @@ async def test_endpoint_without_a_path_on_the_provider_protocol_is_skipped():
     route = respx.post("https://api.anthropic.test/v1/messages")
     pool = UpstreamPool(ANTHROPIC_SETTINGS)
     try:
+        # `claude-opus-4-5` casa na rota exact e deriva para "anthropic" (ja
+        # declarado em ANTHROPIC_SETTINGS): a cadeia inteira fica anthropic, e
+        # nenhum dos dois candidatos tem path de /embeddings. Usar um nome
+        # `gpt-*` traria um degrau transparente openai, que APOIA /embeddings e
+        # encobriria o descarte por path.
         result = await dispatch(
-            ShuntRequest("openai", {"model": "gpt-4o", "input": "oi"}, {}, endpoint="embeddings"),
+            ShuntRequest(
+                "openai", {"model": "claude-opus-4-5", "input": "oi"}, {}, endpoint="embeddings"
+            ),
             ANTHROPIC_SETTINGS,
             pool,
         )
@@ -360,7 +606,10 @@ async def test_endpoint_without_a_path_on_the_provider_protocol_is_skipped():
     assert route.call_count == 0
     assert result.status == 502
     assert "endpoint not supported" in result.body["error"]["message"]
-    assert result.trace == ["claude-fable-5-1: endpoint not supported"]
+    assert result.trace == [
+        "claude-fable-5-1: endpoint not supported",
+        "claude-opus-4-5: endpoint not supported",
+    ]
 
 
 @respx.mock
@@ -451,7 +700,9 @@ NO_TOOLS = Settings(
 async def test_a_chain_emptied_by_the_capability_filter_returns_400_without_calling_anyone():
     route = respx.post("https://api.test/v1/chat/completions")
     pool = UpstreamPool(NO_TOOLS)
-    body = {**BODY, "tools": [{"name": "grep", "input_schema": {"type": "object"}}]}
+    # "my-opus": casa na rota de familia, mas o prefixo nao deriva provedor --
+    # sem degrau transparente no fim da cadeia, que encobriria o 400 do filtro.
+    body = {**BODY, "model": "my-opus", "tools": [{"name": "grep", "input_schema": {"type": "object"}}]}
     try:
         result = await dispatch(ShuntRequest("anthropic", body, {}), NO_TOOLS, pool)
     finally:
@@ -545,8 +796,9 @@ async def test_a_non_json_error_body_becomes_the_message_verbatim(monkeypatch):
         return_value=httpx.Response(403, text="cota estourada")
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 403
@@ -562,8 +814,9 @@ async def test_a_candidate_that_only_ever_fails_transport_is_retried_to_the_limi
         side_effect=httpx.ConnectError("recusou")
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert route.call_count == dispatcher.MAX_ATTEMPTS * 2
@@ -589,8 +842,9 @@ async def test_backoff_is_never_awaited_after_the_last_attempt(monkeypatch):
         side_effect=httpx.ConnectError("recusou")
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     # Two candidates ("free", "cheap"), each retried MAX_ATTEMPTS times but
@@ -618,8 +872,9 @@ async def test_a_json_content_type_with_a_broken_body_falls_back_to_the_raw_text
         )
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 400
@@ -632,8 +887,9 @@ async def test_a_json_error_body_that_is_not_an_object_falls_back_to_the_raw_tex
         return_value=httpx.Response(400, json=["explodiu"])
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 400
@@ -834,8 +1090,9 @@ async def test_a_bare_string_error_envelope_becomes_the_message():
         return_value=httpx.Response(404, json={"error": "model not found"})
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 404
@@ -850,8 +1107,9 @@ async def test_an_error_object_without_a_message_falls_back_to_the_raw_text():
         return_value=httpx.Response(400, json={"error": {"code": "bad"}})
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert result.status == 400
@@ -1617,8 +1875,9 @@ async def test_the_attempt_label_is_the_model_not_the_alias():
         return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
     )
     pool = UpstreamPool(ALIAS_DIFFERS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), ALIAS_DIFFERS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), ALIAS_DIFFERS, pool)
     finally:
         await pool.aclose()
     assert route.call_count == 1
@@ -1838,8 +2097,9 @@ async def test_the_trace_separates_a_candidate_cut_mid_retry_from_one_never_trie
         return_value=httpx.Response(503, json={"error": {"message": "ocupado"}})
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        result = await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        result = await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     assert route.call_count == 1
@@ -1865,8 +2125,9 @@ async def test_the_buffered_backoff_grows_with_the_attempt_number(monkeypatch):
         side_effect=httpx.ConnectError("recusou")
     )
     pool = UpstreamPool(SETTINGS)
+    body = {**BODY, "model": "my-opus"}
     try:
-        await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+        await dispatch(ShuntRequest("anthropic", body, {}), SETTINGS, pool)
     finally:
         await pool.aclose()
     # Dois candidatos, cada um com esperas 1, 2, ... ate MAX_ATTEMPTS - 1.

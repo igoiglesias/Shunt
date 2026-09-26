@@ -11,7 +11,7 @@
     <tr>
       <td>{{ u.username }}</td>
       <td class="mono">{{ u.last_login_at.strftime("%Y-%m-%d %H:%M") if u.last_login_at else "—" }}</td>
-      <td class="actions">
+      <td class="actions" style="justify-content: flex-end;">
         <button class="btn btn-sm" hx-get="/admin/users/{{ u.username }}/edit" hx-target="#user-form" hx-swap="outerHTML">Editar</button>
         <button class="btn btn-sm btn-danger" hx-delete="/admin/users/{{ u.username }}" hx-target="#user-list" hx-swap="outerHTML"
           hx-confirm="Excluir {{ u.username }}?">Excluir</button>

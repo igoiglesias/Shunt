@@ -282,6 +282,9 @@ class ApiToken(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    # Invariante: todo valor de tempo e gravado em UTC. A validacao de token
+    # (`app/core/token_auth.py`) normaliza `expires_at` naive como UTC; um
+    # valor em outra fusao desloca o vencimento.
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

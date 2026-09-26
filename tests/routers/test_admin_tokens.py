@@ -11,6 +11,7 @@ from app.config.settings import Settings
 from app.core.upstream import UpstreamPool
 from app.main import app
 from app.stats.models import ApiToken, Base
+from app.stats.recorder import Recorder
 
 ADMIN_SESSION_SECRET = "segredo-de-teste-do-admin"
 
@@ -30,10 +31,16 @@ def _reset_app_state():
     app.state.admin_session_secret = ADMIN_SESSION_SECRET
 
 
-def client(tmp_path: Path):
+def client(tmp_path: Path) -> TestClient:
+    """Cria o app com um banco fresco e um `Recorder` por teste.
+
+    Devolve o `TestClient` SEM entrar nele: quem chama usa `with client(...) as c`
+    e o `with` e o do `TestClient`, que roda o lifespan (start/aclose do
+    `Recorder`, no loop do portal). A limpeza do `app.state.recorder` entre
+    testes e do `conftest.py` (autouse), nao daqui.
+    """
     engine = _make_engine(tmp_path)
     _reset_app_state()
-    from app.stats.recorder import Recorder
     app.state.recorder = Recorder(engine)
     return TestClient(app)
 
@@ -74,12 +81,13 @@ def test_create_token_returns_plaintext_once(tmp_path):
 def test_token_hash_stored_not_plaintext(tmp_path):
     """Token armazenado como SHA-256 no DB, nao em texto claro."""
     with client(tmp_path) as c:
+        engine = app.state.recorder.engine
         r = c.post("/admin/tokens", data={"name": "hash-test"}, cookies=_cookie(), follow_redirects=False)
     assert r.status_code == 200
     import re
     match = re.search(r'<code id="new-token"[^>]*>([^<]+)</code>', r.text)
     token_value = match.group(1).strip()
-    with Session(app.state.recorder.engine) as s:
+    with Session(engine) as s:
         token = s.execute(select(ApiToken).where(ApiToken.name == "hash-test")).scalar_one_or_none()
     assert token is not None
     assert token.token_hash != token_value  # hash nao e o plaintext
@@ -91,9 +99,10 @@ def test_token_hash_stored_not_plaintext(tmp_path):
 def test_create_token_with_expiry(tmp_path):
     """POST com expires_days -> expires_at setado no DB."""
     with client(tmp_path) as c:
+        engine = app.state.recorder.engine
         r = c.post("/admin/tokens", data={"name": "token-expirado", "expires_days": "30"}, cookies=_cookie(), follow_redirects=False)
     assert r.status_code == 200
-    with Session(app.state.recorder.engine) as s:
+    with Session(engine) as s:
         token = s.execute(select(ApiToken).where(ApiToken.name == "token-expirado")).scalar_one()
     assert token.expires_at is not None
 
@@ -101,9 +110,10 @@ def test_create_token_with_expiry(tmp_path):
 def test_create_token_without_expiry(tmp_path):
     """POST sem expires_days -> expires_at NULL no DB."""
     with client(tmp_path) as c:
+        engine = app.state.recorder.engine
         r = c.post("/admin/tokens", data={"name": "token-perpetuo"}, cookies=_cookie(), follow_redirects=False)
     assert r.status_code == 200
-    with Session(app.state.recorder.engine) as s:
+    with Session(engine) as s:
         token = s.execute(select(ApiToken).where(ApiToken.name == "token-perpetuo")).scalar_one()
     assert token.expires_at is None
 
@@ -111,14 +121,15 @@ def test_create_token_without_expiry(tmp_path):
 def test_revoke_token(tmp_path):
     """DELETE /admin/tokens/{id} -> 200, removido do DB."""
     with client(tmp_path) as c:
+        engine = app.state.recorder.engine
         # Cria primeiro
         c.post("/admin/tokens", data={"name": "token-a-revogar"}, cookies=_cookie(), follow_redirects=False)
-        with Session(app.state.recorder.engine) as s:
+        with Session(engine) as s:
             token = s.execute(select(ApiToken).where(ApiToken.name == "token-a-revogar")).scalar_one()
         # Deleta
         r = c.delete(f"/admin/tokens/{token.id}", cookies=_cookie(), follow_redirects=False)
     assert r.status_code == 200
-    with Session(app.state.recorder.engine) as s:
+    with Session(engine) as s:
         assert s.get(ApiToken, token.id) is None
 
 
@@ -162,7 +173,10 @@ def test_shunt_token_on_v1_updates_last_used_at_and_does_not_crash(tmp_path):
     plaintext = "shunt-do-regresso"
     token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
     with client(tmp_path) as c:
-        with Session(app.state.recorder.engine) as s:
+        engine = app.state.recorder.engine
+        # O cache de validacao e novo por teste (fixture do conftest), entao
+        # o token abaixo cai no banco da primeira vez.
+        with Session(engine) as s:
             s.add(ApiToken(name="regresso", token_hash=token_hash))
             s.commit()
         r = c.post(
@@ -170,9 +184,12 @@ def test_shunt_token_on_v1_updates_last_used_at_and_does_not_crash(tmp_path):
             json={"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "oi"}]},
             headers={"x-shunt-token": plaintext},
         )
-        with Session(app.state.recorder.engine) as s:
-            row = s.execute(select(ApiToken).where(ApiToken.name == "regresso")).scalar_one()
+    # O toque de `last_used_at` e gravado pelo WORKER do recorder (Task 1.4):
+    # conferir dentro do `with` veria a fila ainda cheia. O `aclose` do lifespan
+    # (saida do `with`, no loop do portal) drena a fila, entao a leitura e depois.
     assert r.status_code == 400, f"token valido nao pode virar {r.status_code}"
+    with Session(engine) as s:
+        row = s.execute(select(ApiToken).where(ApiToken.name == "regresso")).scalar_one()
     assert row.last_used_at is not None, "o uso do token nao ficou registrado"
 
 

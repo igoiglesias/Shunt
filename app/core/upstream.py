@@ -7,7 +7,7 @@ from typing import Self
 import httpx
 
 from app.config.config import TIMEOUT_CONNECT, TIMEOUT_POOL, TIMEOUT_READ, TIMEOUT_WRITE
-from app.config.settings import Settings
+from app.config.settings import ProviderConfig, Settings
 
 TIMEOUT = httpx.Timeout(
     connect=TIMEOUT_CONNECT, read=TIMEOUT_READ, write=TIMEOUT_WRITE, pool=TIMEOUT_POOL
@@ -60,12 +60,33 @@ class _Gate:
 
     def give_back(self) -> None:
         # Toda espera na fila esta pendente: so esta funcao conclui uma (e a
-        # tira da fila), e `abandon` tira da fila quem desistiu.
-        if self._waiters:
+        # tira da fila), e `abandon` tira da fila quem desistiu. O lugar so
+        # passa direto a quem espera quando cabe no limite ATUAL: depois de um
+        # `resize` para baixo `in_use` pode estar acima do limite, e entregar
+        # o lugar manteria o excesso para sempre. Nesse caso ele some ate a
+        # contagem voltar ao limite.
+        if self._waiters and self.in_use <= self.limit:
             # O lugar passa direto para quem esperava: `in_use` nao muda.
             self._waiters.popleft().set_result(None)
             return
         self.in_use -= 1
+
+    def resize(self, limit: int) -> None:
+        """Limite novo, no lugar. Subiu: acorda quem espera ate encher a
+        capacidade nova. Desceu: quem esta em voo continua, e `give_back`
+        segura o handoff ate a contagem caber."""
+        self.limit = limit
+        while self._waiters and self.in_use < self.limit:
+            self.in_use += 1
+            self._waiters.popleft().set_result(None)
+
+    def release_all(self) -> None:
+        """Gate que deixou de existir (limite ou provedor removido): toda
+        espera vira um lugar agora. `in_use` sobe junto para o `give_back`
+        de cada um devolver simetricamente; ninguem mais le este gate."""
+        while self._waiters:
+            self.in_use += 1
+            self._waiters.popleft().set_result(None)
 
 
 class Slot:
@@ -136,15 +157,36 @@ class SlotRequest:
         self.cancel()
 
 
+class _Held:
+    """Um cliente httpx e quantos candidatos o usam agora.
+
+    `retired`: saiu do dicionario ativo num `update` (base_url mudou ou o
+    provedor saiu) e fecha quando o ultimo uso termina -- nunca embaixo de um
+    stream que ainda le por ele.
+    """
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str) -> None:
+        self.client = client
+        # O base_url com que ESTE cliente foi criado -- nao o do `Settings`
+        # de quando `update` rodou. Dois `update()` concorrentes cada um
+        # captura o `Settings` "antigo" no seu proprio inicio; com pools
+        # compartilhados, esse "antigo" pode ja estar defasado quando a
+        # reconciliacao roda (ver `_reconcile_clients`). Comparar contra o
+        # base_url gravado no proprio Held e o unico jeito de decidir certo
+        # sem depender de quem correu primeiro.
+        self.base_url = base_url
+        self.uses = 0
+        self.retired = False
+
+
 class UpstreamPool:
     """Clientes httpx e slots de concorrencia, por provedor.
 
-    Os slots vivem no pool, e `apply_settings` troca o pool inteiro a cada
-    mudanca de configuracao: o limite novo vale na hora. Transiente aceito: uma
-    requisicao em voo no pool antigo continua segurando o slot ANTIGO, entao
-    por alguns instantes o provedor pode receber o limite novo mais o que ja
-    estava em voo. O limite tambem e por processo: com varios workers do
-    uvicorn, cada um conta os seus.
+    O pool nunca e recriado: `update` reconcilia os gates e os clientes no
+    lugar a cada edicao de configuracao, preservando `in_use` e as esperas em
+    fila (ver `update`/`_reconcile_gates`/`_reconcile_clients`), e aposentando
+    clientes cujo `base_url` mudou ou cujo provedor saiu do catalogo. O limite
+    e por processo: com varios workers do uvicorn, cada um conta os seus.
     """
 
     def __init__(
@@ -152,7 +194,8 @@ class UpstreamPool:
     ) -> None:
         self._settings = settings
         self._transport = transport
-        self._clients: dict[str, httpx.AsyncClient] = {}
+        self._clients: dict[str, _Held] = {}
+        self._retired: list[_Held] = []
         self._closed = False
         self._gates: dict[str, _Gate] = {
             name: _Gate(config.max_concurrency)
@@ -160,34 +203,119 @@ class UpstreamPool:
             if config.max_concurrency is not None
         }
 
+    async def update(self, settings: Settings) -> None:
+        """Reconcilia o pool com um catalogo novo, sem trocar de identidade.
+
+        Chamado por `apply_settings` a cada edicao (e pelo vigia de versao) --
+        de dois lugares do mesmo worker, entao dois `update()` podem correr
+        concorrentes no mesmo pool. Recriar o pool cortava streams em voo e
+        zerava `in_use`.
+        """
+        self._settings = settings
+        self._reconcile_gates(settings)
+        await self._reconcile_clients(settings)
+
+    async def _reconcile_clients(self, new: Settings) -> None:
+        """Aposenta clientes cujo provedor saiu ou cujo `base_url` mudou.
+
+        Duas fases, sem nenhum `await` na primeira: com dois `update()`
+        concorrentes, cada um so cede o loop dentro do `aclose` (fase 2) --
+        nunca no meio de decidir/mutar `_clients` (fase 1). Assim a fase 1 de
+        uma chamada roda do inicio ao fim sem outra intercalar no meio dela.
+
+        A decisao compara contra `held.base_url` (gravado no proprio Held
+        quando foi criado), nao contra um `Settings` "antigo" capturado no
+        inicio deste `update()`: esse "antigo" e uma leitura de um atributo
+        compartilhado (`self._settings`) e pode ja estar defasado se outro
+        `update()` correu por cima antes deste comecar.
+        """
+        to_close: list[_Held] = []
+        for name, held in list(self._clients.items()):
+            after = new.providers.get(name)
+            if after is not None and held.base_url == after.base_url:
+                continue
+            del self._clients[name]
+            held.retired = True
+            if held.uses == 0:
+                to_close.append(held)
+            else:
+                self._retired.append(held)
+        for held in to_close:
+            await held.client.aclose()
+
+    def _reconcile_gates(self, settings: Settings) -> None:
+        for name, config in settings.providers.items():
+            gate = self._gates.get(name)
+            if config.max_concurrency is None:
+                if gate is not None:
+                    self._gates.pop(name).release_all()
+            elif gate is None:
+                self._gates[name] = _Gate(config.max_concurrency)
+            elif gate.limit != config.max_concurrency:
+                gate.resize(config.max_concurrency)
+        for name in [name for name in self._gates if name not in settings.providers]:
+            self._gates.pop(name).release_all()
+
     def get(self, provider: str) -> httpx.AsyncClient:
+        """O cliente compartilhado do provedor, SEM contagem de uso: quem
+        chama `get()` pode ver o cliente fechar num `update` que troque o
+        `base_url`. O caminho de requisicao usa `client()`; `get()` fica
+        para os testes."""
+        return self._held(provider).client
+
+    def _held(self, provider: str) -> _Held:
         if provider not in self._clients:
-            self._clients[provider] = self._new_client(provider)
+            base_url = self._settings.providers[provider].base_url
+            self._clients[provider] = _Held(self._new_client(base_url), base_url)
         return self._clients[provider]
 
-    def _new_client(self, provider: str) -> httpx.AsyncClient:
-        config = self._settings.providers[provider]
-        return httpx.AsyncClient(
-            base_url=config.base_url, timeout=TIMEOUT, transport=self._transport
-        )
+    def _new_client(self, base_url: str) -> httpx.AsyncClient:
+        return httpx.AsyncClient(base_url=base_url, timeout=TIMEOUT, transport=self._transport)
 
     @asynccontextmanager
-    async def client(self, provider: str) -> AsyncIterator[httpx.AsyncClient]:
-        """O cliente do provedor pelo tempo de um candidato.
+    async def client(
+        self, provider: str, config: ProviderConfig
+    ) -> AsyncIterator[httpx.AsyncClient]:
+        """O cliente do provedor pelo tempo de um candidato, com uso contado.
 
-        Com o pool aberto e o cliente compartilhado de sempre. Com o pool ja
-        fechado -- um `apply_settings` trocou o pool enquanto este pedido ainda
-        esperava um slot nele -- e um cliente so deste uso, fechado na saida:
-        `get()` o criaria dentro de um pool que ninguem mais vai fechar.
+        `config` e o `ProviderConfig` do snapshot de `Settings` do PEDIDO --
+        o mesmo de onde saem a resolucao e a chave dos cabecalhos. O
+        catalogo vivo do pool pode ter mudado desde o `resolve` (fallback,
+        backoff, espera do ultimo recurso). O revisor mediu dois defeitos de
+        ler so o catalogo vivo aqui: provedor removido virava `KeyError` (o
+        `release_all` entrega o lugar e o pedido quebrava em seguida), e um
+        `base_url` trocado mandava a chave ANTIGA do snapshot ao host NOVO.
+
+        Snapshot igual ao vivo: o cliente compartilhado; se um `update` o
+        aposentar no meio do uso, ele so fecha quando este uso (e os outros
+        em voo) terminarem. Provedor fora do catalogo vivo, `base_url`
+        diferente do vivo, ou pool ja fechado (o shutdown chegou com o pedido
+        ainda esperando um slot): um cliente so deste uso, no `base_url` do
+        snapshot, fechado na saida -- host e chave sempre do mesmo catalogo,
+        e nenhum cliente orfao num pool que ninguem mais vai fechar.
         """
-        if not self._closed:
-            yield self.get(provider)
+        live = self._settings.providers.get(provider)
+        if self._closed or live is None or live.base_url != config.base_url:
+            own = self._new_client(config.base_url)
+            try:
+                yield own
+            finally:
+                await own.aclose()
             return
-        own = self._new_client(provider)
+        held = self._held(provider)
+        held.uses += 1
         try:
-            yield own
+            yield held.client
         finally:
-            await own.aclose()
+            held.uses -= 1
+            if held.retired and held.uses == 0:
+                await self._close_retired(held)
+
+    async def _close_retired(self, held: _Held) -> None:
+        if held in self._retired:
+            self._retired.remove(held)
+        if not held.client.is_closed:
+            await held.client.aclose()
 
     def limit(self, provider: str) -> int | None:
         gate = self._gates.get(provider)
@@ -215,6 +343,7 @@ class UpstreamPool:
 
     async def aclose(self) -> None:
         self._closed = True
-        for client in self._clients.values():
-            await client.aclose()
+        for held in (*self._clients.values(), *self._retired):
+            await held.client.aclose()
         self._clients.clear()
+        self._retired.clear()

@@ -195,8 +195,10 @@ chain. Streaming follows the same path, one SSE event at a time.
 
 The catalogue lives in the database: four tables for providers, models, routes
 and the candidates of each route. You edit it on the **Configuração** screen
-(`/admin/config`), and every change applies to the next request, with no
-restart.
+(`/admin/config`), with no restart. The worker that served your edit applies it
+on the next request. With several workers (`make prod`), the others pick it up
+within `SHUNT_CONFIG_POLL_SECONDS` (10 s by default). Requests already in flight
+finish on the catalogue they started with.
 
 `app/config/seed.py` holds the catalogue Shunt starts from. At boot, when any
 of providers, models or routes is empty, Shunt inserts the parts of that
@@ -357,6 +359,7 @@ Every number above is an environment variable with that default:
 | `SHUNT_FIRST_EVENT_DEADLINE` | 20 | seconds a stream may take to send its first real event |
 | `SHUNT_TOTAL_DEADLINE` | 120 | seconds for the whole chain of a request that does not stream |
 | `SHUNT_TIMEOUT_CONNECT` / `_READ` / `_WRITE` / `_POOL` | 10 / 60 / 30 / 10 | the HTTP client, in seconds |
+| `SHUNT_CONFIG_POLL_SECONDS` | 10 | seconds between checks of `config_versions`; an admin edit reaches every worker within one interval |
 
 The remaining `SHUNT_*` knobs (queue sizes, panel limits, cookie lifetime) are
 listed with their defaults in `app/config/config.py`.
@@ -678,7 +681,7 @@ make type    # mypy
 make check   # lint + type + suite with coverage
 make e2e     # the app end to end against a scripted provider
 make browser # the panel in a headless browser
-make prod    # no reload, one worker per core, access log off
+make prod    # no reload, one worker per core, access log off, shutdown capped at 5 s
 ```
 
 For a configured model, Shunt sends the provider key stored in the database.

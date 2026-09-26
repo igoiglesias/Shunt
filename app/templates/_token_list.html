@@ -2,7 +2,7 @@
 <div class="empty-state">Nenhum token emitido.</div>
 {% else %}
 <div class="table-container">
-<table>
+<table class="token-table">
   <thead>
     <tr><th>Nome</th><th>Prefixo</th><th>Criado</th><th>Expira</th><th>Último uso</th><th class="actions"></th></tr>
   </thead>
@@ -14,7 +14,7 @@
       <td class="mono">{{ t.created_at.strftime("%Y-%m-%d") if t.created_at else "—" }}</td>
       <td class="mono">{{ t.expires_at.strftime("%Y-%m-%d") if t.expires_at else "nunca" }}</td>
       <td class="mono">{{ t.last_used_at.strftime("%Y-%m-%d %H:%M") if t.last_used_at else "—" }}</td>
-      <td class="actions">
+      <td class="actions" style="justify-content: flex-end;">
         <button class="btn btn-sm btn-danger" hx-delete="/admin/tokens/{{ t.id }}" hx-target="#token-list" hx-swap="outerHTML"
           hx-confirm="Revogar {{ t.name }}?">Revogar</button>
       </td>
