@@ -105,6 +105,11 @@ def test_an_openai_client_gets_an_openai_shaped_error_not_an_anthropic_one():
     respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
     )
+    # O `last_resort` de `828591e` tenta o transparente no host oficial quando
+    # a rota esgota: sem mock dele a chamada saida para a internet.
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
+    )
     with client() as c:
         response = c.post(
             "/v1/chat/completions",

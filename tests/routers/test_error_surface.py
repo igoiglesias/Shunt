@@ -12,6 +12,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from app.core import dispatcher
 from app.core.upstream import UpstreamPool
 from app.main import app
 from tests.core.test_dispatcher import SETTINGS
@@ -75,8 +76,14 @@ def test_a_malformed_body_is_refused_as_json_not_as_text(route, payload, dialect
         (529, "overloaded_error"),
     ],
 )
-def test_an_upstream_status_becomes_the_matching_anthropic_error_type(status, expected):
-    respx.post("https://api.test/v1/chat/completions").mock(
+def test_an_upstream_status_becomes_the_matching_anthropic_error_type(monkeypatch, status, expected):
+    # O `last_resort` de `828591e` tenta o transparente no host oficial quando
+    # a rota esgota: sem mock dele a chamada saida para a internet. A mesma
+    # resposta mantem o 502 de "nada respondeu" com o status do upstream.
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    error = httpx.Response(status, json={"error": {"message": "nao"}})
+    respx.post("https://api.test/v1/chat/completions").mock(return_value=error)
+    respx.post("https://api.anthropic.com/v1/messages").mock(
         return_value=httpx.Response(status, json={"error": {"message": "nao"}})
     )
     with client() as c:
@@ -100,7 +107,12 @@ def test_a_stream_that_fails_upstream_stays_an_event_stream():
     O cabecalho ja foi para a rede quando a falha aparece; o cliente esta com um
     parser de SSE montado, e um corpo JSON ali e lixo para ele.
     """
+    # O transparente do host oficial (bypass de `828591e`) tambem falha, e a
+    # linha de erro do stream carrega o rastro inteiro da cadeia.
     respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
+    )
+    respx.post("https://api.anthropic.com/v1/messages").mock(
         return_value=httpx.Response(400, json={"error": {"message": "nao deu"}})
     )
     with (

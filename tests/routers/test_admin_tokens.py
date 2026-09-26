@@ -3,6 +3,8 @@
 import hashlib
 from pathlib import Path
 
+import httpx
+import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -162,6 +164,7 @@ def test_require_admin(tmp_path):
         assert r.status_code in (302, 303, 401)
 
 
+@respx.mock
 def test_shunt_token_on_v1_updates_last_used_at_and_does_not_crash(tmp_path):
     """Um token Shunt valido em `/v1/messages` grava `last_used_at` e nao estoura.
 
@@ -169,7 +172,14 @@ def test_shunt_token_on_v1_updates_last_used_at_and_does_not_crash(tmp_path):
     `commit` do `last_used_at` levanta `InvalidRequestError` e virava 500 antes
     de o dispatcher ver o corpo. O caminho correto grava e segue para a
     resolucao, que aqui e 400 (catalogo vazio), nunca 500.
+
+    O `last_resort` de `828591e` aponta o transparente para o host oficial, e
+    sem mock dele a requisicao saida para a internet (medido: um 401 vivo da
+    Anthropic voltava no lugar do 400 do catalogo vazio).
     """
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "nao"}})
+    )
     plaintext = "shunt-do-regresso"
     token_hash = hashlib.sha256(plaintext.encode()).hexdigest()
     with client(tmp_path) as c:

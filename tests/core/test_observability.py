@@ -146,7 +146,12 @@ async def test_a_served_request_logs_the_candidate_and_the_tokens(caplog):
 @respx.mock
 async def test_a_failed_chain_still_logs_with_no_candidate(caplog):
     """A requisicao que ninguem serviu e justamente a que se quer no log."""
+    # O `last_resort` de `828591e` tenta o transparente no host oficial quando
+    # a rota esgota; sem mock dele a chamada saida para a internet.
     respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(402, json={"error": {"message": "sem credito"}})
+    )
+    respx.post("https://api.anthropic.com/v1/messages").mock(
         return_value=httpx.Response(402, json={"error": {"message": "sem credito"}})
     )
     pool = UpstreamPool(SETTINGS)
