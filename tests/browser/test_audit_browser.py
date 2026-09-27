@@ -882,7 +882,10 @@ def test_an_analysis_error_is_shown_as_text_and_not_as_an_empty_panel(browser, s
         status=409,
     )
     page.click("#analyse")
-    page.wait_for_selector("#detail .empty")
+    # `:not(.loading)`: o aviso "Analisando o periodo" tambem e `.empty`, entao
+    # esperar so `.empty` casa o carregamento e le o texto antes do 409 chegar.
+    # Medido: sob `-n auto` o fetch voltou depois da leitura e o teste falhou.
+    page.wait_for_selector("#detail .empty:not(.loading)")
     texto = page.inner_text("#detail")
     virou_analise = page.evaluate("() => Boolean(document.getElementById('analysis-text'))")
     page.close()

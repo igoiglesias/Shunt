@@ -84,7 +84,16 @@ def without_shunt_token(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _recorder_not_leaked():
+    from app.core import observability
+
+    # O `lifespan` tambem troca o gravador GLOBAL de `observability`
+    # (`set_recorder`) e ninguem o devolve. Medido com `pytest -n auto --dist
+    # load`: um worker que subiu o app com banco (`tests/config/test_boot.py`)
+    # deixou um `Recorder` ligado, e `tests/stats/test_extraction.py`, que
+    # confere o no-op padrao, falhou. Em serie passava so pela ordem dos arquivos.
+    global_recorder = observability._recorder
     yield
+    observability.set_recorder(global_recorder)
     # Testes que injetam um `Recorder` com engine fazem isso no `app.state`;
     # sem limpeza o proximo `TestClient` reaproveita o objeto (worker encerrado,
     # engine antiga) e o teste que exige o comportamento "sem banco" (503)
