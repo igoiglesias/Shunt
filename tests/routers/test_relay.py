@@ -3,7 +3,14 @@
 Cada RED nasce falhando com 404/405 (o que Starlette responde hoje).
 Um por vez: escreve o teste, cola a falha, implementa, passa ao proximo.
 """
+
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -593,3 +600,118 @@ def test_relay_recorder_timeout_504():
     rec = relay_records[0]
     assert rec["status"] == 504
     assert rec["error_type"] == "upstream_timeout"
+
+
+# ---------------------------------------------------------------------------
+# T6 (caracterizacao): o fechamento do corpo FECHA o upstream
+# ---------------------------------------------------------------------------
+#
+# Caracteriza o `finally` do gerador `body()` em app/routers/relay.py:222-230:
+# terminado normalmente, fechado por `aclose()` ou cancelado no meio do
+# stream, a resposta upstream (e o stack que segura o cliente proprio)
+# fecham. Nasce VERDE de proposito -- o comportamento ja existe (T5); a
+# ausencia de RED e mandato do plano (decisao 6). Sem requisicao HTTP: o
+# transporte e um `AsyncByteStream` local.
+
+
+class _ClosingAsyncByteStream(httpx.AsyncByteStream):
+    """Stream async minimalista com flag `closed`.
+
+    Implementa o protocolo que o httpx espera dele -- `__aiter__` (gerador
+    acima, o que o `aiter_raw()` itera) e `aclose` (o que o
+    `response.aclose()` delega, `_models.py:1065-1076`). A porta no meio do
+    corpo trava a iteracao para o teste poder cancelar a task de fato NO
+    MEIO do stream, e nao depois dele terminar."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.first_chunk_sent = asyncio.Event()
+        self._gate = asyncio.Event()
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"chunk-1"
+        self.first_chunk_sent.set()
+        await self._gate.wait()
+        yield b"chunk-2"
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+@asynccontextmanager
+async def _own_client() -> AsyncIterator[httpx.AsyncClient]:
+    """Replica o caminho de cliente proprio do `UpstreamPool.client`
+    (app/core/upstream.py:296-301): um cliente por uso, fechado na saida. O
+    relay o entra num `AsyncExitStack`, e esse stack e a outra metade do que
+    o `finally` do corpo tem de fechar."""
+    client = httpx.AsyncClient()
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+async def _relay_body(
+    response: httpx.Response, stack: contextlib.AsyncExitStack
+) -> AsyncIterator[bytes]:
+    """Copia do gerador `body()` de app/routers/relay.py:222-230: sobe os
+    chunks crus da resposta upstream e o `finally` fecha a resposta E o
+    stack (na mesma ordem do producao)."""
+    try:
+        async for chunk in response.aiter_raw():
+            yield chunk
+    finally:
+        try:
+            await response.aclose()
+        finally:
+            await stack.aclose()
+
+
+async def _open_relay_response(
+    stream: _ClosingAsyncByteStream,
+) -> tuple[AsyncIterator[bytes], httpx.Response, contextlib.AsyncExitStack]:
+    """Monta o que app/routers/relay.py:170-237 monta: o stack entra no
+    cliente proprio, e uma `httpx.Response` REAL de status 200 carrega o
+    stream (o `response.aclose()` delega ao `stream.aclose()`)."""
+    stack = contextlib.AsyncExitStack()
+    await stack.enter_async_context(_own_client())
+    response = httpx.Response(status_code=200, stream=stream)
+    return _relay_body(response, stack), response, stack
+
+
+async def test_t6_consume_a_chunk_then_aclose_closes_the_upstream():
+    """Consumir um chunk do gerador do corpo e chamar `aclose()` nele fecha
+    o stream upstream: `closed is True` (e a resposta registra o close)."""
+    stream = _ClosingAsyncByteStream()
+    body_iterator, response, _ = await _open_relay_response(stream)
+
+    chunk = await body_iterator.__anext__()
+    assert chunk == b"chunk-1"
+    assert stream.closed is False
+    await body_iterator.aclose()
+
+    assert stream.closed is True
+    assert response.is_closed
+
+
+async def test_t6_cancelling_the_task_mid_stream_closes_the_upstream():
+    """Cancelar a task que consome o corpo no MEIO do stream: o
+    `CancelledError` sobe e, apos aguardar a task, o `finally` ja fechou o
+    stream upstream -- `closed is True`."""
+    stream = _ClosingAsyncByteStream()
+    body_iterator, response, _ = await _open_relay_response(stream)
+
+    async def consume() -> None:
+        while True:
+            await body_iterator.__anext__()
+
+    task = asyncio.create_task(consume())
+    # Espera o primeiro chunk sair: a task esta agora parada NA porta do
+    # stream, e nao apos o fim dele.
+    await stream.first_chunk_sent.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stream.closed is True
+    assert response.is_closed
