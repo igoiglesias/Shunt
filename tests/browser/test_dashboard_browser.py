@@ -140,6 +140,10 @@ def api_get(url: str) -> httpx.Response:
 
 def open_panel(browser, base, width, height, init_script=None):
     page = browser.new_page(viewport={"width": width, "height": height})
+    # Cinco segundos, e nao os trinta do Playwright: toda espera aqui e por uma
+    # condicao da tela, e uma condicao que nao chega em 5 s num servidor local e
+    # defeito -- esperar mais so atrasa o vermelho.
+    page.set_default_timeout(5_000)
     page.context.add_cookies(
         [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
     )
@@ -216,7 +220,7 @@ def test_a_request_served_right_now_lands_on_the_tape(browser, server):
     page, _ = open_panel(browser, server, 1440, 1000)
     before = page.locator("#tape li").count()
     assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
-    page.wait_for_function(f"document.querySelectorAll('#tape li').length > {before}", timeout=10_000)
+    page.wait_for_function(f"document.querySelectorAll('#tape li').length > {before}")
     first = page.locator("#tape li").first.inner_text()
     page.close()
     assert "models" in first
@@ -291,7 +295,7 @@ def test_a_single_hour_of_traffic_draws_bars_instead_of_a_flat_line(browser, ser
     """
     page, problems = open_panel(browser, server, 1400, 900)
     page.get_by_role("button", name="1h").click()
-    page.wait_for_function("document.querySelectorAll('#series rect').length > 0", timeout=10_000)
+    page.wait_for_function("document.querySelectorAll('#series rect').length > 0")
     bars = page.locator("#series rect").count()
     page.close()
     assert problems == []
@@ -319,13 +323,14 @@ def test_the_tape_fills_in_what_the_live_stream_could_not_see(browser, server):
     dele -- e sem duplicar o que o ao vivo ja colocou na tela.
     """
     page, problems = open_panel(browser, server, 1400, 900)
-    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0")
     ids = page.evaluate(
         "() => [...document.querySelectorAll('#tape li')].map(i => i.dataset.id)"
     )
-    # Uma atualizacao inteira do resumo nao pode repetir nenhuma linha.
+    # Uma atualizacao inteira do resumo nao pode repetir nenhuma linha. O
+    # `evaluate` devolve a promessa de `load()` e so volta depois dela: o resumo
+    # ja foi buscado e desenhado quando a fita e lida.
     page.evaluate("() => load()")
-    page.wait_for_timeout(600)
     again = page.evaluate(
         "() => [...document.querySelectorAll('#tape li')].map(i => i.dataset.id)"
     )
@@ -338,11 +343,17 @@ def test_the_tape_fills_in_what_the_live_stream_could_not_see(browser, server):
 
 def test_the_tape_keeps_the_newest_request_on_top(browser, server):
     page, _ = open_panel(browser, server, 1400, 900)
-    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0")
+    antes = page.evaluate("() => [...document.querySelectorAll('#tape li')].map(i => i.dataset.id)")
     assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
-    page.wait_for_timeout(800)
+    # A requisicao nova chega pelo ao vivo: espera a linha dela na fita, que e
+    # o que a atualizacao do resumo precisa reordenar.
+    page.wait_for_function(
+        "(antes) => [...document.querySelectorAll('#tape li')].some(i => !antes.includes(i.dataset.id))",
+        arg=antes,
+    )
+    # `load()` devolve promessa e o `evaluate` espera por ela.
     page.evaluate("() => load()")
-    page.wait_for_timeout(600)
     order = page.evaluate(
         """() => [...document.querySelectorAll('#tape li')]
             .map(i => Date.parse(i.dataset.when) || 0)"""
@@ -354,17 +365,17 @@ def test_the_tape_keeps_the_newest_request_on_top(browser, server):
 def test_the_tape_can_show_only_the_failures(browser, server):
     """Com o painel cheio, achar a requisicao que falhou e a pergunta urgente."""
     page, problems = open_panel(browser, server, 1400, 900)
-    page.wait_for_function("document.querySelectorAll('#tape li').length > 0", timeout=10_000)
+    page.wait_for_function("document.querySelectorAll('#tape li').length > 0")
     total = page.locator("#tape li:visible").count()
     page.get_by_role("button", name="só erros").click()
-    page.wait_for_timeout(300)
+    page.wait_for_function("() => document.getElementById('only-errors').getAttribute('aria-pressed') === 'true'")
     filtered = page.locator("#tape li:visible").count()
     kinds = page.evaluate(
         """() => [...document.querySelectorAll('#tape li')]
             .filter(i => !i.hidden).map(i => i.className.includes('bad'))"""
     )
     page.get_by_role("button", name="só erros").click()
-    page.wait_for_timeout(300)
+    page.wait_for_function("() => document.getElementById('only-errors').getAttribute('aria-pressed') === 'false'")
     back = page.locator("#tape li:visible").count()
     page.close()
     assert problems == []
@@ -385,13 +396,16 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
         assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page, problems = open_panel(browser, server, 1400, 900)
     # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
-    # vez de esperar por ela, depois de dar ao worker o tempo de um lote.
-    page.wait_for_timeout(1500)
+    # vez de esperar por ela, e repete o pedido ate o lote do worker aparecer no
+    # resumo -- a condicao e o banco ter as linhas, e nao um tempo fixo.
     # Janela de duas horas: o resumo e cacheado por cinco segundos POR JANELA, e
     # a de 24 h acabou de ser respondida zerada pelo teste que limpou o banco.
-    page.evaluate("() => { hours = 2; }")
-    page.evaluate("() => load()")
-    page.wait_for_function("() => snapshot.totals.requests > 0", timeout=10_000)
+    # Os 10 s cobrem uma resposta zerada que ficou no cache de 5 s dessa janela.
+    page.wait_for_function(
+        "async () => { hours = 2; await load(); return snapshot.totals.requests > 0; }",
+        polling=250,
+        timeout=10_000,
+    )
     before = page.evaluate("() => snapshot.totals.requests")
 
     # Responde como um worker que nao abriu o banco: zerado, mas configurado.
@@ -444,7 +458,9 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
         ),
     )
     page.evaluate("() => load()")
-    page.wait_for_timeout(500)
+    # O cabecalho em "reconectando" prova que o resumo zerado foi lido; so
+    # depois disso faz sentido afirmar que ele nao apagou os dados.
+    page.wait_for_function("() => document.getElementById('state').textContent.includes('reconectando')")
     after = page.evaluate("() => snapshot.totals.requests")
     state = page.inner_text("#state")
     rows = page.locator("#models tbody tr").count()
@@ -660,8 +676,9 @@ def test_an_empty_window_offers_the_way_out(browser, server):
 
 def test_the_way_out_of_an_empty_window_is_the_24h_button(browser, server):
     page, problems = open_panel(browser, server, 1400, 900)
-    page.get_by_role("button", name="5min").click()
-    page.wait_for_timeout(400)
+    # A janela de 5 min tem de ter respondido antes da saida ser usada.
+    with page.expect_response(lambda r: r.url.endswith("/api/stats?window=0.0833")):
+        page.get_by_role("button", name="5min").click()
     page.evaluate("() => { document.getElementById('widen').click(); }")
     page.wait_for_function(
         """() => [...document.querySelectorAll('#windows button')]
@@ -681,7 +698,8 @@ def pressed_window(page):
 def test_the_chosen_window_survives_a_trip_to_another_screen(browser, server):
     page, problems = open_panel(browser, server, 1400, 900)
     page.get_by_role("button", name="1h").click()
-    page.wait_for_timeout(300)
+    # O que atravessa a ida a outra tela e o valor guardado: espera por ele.
+    page.wait_for_function("() => localStorage.getItem('shunt.painel.hours') === '1'")
     page.goto(f"{server}/admin/requests", wait_until="networkidle")
     with page.expect_request(lambda r: "/api/stats?" in r.url) as primeira:
         page.goto(f"{server}/admin/painel")
@@ -729,8 +747,10 @@ def test_the_panel_still_opens_on_24h_when_storage_is_blocked(browser, server):
     page.wait_for_selector("#state div")
     url = primeira.value.url
     recarregado = pressed_window(page)
-    page.get_by_role("button", name="1h").click()
-    page.wait_for_timeout(300)
+    # O pedido da janela de 1 h so sai depois do `localStorage.setItem`, que aqui
+    # levanta: ele saindo prova que o clique passou pelo armazenamento bloqueado.
+    with page.expect_request(lambda r: r.url.endswith("/api/stats?window=1")):
+        page.get_by_role("button", name="1h").click()
     pressed = pressed_window(page)
     page.close()
     assert inicial == ["24h"]
@@ -751,12 +771,12 @@ def test_clearing_the_history_takes_two_clicks_and_then_empties_the_panel(browse
 
     button = page.locator("#clear")
     button.click()
-    page.wait_for_timeout(200)
+    page.wait_for_selector('#clear[data-armed="true"]')
     armed = button.inner_text()
     assert str(before) in armed, f"o botao armado nao disse quanto apaga: {armed!r}"
 
     button.click()
-    page.wait_for_function("() => snapshot.totals.requests === 0", timeout=10_000)
+    page.wait_for_function("() => snapshot.totals.requests === 0")
     said = page.locator("#clear-said").inner_text()
     tape = page.locator("#tape li").count()
     page.close()
@@ -770,8 +790,8 @@ def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
     button = page.locator("#clear")
     button.click()
     assert button.get_attribute("data-armed") == "true"
+    # `disarmClear` e sincrono: quando o `evaluate` volta, o botao ja mudou.
     page.evaluate("() => disarmClear()")
-    page.wait_for_timeout(100)
     state = button.get_attribute("data-armed")
     label = button.inner_text()
     page.close()

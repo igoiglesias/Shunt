@@ -17,9 +17,25 @@ from tests.browser.ui_audit import auditar, descrever
 
 LARGURAS = [(1500, 1000), (1180, 900), (390, 844)]
 
+# A varredura mede a tela pronta. Pronta e: as fontes carregadas (a troca de
+# fonte muda a largura de todo texto) e o que a tela busca sozinha depois da
+# primeira linha ja desenhado -- o resumo no painel; a busca, os seletores e a
+# lista de modelos da analise na auditoria.
+PRONTA = {
+    "/admin/painel": "() => document.fonts.status === 'loaded' && snapshot !== null",
+    "/admin/requests": """() => document.fonts.status === 'loaded' && !loading
+        && document.getElementById('provider').options.length > 1
+        && document.getElementById('analysis-model').options.length > 0""",
+}
+
+# Condicao comum depois de um clique que troca o painel lateral: fontes
+# carregadas (o painel pode usar um peso que a tela ainda nao pediu).
+FONTES = "() => document.fonts.status === 'loaded'"
+
 
 def abrir(browser, base, caminho, largura, altura):  # noqa: F811
     page = browser.new_page(viewport={"width": largura, "height": altura})
+    page.set_default_timeout(5_000)
     # As telas exigem sessao admin: o cookie vem assinado com o segredo do servidor.
     page.context.add_cookies(
         [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
@@ -28,7 +44,7 @@ def abrir(browser, base, caminho, largura, altura):  # noqa: F811
     page.on("pageerror", lambda erro: problemas.append(str(erro)))
     page.goto(f"{base}{caminho}", wait_until="domcontentloaded")
     page.wait_for_selector("#state div, #rows tr")
-    page.wait_for_timeout(700)
+    page.wait_for_function(PRONTA[caminho])
     return page, problemas
 
 
@@ -51,7 +67,9 @@ def test_the_requests_screen_has_no_layout_or_contrast_defects(
     page, problemas = abrir(browser, server, "/admin/requests", largura, altura)
     if largura > 720:
         page.click("#rows tr:nth-child(2)")
-        page.wait_for_timeout(500)
+        # O detalhe chega por fetch: `#summary` so existe depois que ele desenhou.
+        page.wait_for_selector("#detail #summary")
+        page.wait_for_function(FONTES)
     achados = auditar(page)
     page.close()
     assert problemas == []
@@ -76,11 +94,11 @@ def test_the_analysis_panel_has_no_layout_or_contrast_defects(
     stub_analysis(page)
     page.click("#analyse")
     page.wait_for_selector("#analysis-text")
-    page.wait_for_timeout(300)
+    page.wait_for_function(FONTES)
     achados = auditar(page)
     page.click('.tabs button[data-tab="dossier"]')
     page.wait_for_selector("pre.raw")
-    page.wait_for_timeout(300)
+    page.wait_for_function(FONTES)
     achados += auditar(page)
     page.close()
     assert problemas == []

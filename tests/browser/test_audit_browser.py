@@ -156,6 +156,10 @@ def admin_page(browser, base, width, height):
     seu proprio teste, e passar por ela em cada teste so gastaria tempo.
     """
     page = browser.new_page(viewport={"width": width, "height": height})
+    # Cinco segundos, e nao os trinta do Playwright: toda espera aqui e por uma
+    # condicao da tela, e uma condicao que nao chega em 5 s num servidor local e
+    # defeito -- esperar mais so atrasa o vermelho.
+    page.set_default_timeout(5_000)
     page.context.add_cookies(
         [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
     )
@@ -166,6 +170,17 @@ def admin_page(browser, base, width, height):
         lambda message: problems.append(message.text) if message.type == "error" else None,
     )
     return page, problems
+
+
+def wait_search(page, condicao: str) -> None:
+    """Espera a busca que a `condicao` disparou terminar de desenhar.
+
+    A `condicao` e o que o clique muda na hora (a URL, por exemplo), e `loading`
+    e a trava da propria tela: ela so volta a `false` depois que `render`
+    desenhou as linhas e a contagem. As duas juntas dizem que a busca NOVA
+    terminou, e nao a anterior.
+    """
+    page.wait_for_function(f"() => ({condicao}) && !loading")
 
 
 def api_get(url: str) -> httpx.Response:
@@ -200,13 +215,29 @@ def test_login_leads_to_the_requested_page(browser, server):
     """
     alvo = f"{server}/admin/requests?provider=groq&has_tools=true"
     page = browser.new_page(viewport={"width": 1400, "height": 900})
+    page.set_default_timeout(5_000)
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
+    page.on(
+        "console",
+        lambda message: problems.append(message.text) if message.type == "error" else None,
+    )
     page.goto(alvo, wait_until="networkidle")
     assert "/admin/login" in page.url
     page.fill('input[name="username"]', ADMIN_USER)
     page.fill('input[name="password"]', ADMIN_PASSWORD)
-    page.click('button[type="submit"]')
+    # Este teste ja estourou 30 s uma vez, com a maquina carregada, sem causa
+    # achada. A resposta do POST fica registrada para que a proxima falha diga
+    # o que aconteceu: login recusado, redirect errado ou servidor mudo.
+    with page.expect_response(
+        lambda r: r.url.endswith("/admin/login") and r.request.method == "POST"
+    ) as login:
+        page.click('button[type="submit"]')
+    resposta = login.value
+    assert resposta.status == 303, (
+        f"o POST do login respondeu {resposta.status} "
+        f"(location={resposta.headers.get('location')!r}); pagina em {page.url}"
+    )
     page.wait_for_url(alvo)
     page.wait_for_selector("#rows tr", timeout=10000)
     page.close()
@@ -230,7 +261,7 @@ def test_a_chip_narrows_the_list_and_the_count(browser, server):
 def test_the_search_state_lives_in_the_url(browser, server):
     page, _ = open_audit(browser, server)
     page.get_by_role("button", name="com fallback").click()
-    page.wait_for_timeout(500)
+    wait_search(page, "new URLSearchParams(location.search).get('fell_back') === 'true'")
     url = page.url
     ids = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
     page.close()
@@ -287,8 +318,7 @@ def test_clicking_a_row_opens_the_whole_chain(browser, server):
 def test_the_order_can_be_changed_to_the_slowest_first(browser, server):
     page, problems = open_audit(browser, server)
     page.get_by_role("button", name="Duração").click()
-    page.wait_for_function("() => new URLSearchParams(location.search).get('order_by') === 'duration'")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('order_by') === 'duration'")
     # Pela CLASSE da célula, e não pelo índice: uma coluna nova na tabela
     # deslocava o índice e o teste passava a ler outra coluna.
     durations = page.evaluate(
@@ -316,7 +346,7 @@ def test_loading_more_appends_without_repeating(browser, server):
 def test_the_export_carries_the_same_filters(browser, server):
     page, _ = open_audit(browser, server)
     page.get_by_role("button", name="falhas").click()
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('status_min') === '400'")
     query = page.get_attribute("#export", "data-query")
     page.close()
     assert "status_min=400" in query
@@ -340,7 +370,9 @@ def test_clearing_the_filters_brings_everything_back(browser, server):
     page, problems = open_audit(browser, server)
     total = page.inner_text("#count")
     page.get_by_role("button", name="falhas").click()
-    page.wait_for_timeout(400)
+    # A busca do chip tem de terminar: com ela em voo, a trava `loading` da tela
+    # descarta a busca de "Limpar filtros" e a contagem nunca volta.
+    wait_search(page, "new URLSearchParams(location.search).get('status_min') === '400'")
     page.get_by_role("button", name="Limpar filtros").click()
     page.wait_for_function(f"() => document.getElementById('count').textContent === {total!r}")
     pressed = page.evaluate(
@@ -444,8 +476,7 @@ def test_choosing_a_provider_filters_and_lands_in_the_url(browser, server):
     page, problems = open_audit(browser, server)
     page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
     page.select_option("#provider", "groq")
-    page.wait_for_function("() => new URLSearchParams(location.search).get('provider') === 'groq'")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('provider') === 'groq'")
     served = page.evaluate(
         "() => [...document.querySelectorAll('#rows tr')].map(r => r.children[3].textContent)"
     )
@@ -570,8 +601,7 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
     page.fill("#since", "2026-09-19T00:00")
     page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
     page.fill("#until", "2026-09-19T00:05")
-    page.wait_for_function("() => new URLSearchParams(location.search).has('until')")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).has('until')")
     count = page.inner_text("#count")
     page.close()
     assert problems == []
@@ -969,7 +999,17 @@ def test_on_a_phone_opening_the_panel_scrolls_to_it(browser, server):
     stub_analysis(page)
     page.click("#analyse")
     page.wait_for_selector("#analysis-text")
-    page.wait_for_timeout(800)
+    # A rolagem e `smooth`: mede so depois que ela parou, isto e, quando duas
+    # leituras seguidas de `scrollY` dao o mesmo valor e a pagina ja saiu do topo.
+    page.wait_for_function(
+        """() => {
+            const y = window.scrollY;
+            const parado = window.__ultimoScrollY === y;
+            window.__ultimoScrollY = y;
+            return parado && y > 0;
+        }""",
+        polling=100,
+    )
     caixa = page.evaluate(
         """() => {
             const c = document.getElementById('detail').getBoundingClientRect();
@@ -994,7 +1034,7 @@ def test_the_project_selector_narrows_the_list(browser, server):
         "() => [...document.getElementById('project').options].map((o) => [o.value, o.text])"
     )
     page.select_option("#project", "/home/iglesias/Projetos/agenda")
-    page.wait_for_timeout(700)
+    wait_search(page, "new URLSearchParams(location.search).has('project')")
     medido = page.evaluate(
         """() => ({
             linhas: document.querySelectorAll('#rows tr').length,
