@@ -57,6 +57,13 @@ async def relay_endpoint(request: Request) -> Response:
     if path in RESERVED_EXACT or path.startswith("/admin/"):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
+    # Um path decodificado com caractere nao imprimivel (ex.: null byte
+    # vindo de %00) nunca vira URL upstream valida: o httpx levanta
+    # InvalidURL ao montar o pedido. Sem rota declarada casar, a resposta
+    # volta a ser a do framework em base: 404 local, sem tocar no pool.
+    if any(not char.isprintable() for char in path):
+        return JSONResponse(status_code=404, content={"detail": "Not Found"})
+
     # Nenhum path e bloqueado a partir daqui: o catch-all relaya
     # tudo que nao e reservado, inclusive /api/oauth/usage.
 
