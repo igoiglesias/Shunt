@@ -22,6 +22,7 @@ from app.core.security import hash_password, issue_jwt
 from app.stats.models import Base, RequestBody, RequestEvent, User
 
 pytest.importorskip("playwright.sync_api")
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 # Segredo fixo so deste modulo: a auditoria exige sessao admin, e com o segredo
@@ -214,8 +215,10 @@ def test_login_leads_to_the_requested_page(browser, server):
     no painel e o link compartilhado perderia a busca.
     """
     alvo = f"{server}/admin/requests?provider=groq&has_tools=true"
+    # Sem o padrao de 5 s dos helpers: este teste ja estourou sob carga, e o
+    # runner de CI tem menos CPU. Ele fica com os 30 s do Playwright e, em troca,
+    # diz onde parou quando estoura.
     page = browser.new_page(viewport={"width": 1400, "height": 900})
-    page.set_default_timeout(5_000)
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
@@ -229,10 +232,13 @@ def test_login_leads_to_the_requested_page(browser, server):
     # Este teste ja estourou 30 s uma vez, com a maquina carregada, sem causa
     # achada. A resposta do POST fica registrada para que a proxima falha diga
     # o que aconteceu: login recusado, redirect errado ou servidor mudo.
-    with page.expect_response(
-        lambda r: r.url.endswith("/admin/login") and r.request.method == "POST"
-    ) as login:
-        page.click('button[type="submit"]')
+    try:
+        with page.expect_response(
+            lambda r: r.url.endswith("/admin/login") and r.request.method == "POST"
+        ) as login:
+            page.click('button[type="submit"]')
+    except PlaywrightTimeoutError as erro:
+        pytest.fail(f"o POST do login nao respondeu; pagina em {page.url}: {erro}")
     resposta = login.value
     assert resposta.status == 303, (
         f"o POST do login respondeu {resposta.status} "

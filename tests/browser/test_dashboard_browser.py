@@ -384,6 +384,21 @@ def test_the_tape_can_show_only_the_failures(browser, server):
     assert back == total, "o filtro nao soltou a lista"
 
 
+# Espera o resumo de 2 h com requisicoes. Cada volta do polling dispara um
+# `load()` se nenhum estiver em voo, e so o fim de um desses `load()` marca
+# `__comDados`: um resumo antigo, de outra janela, nao conta.
+RESUMO_COM_DADOS = """() => {
+    if (!window.__emVoo) {
+        window.__emVoo = true;
+        window.__cargas += 1;
+        load()
+            .then(() => { window.__comDados = hours === 2 && snapshot.totals.requests > 0; })
+            .finally(() => { window.__emVoo = false; });
+    }
+    return window.__comDados;
+}"""
+
+
 def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     """Medido em producao: um terco das cargas caia num worker sem banco.
 
@@ -395,18 +410,20 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     for _ in range(3):
         assert httpx.get(f"{server}/v1/models", headers=V1, timeout=10).status_code == 200
     page, problems = open_panel(browser, server, 1400, 900)
+    # Janela de duas horas: o resumo e cacheado por cinco segundos POR JANELA, e
+    # a de 24 h acabou de ser respondida zerada pelo teste que limpou o banco.
+    page.evaluate("() => { hours = 2; window.__cargas = 0; window.__comDados = false; }")
     # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
     # vez de esperar por ela, e repete o pedido ate o lote do worker aparecer no
     # resumo -- a condicao e o banco ter as linhas, e nao um tempo fixo.
-    # Janela de duas horas: o resumo e cacheado por cinco segundos POR JANELA, e
-    # a de 24 h acabou de ser respondida zerada pelo teste que limpou o banco.
+    # O predicado e SINCRONO de proposito: um predicado `async` devolve uma
+    # promessa, que e sempre verdadeira, e o Playwright para na primeira volta
+    # sem polling nem timeout. Aqui cada volta dispara um `load()` (um por vez) e
+    # so o resultado de um desses `load()` da janela de 2 h conta.
     # Os 10 s cobrem uma resposta zerada que ficou no cache de 5 s dessa janela.
-    page.wait_for_function(
-        "async () => { hours = 2; await load(); return snapshot.totals.requests > 0; }",
-        polling=250,
-        timeout=10_000,
-    )
+    page.wait_for_function(RESUMO_COM_DADOS, polling=250, timeout=10_000)
     before = page.evaluate("() => snapshot.totals.requests")
+    assert before > 0, "o resumo de 2 h nunca trouxe requisicoes"
 
     # Responde como um worker que nao abriu o banco: zerado, mas configurado.
     page.route(
