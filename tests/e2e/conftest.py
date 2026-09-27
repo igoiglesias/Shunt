@@ -15,10 +15,11 @@ def no_real_backoff(monkeypatch):
     """Zera o backoff entre tentativas para o e2e nao dormir o atraso real.
 
     O dispatcher importa `backoff` de `app.core.attempt` (`dispatcher.py:47`) e
-    chama `dispatcher.backoff` em dois pontos -- caminho bufferizado e de
-    stream (`dispatcher.py:764,1261,1281`) --, entao trocar o nome no modulo
-    `dispatcher` cobre os dois. Sem isso a suite e2e gasta dezenas de segundos
-    esperando o backoff exponencial de verdade a cada retry simulado.
+    chama `dispatcher.backoff` em tres pontos -- um no caminho bufferizado e
+    dois no caminho de stream (`dispatcher.py:764,1261,1281`) --, entao trocar
+    o nome no modulo `dispatcher` cobre os tres. Sem isso a suite e2e gasta
+    dezenas de segundos esperando o backoff exponencial de verdade a cada
+    retry simulado.
 
     Risco: um e2e futuro que precise medir deadline contra backoff (por
     exemplo, provar que um retry e pulado por estourar o prazo) tem que
