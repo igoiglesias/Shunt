@@ -508,16 +508,30 @@ function writeUrl(push) {
   el("export").dataset.query = params.toString();
 }
 
+// A ultima busca vence. Descartar a busca nova enquanto outra estava em voo
+// deixava a tela com o resultado velho sob uma URL que pedia outro filtro
+// (medido: `since` e `until` trocados em sequencia mostravam "24 de 24" numa
+// janela vazia). Agora a busca nova aborta a anterior, e so a busca corrente
+// desenha e solta `loading`, que segue querendo dizer "a busca atual ainda
+// esta rodando". Paginar ("mais") continua ignorado com busca em voo: somar
+// uma pagina a uma lista que esta para ser trocada nao faz sentido.
+let inflight = null;
+
 async function search({ append, cursorOverride } = {}) {
-  if (loading) return;
+  if (append && loading) return;
+  if (inflight) inflight.abort();
+  const controller = new AbortController();
+  inflight = controller;
   loading = true;
   el("status").textContent = "buscando…";
   const params = new URLSearchParams(state);
   const useCursor = cursorOverride !== undefined ? cursorOverride : append ? cursor : null;
   if (useCursor) params.set("cursor", useCursor);
   try {
-    const response = await fetch(`/api/requests?${params}`);
+    const response = await fetch(`/api/requests?${params}`, { signal: controller.signal });
     const page = await response.json();
+    // Resposta de uma busca ja substituida nunca desenha por cima da nova.
+    if (controller !== inflight) return;
     if (!response.ok) {
       el("status").textContent = page.error || "não deu para buscar.";
       return;
@@ -525,9 +539,14 @@ async function search({ append, cursorOverride } = {}) {
     cursor = page.next_cursor;
     render(page, append);
   } catch (err) {
+    // Abortada de proposito, ou ja substituida: quem manda na tela e a nova.
+    if (err.name === "AbortError" || controller !== inflight) return;
     el("status").textContent = `não deu para buscar: ${err}`;
   } finally {
-    loading = false;
+    if (controller === inflight) {
+      inflight = null;
+      loading = false;
+    }
   }
 }
 

@@ -17,8 +17,8 @@ NOW = datetime.now(UTC)
 
 
 @pytest.fixture
-def store(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'busca.db'}")
+def store(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -210,10 +210,10 @@ def test_the_page_size_is_clamped(store):
     assert queries.search_events(store, limit=10_000)["total"] == 5
 
 
-def test_rows_out_of_insertion_order_still_come_back_newest_first(make_engine, tmp_path):
+def test_rows_out_of_insertion_order_still_come_back_newest_first(make_engine):
     """O gravador entrega em LOTE: duas requisicoes da mesma rajada podem entrar
     no banco fora da ordem em que aconteceram, e o `id` nao pode mandar."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ordem.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -244,14 +244,14 @@ def test_a_cursor_without_its_instant_falls_back_to_now(store):
     assert isinstance(page["events"], list)
 
 
-def test_two_requests_at_the_very_same_instant_do_not_repeat_across_pages(make_engine, tmp_path):
+def test_two_requests_at_the_very_same_instant_do_not_repeat_across_pages(make_engine):
     """Mutante A4: o cursor sem desempate por id sobreviveu a varredura.
 
     Duas requisicoes do mesmo lote podem ter o mesmo instante ate o
     microssegundo. Sem o desempate, a pagina seguinte comeca em "tudo que e
     mais antigo que este instante" e as gemeas somem -- ou voltam duas vezes.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'gemeas.db'}")
+    engine = make_engine()
     instante = NOW - timedelta(minutes=1)
     with Session(engine) as session:
         session.add_all(
@@ -270,8 +270,8 @@ def test_two_requests_at_the_very_same_instant_do_not_repeat_across_pages(make_e
     assert len(vistos) == len(set(vistos)), "a paginacao repetiu uma gemea"
 
 
-def test_the_same_holds_when_the_order_is_by_duration(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'iguais.db'}")
+def test_the_same_holds_when_the_order_is_by_duration(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [row(request_id=f"igual-{i}", duration_ms=1234) for i in range(4)]
@@ -288,13 +288,13 @@ def test_the_same_holds_when_the_order_is_by_duration(make_engine, tmp_path):
     assert len(vistos) == len(set(vistos)) == 4
 
 
-def test_min_tokens_counts_both_directions(make_engine, tmp_path):
+def test_min_tokens_counts_both_directions(make_engine):
     """Mutante A6: contar so a entrada sobreviveu.
 
     Uma resposta longa a um prompt curto e exatamente a requisicao cara que se
     quer achar, e ela tem entrada pequena.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'tokens.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [

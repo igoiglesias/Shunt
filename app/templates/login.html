@@ -24,6 +24,7 @@
 <div class="login-wrap">
   <form class="login-card" method="post" action="/admin/login">
     <h1>SHU<span>N</span>T</h1>
+    <input type="hidden" name="next" value="{{ next }}">
     {% if mode == "create" %}
     <p class="hint">Primeiro acesso. Crie o primeiro administrador.</p>
     {% endif %}

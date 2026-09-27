@@ -5,6 +5,7 @@ cadeia da requisicao clicada, e se o estado da busca vive na URL -- que e o que
 transforma uma investigacao num link.
 """
 
+import contextlib
 import json
 import os
 import socket
@@ -17,10 +18,24 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.stats.models import Base, RequestBody, RequestEvent
+from app.config.config import ADMIN_COOKIE
+from app.core.security import hash_password, issue_jwt
+from app.stats.models import Base, RequestBody, RequestEvent, User
 
 pytest.importorskip("playwright.sync_api")
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+
+# Segredo fixo so deste modulo: a auditoria exige sessao admin, e com o segredo
+# conhecido o teste assina o proprio cookie em vez de passar pela tela de login.
+# Nao e segredo de producao; so precisa ser estavel dentro do modulo.
+SESSION_SECRET = "segredo-fixo-do-teste-da-auditoria"
+
+# Admin semeado: so o teste do login usa a senha. Com um usuario no banco a tela
+# de login deixa de ser o "primeiro acesso" e pede usuario e senha.
+ADMIN_USER = "admin"
+ADMIN_PASSWORD = "senha-do-teste-de-navegador"
 
 
 def free_port() -> int:
@@ -89,6 +104,7 @@ def seed(path) -> None:
     with Session(engine) as session:
         session.add_all(rows)
         session.add_all(conversas)
+        session.add(User(username=ADMIN_USER, password_hash=hash_password(ADMIN_PASSWORD)))
         session.commit()
     engine.dispose()
 
@@ -100,7 +116,11 @@ def server(tmp_path_factory):
     port = free_port()
     process = subprocess.Popen(
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env={**os.environ, "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}"},
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -132,30 +152,50 @@ def browser():
         instance.close()
 
 
-def open_audit(browser, base, width=1500, height=1000, query=""):
-    """Abre a tela de auditoria, fazendo login se necessario.
+def admin_page(browser, base, width, height):
+    """Pagina nova com a sessao admin ja no cookie e os erros de JS coletados.
 
-    O fluxo novo exige autenticacao admin. Se a pagina de login aparecer,
-    cria o primeiro admin (usuario 'test', senha 'test') e prossegue.
+    O cookie e assinado aqui com o segredo do servidor: a tela de login tem o
+    seu proprio teste, e passar por ela em cada teste so gastaria tempo.
     """
     page = browser.new_page(viewport={"width": width, "height": height})
+    # Cinco segundos, e nao os trinta do Playwright: toda espera aqui e por uma
+    # condicao da tela, e uma condicao que nao chega em 5 s num servidor local e
+    # defeito -- esperar mais so atrasa o vermelho.
+    page.set_default_timeout(5_000)
+    page.context.add_cookies(
+        [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
+    )
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
         "console",
         lambda message: problems.append(message.text) if message.type == "error" else None,
     )
+    return page, problems
+
+
+def wait_search(page, condicao: str) -> None:
+    """Espera a busca que a `condicao` disparou terminar de desenhar.
+
+    A `condicao` e o que o clique muda na hora (a URL, por exemplo), e `loading`
+    e a trava da propria tela: ela so volta a `false` depois que `render`
+    desenhou as linhas e a contagem. As duas juntas dizem que a busca NOVA
+    terminou, e nao a anterior.
+    """
+    page.wait_for_function(f"() => ({condicao}) && !loading")
+
+
+def api_get(url: str) -> httpx.Response:
+    """GET na API da auditoria com a sessao admin: `/api/*` responde 401 sem ela."""
+    cookie = f"{ADMIN_COOKIE}={issue_jwt(1, SESSION_SECRET, 3600)}"
+    return httpx.get(url, headers={"cookie": cookie}, timeout=10)
+
+
+def open_audit(browser, base, width=1500, height=1000, query=""):
+    """Abre a tela de auditoria ja autenticado e espera a primeira linha."""
+    page, problems = admin_page(browser, base, width, height)
     page.goto(f"{base}/admin/requests{query}", wait_until="networkidle")
-
-    # Se caiu no login (primeiro acesso ou sessao expirada), cria o admin.
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{base}/admin/painel**")
-
-    # Agora deve estar na tela de requisicoes
     page.wait_for_selector("#rows tr", timeout=10000)
     return page, problems
 
@@ -168,6 +208,48 @@ def test_the_screen_lists_the_requests_newest_first(browser, server):
     assert problems == []
     assert ids[:3] == ["req-00", "req-01", "req-02"]
     assert "de 24 requisições" in count
+
+
+def test_login_leads_to_the_requested_page(browser, server):
+    """Um link filtrado aberto sem sessao volta ao mesmo filtro depois do login.
+
+    E o unico teste que passa pela tela de login: sem o `next=`, o login cairia
+    no painel e o link compartilhado perderia a busca.
+    """
+    alvo = f"{server}/admin/requests?provider=groq&has_tools=true"
+    # Sem o padrao de 5 s dos helpers: este teste ja estourou sob carga, e o
+    # runner de CI tem menos CPU. Ele fica com os 30 s do Playwright e, em troca,
+    # diz onde parou quando estoura.
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda error: problems.append(str(error)))
+    page.on(
+        "console",
+        lambda message: problems.append(message.text) if message.type == "error" else None,
+    )
+    page.goto(alvo, wait_until="networkidle")
+    assert "/admin/login" in page.url
+    page.fill('input[name="username"]', ADMIN_USER)
+    page.fill('input[name="password"]', ADMIN_PASSWORD)
+    # Este teste ja estourou 30 s uma vez, com a maquina carregada, sem causa
+    # achada. A resposta do POST fica registrada para que a proxima falha diga
+    # o que aconteceu: login recusado, redirect errado ou servidor mudo.
+    try:
+        with page.expect_response(
+            lambda r: r.url.endswith("/admin/login") and r.request.method == "POST"
+        ) as login:
+            page.click('button[type="submit"]')
+    except PlaywrightTimeoutError as erro:
+        pytest.fail(f"o POST do login nao respondeu; pagina em {page.url}: {erro}")
+    resposta = login.value
+    assert resposta.status == 303, (
+        f"o POST do login respondeu {resposta.status} "
+        f"(location={resposta.headers.get('location')!r}); pagina em {page.url}"
+    )
+    page.wait_for_url(alvo)
+    page.wait_for_selector("#rows tr", timeout=10000)
+    page.close()
+    assert problems == []
 
 
 def test_a_chip_narrows_the_list_and_the_count(browser, server):
@@ -187,7 +269,7 @@ def test_a_chip_narrows_the_list_and_the_count(browser, server):
 def test_the_search_state_lives_in_the_url(browser, server):
     page, _ = open_audit(browser, server)
     page.get_by_role("button", name="com fallback").click()
-    page.wait_for_timeout(500)
+    wait_search(page, "new URLSearchParams(location.search).get('fell_back') === 'true'")
     url = page.url
     ids = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
     page.close()
@@ -229,7 +311,7 @@ def test_clicking_a_row_opens_the_whole_chain(browser, server):
     page.click(f'#rows tr[data-id="{target}"]')
     page.wait_for_selector("#detail .chain li")
     detail = page.inner_text("#detail")
-    api = httpx.get(f"{server}/api/requests/{target}", timeout=10).json()
+    api = api_get(f"{server}/api/requests/{target}").json()
     selected = page.evaluate(
         """() => document.querySelector('#rows tr[aria-selected="true"]').dataset.id"""
     )
@@ -244,8 +326,7 @@ def test_clicking_a_row_opens_the_whole_chain(browser, server):
 def test_the_order_can_be_changed_to_the_slowest_first(browser, server):
     page, problems = open_audit(browser, server)
     page.get_by_role("button", name="Duração").click()
-    page.wait_for_function("() => new URLSearchParams(location.search).get('order_by') === 'duration'")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('order_by') === 'duration'")
     # Pela CLASSE da célula, e não pelo índice: uma coluna nova na tabela
     # deslocava o índice e o teste passava a ler outra coluna.
     durations = page.evaluate(
@@ -273,11 +354,11 @@ def test_loading_more_appends_without_repeating(browser, server):
 def test_the_export_carries_the_same_filters(browser, server):
     page, _ = open_audit(browser, server)
     page.get_by_role("button", name="falhas").click()
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('status_min') === '400'")
     query = page.get_attribute("#export", "data-query")
     page.close()
     assert "status_min=400" in query
-    csv_text = httpx.get(f"{server}/api/requests/export?{query}", timeout=10).text
+    csv_text = api_get(f"{server}/api/requests/export?{query}").text
     assert csv_text.startswith("started_at,request_id")
     assert csv_text.count("\n") > 1
 
@@ -297,7 +378,9 @@ def test_clearing_the_filters_brings_everything_back(browser, server):
     page, problems = open_audit(browser, server)
     total = page.inner_text("#count")
     page.get_by_role("button", name="falhas").click()
-    page.wait_for_timeout(400)
+    # Espera a busca do chip terminar, para o teste medir o "Limpar filtros"
+    # partindo da lista ja filtrada, e nao de uma busca abortada no meio.
+    wait_search(page, "new URLSearchParams(location.search).get('status_min') === '400'")
     page.get_by_role("button", name="Limpar filtros").click()
     page.wait_for_function(f"() => document.getElementById('count').textContent === {total!r}")
     pressed = page.evaluate(
@@ -401,8 +484,7 @@ def test_choosing_a_provider_filters_and_lands_in_the_url(browser, server):
     page, problems = open_audit(browser, server)
     page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
     page.select_option("#provider", "groq")
-    page.wait_for_function("() => new URLSearchParams(location.search).get('provider') === 'groq'")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).get('provider') === 'groq'")
     served = page.evaluate(
         "() => [...document.querySelectorAll('#rows tr')].map(r => r.children[3].textContent)"
     )
@@ -416,25 +498,9 @@ def test_a_value_from_an_old_link_stays_selectable(browser, server):
     """Link antigo com um modelo que sumiu do banco nao pode mudar a busca sozinho.
 
     A lista vem vazia de proposito aqui, entao a pagina abre sem esperar linha.
-    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o open_audit
-    lidar com o login se necessario.
     """
-    page = browser.new_page(viewport={"width": 1400, "height": 900})
-    problems = []
-    page.on("pageerror", lambda error: problems.append(str(error)))
-    page.on(
-        "console",
-        lambda message: problems.append(message.text) if message.type == "error" else None,
-    )
+    page, problems = admin_page(browser, server, 1400, 900)
     page.goto(f"{server}/admin/requests?provider=um-provedor-que-sumiu", wait_until="networkidle")
-
-    # Se caiu no login, cria o admin
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{server}/admin/painel**")
 
     page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
     chosen = page.input_value("#provider")
@@ -543,37 +609,127 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
     page.fill("#since", "2026-09-19T00:00")
     page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
     page.fill("#until", "2026-09-19T00:05")
-    page.wait_for_function("() => new URLSearchParams(location.search).has('until')")
-    page.wait_for_timeout(400)
+    wait_search(page, "new URLSearchParams(location.search).has('until')")
     count = page.inner_text("#count")
     page.close()
     assert problems == []
     assert "nenhuma requisição" in count or "de 0" in count
 
 
-def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
-    """A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha.
-    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o login acontecer.
+def segura_buscas(page, segurar):
+    """Intercepta `/api/requests` e segura, sem responder, as que `segurar` escolhe.
+
+    Segurar e nao `time.sleep`: o handler sincrono roda na thread do driver do
+    Playwright, e dormir ali congela o driver inteiro -- a resposta "atrasada"
+    acabava chegando antes da nova. Segurada, a busca so volta quando o teste
+    solta, e a ordem das respostas deixa de depender da carga da maquina.
+    Devolve (urls vistas, rotas seguradas).
     """
-    page = browser.new_page(viewport={"width": 1400, "height": 900})
-    problems = []
-    page.on("pageerror", lambda error: problems.append(str(error)))
-    page.on(
-        "console",
-        lambda message: problems.append(message.text) if message.type == "error" else None,
+    buscas, seguradas = [], []
+
+    def handler(route):
+        url = route.request.url
+        buscas.append(url)
+        if segurar(url):
+            seguradas.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/requests?*", handler)
+    return buscas, seguradas
+
+
+def test_the_latest_search_wins_when_the_previous_one_is_slow(browser, server):
+    """Trocar o segundo filtro com a busca anterior em voo busca de novo.
+
+    Regressao medida no CI: a busca so com `since` ainda estava em voo quando
+    `#until` mudou; a busca nova era descartada e a tela ficava em "24 de 24"
+    sob uma URL que pedia a janela de 5 minutos. Aqui a busca so-com-`since`
+    fica segurada ate a nova terminar, e so entao e solta: a tela tem de ter
+    abortado a velha e nao pode deixa-la desenhar por cima.
+    """
+    page, problems = open_audit(browser, server)
+    falhas = []
+    page.on("requestfailed", lambda request: falhas.append((request.url, request.failure)))
+    buscas, seguradas = segura_buscas(
+        page, lambda url: "since=" in url and "until=" not in url
     )
+    page.select_option("#period", "custom")
+    page.wait_for_selector("#since:visible")
+    page.fill("#since", "2026-09-19T00:00")
+    page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
+    page.fill("#until", "2026-09-19T00:05")
+    wait_search(page, "new URLSearchParams(location.search).has('until')")
+    antes = page.inner_text("#count")
+    assert len(seguradas) == 1, buscas
+    # A requisicao ja foi abortada pela tela; soltar a rota pode reclamar disso.
+    with contextlib.suppress(PlaywrightError):
+        seguradas[0].continue_()
+    page.wait_for_timeout(300)
+    depois = page.inner_text("#count")
+    page.close()
+    assert problems == []
+    assert any("until=" in url for url in buscas), f"a busca com until nao saiu: {buscas}"
+    assert "nenhuma requisição" in antes, antes
+    abortadas = [
+        url for url, erro in falhas if "since=" in url and "until=" not in url
+    ]
+    assert abortadas, f"a busca velha nao foi abortada: {falhas}"
+    assert all(erro == "net::ERR_ABORTED" for _, erro in falhas), falhas
+    assert "nenhuma requisição" in depois, depois
+
+
+def test_loading_more_is_ignored_while_a_search_is_in_flight(browser, server):
+    """"Carregar mais" com a busca nova em voo nao sai nem duplica linhas.
+
+    Somar uma pagina da lista velha a uma lista que esta para ser trocada daria
+    linhas de dois filtros misturadas.
+    """
+    page, problems = open_audit(browser, server, query="?limit=8")
+    assert page.locator("#more").is_visible()
+    buscas, seguradas = segura_buscas(page, lambda url: "status_min=" in url)
+    page.get_by_role("button", name="falhas").click()
+    page.wait_for_function("() => new URLSearchParams(location.search).has('status_min')")
+    page.wait_for_function("() => loading")
+    page.click("#more")
+    page.wait_for_timeout(300)
+    enquanto_segura = list(buscas)
+    seguradas[0].continue_()
+    wait_search(page, "new URLSearchParams(location.search).has('status_min')")
+    ids = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
+    page.close()
+    assert problems == []
+    assert len(enquanto_segura) == 1, f"saiu busca alem da segurada: {enquanto_segura}"
+    assert "status_min=" in enquanto_segura[0]
+    assert "cursor=" not in " ".join(buscas), buscas
+    assert len(ids) == len(set(ids)), ids
+    assert ids, "a busca das falhas nao desenhou"
+
+
+def test_a_network_error_shows_up_and_releases_the_search(browser, server):
+    """Falha de rede na busca corrente aparece no status e solta `loading`."""
+    page, _ = open_audit(browser, server)
+    page.route(
+        "**/api/requests?*",
+        lambda route: route.abort() if "status_min=" in route.request.url else route.continue_(),
+    )
+    page.get_by_role("button", name="falhas").click()
+    page.wait_for_function(
+        "() => document.getElementById('status').textContent.includes('não deu para buscar')"
+        " && !loading"
+    )
+    status = page.inner_text("#status")
+    page.close()
+    assert status.startswith("não deu para buscar:"), status
+
+
+def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
+    """A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha."""
+    page, problems = admin_page(browser, server, 1400, 900)
     page.goto(
         f"{server}/admin/requests?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z",
         wait_until="networkidle",
     )
-
-    # Se caiu no login, cria o admin
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{server}/admin/painel**")
 
     page.wait_for_selector("#empty:visible", timeout=10000)
     mostrado = page.evaluate(
@@ -871,7 +1027,10 @@ def test_an_analysis_error_is_shown_as_text_and_not_as_an_empty_panel(browser, s
         status=409,
     )
     page.click("#analyse")
-    page.wait_for_selector("#detail .empty")
+    # `:not(.loading)`: o aviso "Analisando o periodo" tambem e `.empty`, entao
+    # esperar so `.empty` casa o carregamento e le o texto antes do 409 chegar.
+    # Medido: sob `-n auto` o fetch voltou depois da leitura e o teste falhou.
+    page.wait_for_selector("#detail .empty:not(.loading)")
     texto = page.inner_text("#detail")
     virou_analise = page.evaluate("() => Boolean(document.getElementById('analysis-text'))")
     page.close()
@@ -955,7 +1114,17 @@ def test_on_a_phone_opening_the_panel_scrolls_to_it(browser, server):
     stub_analysis(page)
     page.click("#analyse")
     page.wait_for_selector("#analysis-text")
-    page.wait_for_timeout(800)
+    # A rolagem e `smooth`: mede so depois que ela parou, isto e, quando duas
+    # leituras seguidas de `scrollY` dao o mesmo valor e a pagina ja saiu do topo.
+    page.wait_for_function(
+        """() => {
+            const y = window.scrollY;
+            const parado = window.__ultimoScrollY === y;
+            window.__ultimoScrollY = y;
+            return parado && y > 0;
+        }""",
+        polling=100,
+    )
     caixa = page.evaluate(
         """() => {
             const c = document.getElementById('detail').getBoundingClientRect();
@@ -980,7 +1149,7 @@ def test_the_project_selector_narrows_the_list(browser, server):
         "() => [...document.getElementById('project').options].map((o) => [o.value, o.text])"
     )
     page.select_option("#project", "/home/iglesias/Projetos/agenda")
-    page.wait_for_timeout(700)
+    wait_search(page, "new URLSearchParams(location.search).has('project')")
     medido = page.evaluate(
         """() => ({
             linhas: document.querySelectorAll('#rows tr').length,
