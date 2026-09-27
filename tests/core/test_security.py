@@ -1,11 +1,46 @@
 """Tests for security utilities: password hashing, JWT issuance, and decoding."""
 
+import argon2
+import pytest
+
 from app.core.security import (
     decode_jwt,
     hash_password,
     issue_jwt,
     verify_password,
 )
+
+
+class TestLightArgon2Fixture:
+    """A fixture `light_argon2` (tests/conftest.py) troca `_hasher` por um
+    argon2 barato em todo teste, exceto quando marcado `real_argon2`. Estes
+    testes cobrem essa troca e a guarda que protege os parametros de producao.
+    """
+
+    @pytest.mark.real_argon2
+    def test_producao_usa_parametros_default_da_biblioteca(self):
+        """Guarda: sem a fixture leve, `hash_password` usa o `PasswordHasher()`
+        default do argon2-cffi -- a comparacao e com o default da biblioteca,
+        nao com numeros fixos, para nao travar numa versao da lib."""
+        hashed = hash_password("x")
+        params = argon2.extract_parameters(hashed)
+        default = argon2.PasswordHasher()
+        default_params = (default.time_cost, default.memory_cost, default.parallelism)
+        assert (params.time_cost, params.memory_cost, params.parallelism) == default_params
+
+    def test_fixture_leve_usa_memory_cost_baixo(self):
+        """Sem o marker `real_argon2`, a fixture autouse troca `_hasher` por um
+        argon2 leve (memory_cost=8). O default da biblioteca da 65536."""
+        hashed = hash_password("x")
+        params = argon2.extract_parameters(hashed)
+        assert params.memory_cost == 8
+
+    def test_hash_de_producao_verifica_com_fixture_leve_ativa(self):
+        """Um hash gerado com os parametros de producao continua verificando
+        mesmo com a fixture leve ativa: `verify_password` le os parametros
+        embutidos no proprio hash, e nao os do `_hasher` que chama `verify`."""
+        producao = argon2.PasswordHasher().hash("senha-de-producao")
+        assert verify_password("senha-de-producao", producao) is True
 
 
 class TestHashPassword:
