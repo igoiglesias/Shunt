@@ -32,7 +32,7 @@ def test_relay_get_oauth_usage_anthropic_200():
     e o corpo identico do upstream. x-request-id volta ao cliente.
     A query enviada e b"beta=true". Os headers nao contem x-shunt-token,
     host do cliente nem cookie."""
-    respx.get("https://api.anthropic.com/api/oauth/usage?beta=true").mock(
+    route = respx.get("https://api.anthropic.com/api/oauth/usage?beta=true").mock(
         return_value=httpx.Response(
             200,
             json={"object": "oauth_usage", "used": 1},
@@ -51,6 +51,11 @@ def test_relay_get_oauth_usage_anthropic_200():
     assert response.status_code == 200
     assert response.json() == {"object": "oauth_usage", "used": 1}
     assert response.headers["x-request-id"] == "req-abc"
+    # A query que chega ao upstream e exatamente b"beta=true": sem token,
+    # um unico '?' (CRITICAL 2: URL montada com query original + segunda
+    # query colada) e sem re-encodacao (verbatim, RED 1).
+    upstream_url = route.calls[0].request.url
+    assert upstream_url.raw_path == b"/api/oauth/usage?beta=true"
 
 
 # ---------------------------------------------------------------------------
@@ -265,29 +270,176 @@ def test_relay_head_prefix_removed():
 
 
 # ---------------------------------------------------------------------------
-# RED 10: Resposta gzip -> bytes comprimidos, content-encoding, content-length
+# RED 1b (fix round 2): ?token= no vai ao upstream em nenhum metodo
 # ---------------------------------------------------------------------------
 
 
 @respx.mock
-def test_relay_gzip_passes_through():
-    """Resposta gzip -> o cliente recebe os bytes do upstream.
-    
-    O httpx cliente do pool descomprime automaticamente; o header
-    content-encoding nao e repassado para nao causar dupla descompressao
-    no cliente. O corpo que o cliente recebe e o conteudo descomprimido."""
-    raw_bytes = b"somecompresseddata"
-    respx.get("https://api.anthropic.com/api/oauth/usage").mock(
-        return_value=httpx.Response(200, content=raw_bytes)
+def test_relay_token_query_param_never_leaves_get():
+    """GET /api/hello?token=...: a query enviada e vazia -- o token sai
+    MESMO quando esta sozinho na query (CRITICAL 1: medido, a URL bruta
+    subia com ?token=... intacto)."""
+    route = respx.get("https://api.anthropic.com/api/hello").mock(
+        return_value=httpx.Response(200, content=b"ok")
     )
     with client() as c:
         response = c.get(
-            "/api/oauth/usage",
+            "/api/hello",
+            params={"token": TEST_SHUNT_TOKEN},
             headers={"anthropic-version": "2023-06-01"},
         )
     assert response.status_code == 200
-    assert response.content == raw_bytes
-    assert "content-encoding" not in response.headers
+    upstream_url = route.calls[0].request.url
+    assert upstream_url.raw_path == b"/api/hello"
+
+
+@respx.mock
+def test_relay_token_query_param_never_leaves_post():
+    """POST /api/hello?token=...: sem query extra, a URL upstream fica sem
+    '?' nenhum -- o token nao pode voltar colado na URL (CRITICAL 2)."""
+    route = respx.post("https://api.anthropic.com/api/hello").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+    with client() as c:
+        response = c.post(
+            "/api/hello",
+            params={"token": TEST_SHUNT_TOKEN},
+            content=b"corpo",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    upstream_url = route.calls[0].request.url
+    assert b"?" not in upstream_url.raw_path
+    assert TEST_SHUNT_TOKEN.encode() not in upstream_url.raw_path
+
+
+@respx.mock
+def test_relay_duplicate_query_keys_survive():
+    """GET /api/hello?a=1&a=2: chaves repetidas nao colapsam num dict
+    (CRITICAL 2) -- o upstream ve a=1 e a=2 na ordem original."""
+    route = respx.get("https://api.anthropic.com/api/hello").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+    with client() as c:
+        response = c.get(
+            "/api/hello?a=1&a=2",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    upstream_url = route.calls[0].request.url
+    assert upstream_url.query == b"a=1&a=2"
+    assert upstream_url.raw_path == b"/api/hello?a=1&a=2"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (IMPORTANT 5): path que casa parcialmente com rota local FORA
+# de /v1 responde 405 local e nunca sobe ao upstream
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_relay_post_api_stats_405_local():
+    """POST /api/stats com token valido: a rota local /api/stats so aceita
+    GET, entao o catch-all responde 405 ANTES de repassar -- o upstream nao
+    e tocado (design 1b do plano)."""
+    route = respx.post("https://api.anthropic.com/api/stats").mock(
+        return_value=httpx.Response(200, content=b"nada")
+    )
+    with client() as c:
+        response = c.post(
+            "/api/stats",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 405
+    assert response.json() == {"detail": "Method Not Allowed"}
+    assert len(route.calls) == 0
+
+
+@respx.mock
+def test_relay_v1_unimplemented_method_still_relays():
+    """PATCH /v1/messages/batches nao existe local: /v1/* com metodo sem
+    rota propria CONTINUA no upstream (plano: nao existe 404 por falta de
+    sinal)."""
+    route = respx.patch("https://api.anthropic.com/v1/messages/batches").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+    with client() as c:
+        response = c.patch(
+            "/v1/messages/batches",
+            content=b"corpo",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    assert len(route.calls) == 1
+    assert route.calls[0].request.url.path == "/v1/messages/batches"
+
+
+# ---------------------------------------------------------------------------
+# RED 10: Resposta gzip -> bytes comprimidos, content-encoding, content-length
+# ---------------------------------------------------------------------------
+
+
+class _GzipRawStream(httpx.AsyncByteStream):
+    """Stream do mock que entrega os bytes comprimidos em pedacos.
+
+    Nao e um `httpx.ByteStream` (sincrono), entao o respx nao o pre-lê com
+    `aread()` -- e o pre-leitura e exatamente o que corromperia o teste: o
+    httpx substitui o stream pelo conteudo DECODIFICADO, e o relay nunca
+    veria os bytes cruros. Stream assincrono proprio = os bytes chegam no
+    relay como chegariam numa conexao real."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def __aiter__(self):
+        for i in range(0, len(self._data), 7):
+            yield self._data[i:i + 7]
+
+    async def aclose(self) -> None:
+        pass
+
+
+@respx.mock
+def test_relay_gzip_passes_through():
+    """Resposta gzip de verdade -> a WIRE carrega os bytes comprimidos
+    INTACTOS, com content-encoding: gzip e o MESMO content-length.
+
+    Medido: o TestClient (httpx) descomprime sozinho em `response.content`,
+    entao a unica forma honesta de medir a wire e `iter_raw()` -- os bytes
+    antes do decode local. O relay sobe via aiter_raw(): httpx nao
+    descomprime no caminho de subida (CRITICAL 3)."""
+    import gzip as _gzip
+
+    payload = b'{"usage": 1}' * 64
+    compressed = _gzip.compress(payload)
+    assert compressed != payload  # o fixture de fato esta comprimido
+    respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        return_value=httpx.Response(
+            200,
+            headers={
+                "content-encoding": "gzip",
+                "content-length": str(len(compressed)),
+                "content-type": "application/json",
+            },
+            stream=_GzipRawStream(compressed),
+        )
+    )
+    with client() as c, c.stream(
+        "GET",
+        "/api/oauth/usage",
+        headers={"anthropic-version": "2023-06-01"},
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["content-encoding"] == "gzip"
+        assert response.headers["content-length"] == str(len(compressed))
+        # Wire bytes: o que chegou no ar, sem decode local.
+        wire = b"".join(response.iter_raw())
+    # A wire carrega os bytes comprimidos byte a byte -- nao o payload
+    # descomprimido (que e exatamente o defeito que o teste original
+    # deixava passar porque .content descomprime).
+    assert wire == compressed
+    # E os bytes da wire de fato descomprimem para o payload original.
+    assert _gzip.decompress(wire) == payload
 
 # ---------------------------------------------------------------------------
 # RED 11: httpx.ConnectError -> 502, httpx.ReadTimeout -> 504
@@ -319,6 +471,40 @@ def test_relay_read_timeout_504():
 
     respx.get("https://api.anthropic.com/api/oauth/usage").mock(
         side_effect=httpx.ReadTimeout("timeout")
+    )
+    with client() as c:
+        response = c.get(
+            "/api/oauth/usage",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 504
+    body = response.json()
+    assert "error" in body
+
+
+@respx.mock
+def test_relay_read_error_502():
+    """httpx.ReadError (corpo cortado) -> 502 no envelope do chamador
+    (CRITICAL 4: qualquer httpx.HTTPError que nao e timeout e 502)."""
+    respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        side_effect=httpx.ReadError("connection reset")
+    )
+    with client() as c:
+        response = c.get(
+            "/api/oauth/usage",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 502
+    body = response.json()
+    assert "error" in body
+
+
+@respx.mock
+def test_relay_pool_timeout_504():
+    """httpx.PoolTimeout -> 504 (CRITICAL 4: qualquer TimeoutException e
+    504, nao so ReadTimeout)."""
+    respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        side_effect=httpx.PoolTimeout("pool timeout")
     )
     with client() as c:
         response = c.get(

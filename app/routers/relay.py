@@ -11,15 +11,27 @@ com rotas declaradas cai aqui -- inclusive um `/v1/v1/files` mal formado
 que nao casou com a rota real de `/v1`.
 """
 
+import contextlib
+import time
+from collections.abc import AsyncIterator
+
+import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.routing import Match
 
 from app.config.settings import ProviderConfig
 from app.core.dispatcher import _exception_text, error_body
 from app.core.observability import RelayLog, log_relay
 from app.core.official_hosts import OFFICIAL_HOSTS
-from app.core.relay import relay_headers, relay_params, relay_target
-from app.core.token_auth import TokenRejected, require_shunt_token
+from app.core.relay import RESPONSE_DROP, relay_headers, relay_params, relay_target
+from app.core.token_auth import require_shunt_token
+
+# Reaproveitado do router de /v1: a resposta em stream que SEMPRE fecha o
+# gerador do corpo (libera a resposta upstream mesmo com o cliente
+# desconectado), com fechamento blindado e teto. Importar em vez de
+# duplicar: essa blindagem ja foi medida e testada no /v1.
+from app.routers.v1 import ClosingStreamingResponse
 
 router = APIRouter()
 
@@ -36,7 +48,49 @@ RESERVED_EXACT: frozenset[str] = frozenset(
     }
 )
 
-# Importado por lazy import dentro da funcao para evitar ciclo.
+
+def _partial_local_match(request: Request) -> bool:
+    """Um path FORA de `/v1` casa com rota local mas o metodo nao?
+
+    Desenho 1b do plano: `Match.PARTIAL` (path casa, metodo nao) numa rota
+    declarada local fora da familia `/v1` responde 405 local ANTES de
+    repassar -- senao um `POST /api/stats` com token valido subiria ate o
+    host oficial. `/v1/*` com metodo sem rota propria NAO entra aqui: o
+    plano manda repassar (nao existe 404 por falta de sinal).
+    """
+    path = request.url.path
+    if path.startswith("/v1"):
+        return False
+    for route in request.app.routes:
+        matches = getattr(route, "matches", None)
+        if matches is None:
+            continue
+        # Pula o catch-all deste proprio router: ele casa qualquer path, e
+        # um metodo fora da lista dele nao deve virar 405 local (o plano
+        # manda repassar). Identificar pelo endpoint e estavel: o path e
+        # uma convencao de string que um dia pode mudar.
+        if getattr(route, "endpoint", None) is relay_endpoint:
+            continue
+        match, _ = matches(request.scope)
+        if match is Match.PARTIAL:
+            return True
+    return False
+
+
+def _response_headers(response: httpx.Response) -> dict[str, str]:
+    """Headers da resposta upstream sem os hopping (que nao fazem sentido
+    repassados). `content-encoding` e `content-length` sobem verbatim: sao
+    corretos para os bytes cruros que o corpo carrega."""
+    return {k: v for k, v in response.headers.items() if k.lower() not in RESPONSE_DROP}
+
+
+async def _close_on_error(
+    response: httpx.Response | None, stack: contextlib.AsyncExitStack
+) -> None:
+    """Fecha resposta e stack no caminho de erro (antes do status)."""
+    if response is not None:
+        await response.aclose()
+    await stack.aclose()
 
 
 @router.api_route(
@@ -48,11 +102,20 @@ async def relay_endpoint(request: Request) -> Response:
     """Repassa a requisicao ao host oficial, byte a byte.
 
     O path que o cliente pediu e preservado na URL upstream; o proxy
-    nao traduz nada aqui (o path do cliente e o path do provedor).
+    nao traduz nada aqui (o path do cliente e o path do provedor). A query
+    limpa vai em `params` (lista de pares, ordem e duplicatas intactas) e
+    NUNCA colada na string da URL: medido que a URL bruta do pedido levava
+    o `?token=...` original ao upstream quando so o token estava na query,
+    e um segundo `?` em nao-GET montava URL mal formada.
+
+    A resposta em stream vive MAIS que o handler: o `AsyncExitStack`
+    segura o cliente do pool ate o `finally` do gerador do corpo (senao o
+    cliente -- proprio, pois o host oficial nao e um provedor do catalogo
+    -- fecharia antes de o primeiro byte subir).
     """
     path = request.url.path
 
-    # Caminhos reservados respondem local, mesmo que tenham caído aqui
+    # Caminhos reservados respondem local, mesmo que tenham caido aqui
     # por alguma rota mal formada.
     if path in RESERVED_EXACT or path.startswith("/admin/"):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
@@ -64,10 +127,16 @@ async def relay_endpoint(request: Request) -> Response:
     if any(not char.isprintable() for char in path):
         return JSONResponse(status_code=404, content={"detail": "Not Found"})
 
-    # Nenhum path e bloqueado a partir daqui: o catch-all relaya
+    # Rota local declarada com o path mas sem o metodo (fora de /v1):
+    # 405 local, o upstream nao e tocado (design 1b do plano).
+    if _partial_local_match(request):
+        return JSONResponse(status_code=405, content={"detail": "Method Not Allowed"})
+
+    # Nenhum path e bloqueado a partir daqui: o catch-all repassa
     # tudo que nao e reservado, inclusive /api/oauth/usage.
 
-    # Token obrigatorio. O TokenRejected sobe ao handler de app/main.py.
+    # Token obrigatorio. O TokenRejected (nao e httpx.HTTPError) sobe ao
+    # handler de app/main.py.
     await require_shunt_token(request)
 
     # Determina o protocolo do host oficial a partir dos headers
@@ -75,17 +144,16 @@ async def relay_endpoint(request: Request) -> Response:
     target_protocol = relay_target(request.headers)
     target_host = OFFICIAL_HOSTS[target_protocol]
 
-    # Monta a URL upstream: origin + path do cliente + query limpa.
+    # Query limpa (sem `token`, com ordem, duplicatas e valores vazios
+    # intactos). A URL upstream tem APENAS origin + path: a query entra
+    # uma unica vez, em `params`, para todo metodo.
     query = relay_params(str(request.url.query))
-    url_path = str(request.url).replace(
-        f"{request.url.scheme}://{request.url.netloc}", ""
-    )
-    upstream_url = f"{target_host.origin}{url_path}"
-    if query:
-        upstream_url = f"{upstream_url}?{'&'.join(f'{k}={v}' for k, v in query)}"
+    upstream_url = f"{target_host.origin}{path}"
 
     # Headers a enviar ao upstream: tudo menos os hopping e segredos.
-    token_headers: frozenset = getattr(request.state, "token_headers", frozenset())
+    token_headers: frozenset[str] = getattr(
+        request.state, "token_headers", frozenset()
+    )
     headers = relay_headers(request.headers, token_headers)
 
     # ProviderConfig para o pool.client.
@@ -95,79 +163,119 @@ async def relay_endpoint(request: Request) -> Response:
         api_key=None,
     )
 
-    start = __import__("time").monotonic()
+    start = time.monotonic()
+    # O stack segura o cliente ate o finally do corpo: o host oficial nao e
+    # um provedor do catalogo, entao o pool devolve um cliente PROPRIO que
+    # fecha na saida -- e a saida so pode chegar depois do ultimo byte.
+    stack = contextlib.AsyncExitStack()
+    client: httpx.AsyncClient = await stack.enter_async_context(
+        request.app.state.pool.client(target_protocol, config)
+    )
+
+    response: httpx.Response | None = None
     try:
-        async with request.app.state.pool.client(
-            target_protocol, config
-        ) as client:
-            req_kwargs: dict = {
-                "url": upstream_url,
-                "headers": headers,
-                "follow_redirects": False,
-            }
-            if request.method == "GET":
-                req_kwargs["params"] = dict(query) if query else None
-            elif request.method in ("POST", "PUT", "PATCH"):
-                req_kwargs["content"] = await request.body()
+        req_kwargs: dict = {
+            "url": upstream_url,
+            "params": query,
+            "headers": headers,
+        }
+        if request.method in ("POST", "PUT", "PATCH"):
+            req_kwargs["content"] = await request.body()
 
-            resp = await client.request(request.method, **req_kwargs)
-            elapsed = int((__import__("time").monotonic() - start) * 1000)
+        built = client.build_request(request.method, **req_kwargs)
+        # `stream=True`: so os headers descem; o corpo sobe a seguir e o
+        # finally do gerador (abaixo) fecha a resposta.
+        response = await client.send(built, stream=True)
+        elapsed = int((time.monotonic() - start) * 1000)
 
-            # Corpo byte a byte, headers sobrevoantes.
-            body = resp.content
-            resp_headers = {
-                k: v
-                for k, v in resp.headers.items()
-                if k.lower() not in {"transfer-encoding", "connection", "keep-alive"}
-            }
+        if request.method == "HEAD":
+            # HEAD nao tem corpo: sem stream. O aclose e imediato (headers
+            # so) e o stack libera o cliente antes do return.
+            resp = Response(
+                status_code=response.status_code,
+                headers=_response_headers(response),
+            )
+            await response.aclose()
+            await stack.aclose()
+            return resp
 
-            log_relay(
-                RelayLog(
-                    path=path,
-                    target=target_protocol,
-                    status=resp.status_code,
-                    duration_ms=elapsed,
-                )
+        # O log do relay sai AGORA, quando os headers do upstream chegam
+        # (o status ja e conhecido), medindo a duracao ate o primeiro
+        # header: a resposta em stream e entregue ao cliente ANTES de o
+        # corpo terminar, entao esperar o final aqui registraria depois do
+        # `return` -- nunca chegaria.
+        log_relay(
+            RelayLog(
+                path=path,
+                target=target_protocol,
+                status=response.status_code,
+                duration_ms=elapsed,
             )
+        )
 
-            return Response(
-                content=body,
-                status_code=resp.status_code,
-                headers=resp_headers,
-                media_type=resp.headers.get("content-type"),
-            )
-    except TokenRejected:
-        raise
-    except Exception as err:
-        elapsed = int((__import__("time").monotonic() - start) * 1000)
-        from httpx import ConnectError, ReadTimeout
+        # Corpo cruso via aiter_raw(): httpx NAO descomprime, entao o
+        # `content-encoding: gzip` e o `content-length` que sobem sao os
+        # corretos para esses bytes. Medido: `.content` descomprime sozinho
+        # e corrompia a resposta (o cliente descomprimia de novo). O
+        # finally fecha a resposta upstream E o stack (o cliente proprio do
+        # pool nao pode morrer antes do ultimo byte subir).
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                async for chunk in response.aiter_raw():
+                    yield chunk
+            finally:
+                try:
+                    await response.aclose()
+                finally:
+                    await stack.aclose()
 
-        if isinstance(err, ConnectError):
-            log_relay(
-                RelayLog(
-                    path=path,
-                    target=target_protocol,
-                    status=502,
-                    error_type="upstream_unreachable",
-                    duration_ms=elapsed,
-                )
+        return ClosingStreamingResponse(
+            body(),
+            status_code=response.status_code,
+            headers=_response_headers(response),
+            media_type=response.headers.get("content-type"),
+        )
+    except httpx.TimeoutException as err:
+        # Qualquer timeout (pool, connect, read, write) e 504. Medido que
+        # `ReadTimeout` so cobria um deles: o pool expira antes de conectar
+        # (PoolTimeout) e isso virava 500.
+        await _close_on_error(response, stack)
+        elapsed = int((time.monotonic() - start) * 1000)
+        log_relay(
+            RelayLog(
+                path=path,
+                target=target_protocol,
+                status=504,
+                error_type="upstream_timeout",
+                duration_ms=elapsed,
             )
-            return JSONResponse(
-                status_code=502,
-                content=error_body(target_protocol, 502, _exception_text(err)),
+        )
+        return JSONResponse(
+            status_code=504,
+            content=error_body(target_protocol, 504, _exception_text(err)),
+        )
+    except httpx.HTTPError as err:
+        # O resto (conexao recusada, reset, protocolo distante) e 502.
+        await _close_on_error(response, stack)
+        elapsed = int((time.monotonic() - start) * 1000)
+        log_relay(
+            RelayLog(
+                path=path,
+                target=target_protocol,
+                status=502,
+                error_type="upstream_unreachable",
+                duration_ms=elapsed,
             )
-        if isinstance(err, ReadTimeout):
-            log_relay(
-                RelayLog(
-                    path=path,
-                    target=target_protocol,
-                    status=504,
-                    error_type="upstream_timeout",
-                    duration_ms=elapsed,
-                )
-            )
-            return JSONResponse(
-                status_code=504,
-                content=error_body(target_protocol, 504, _exception_text(err)),
-            )
+        )
+        return JSONResponse(
+            status_code=502,
+            content=error_body(target_protocol, 502, _exception_text(err)),
+        )
+    except BaseException:
+        # Seja o que for que quebre entre o `enter_async_context` e o
+        # `return` do stream (ex.: um erro de parsing do corpo do pedido),
+        # o stack nao pode vazar um cliente proprio aberto.
+        if response is not None:
+            await response.aclose()
+        await stack.aclose()
         raise
