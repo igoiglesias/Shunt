@@ -5,6 +5,7 @@ cadeia da requisicao clicada, e se o estado da busca vive na URL -- que e o que
 transforma uma investigacao num link.
 """
 
+import contextlib
 import json
 import os
 import socket
@@ -22,6 +23,7 @@ from app.core.security import hash_password, issue_jwt
 from app.stats.models import Base, RequestBody, RequestEvent, User
 
 pytest.importorskip("playwright.sync_api")
+from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -376,8 +378,8 @@ def test_clearing_the_filters_brings_everything_back(browser, server):
     page, problems = open_audit(browser, server)
     total = page.inner_text("#count")
     page.get_by_role("button", name="falhas").click()
-    # A busca do chip tem de terminar: com ela em voo, a trava `loading` da tela
-    # descarta a busca de "Limpar filtros" e a contagem nunca volta.
+    # Espera a busca do chip terminar, para o teste medir o "Limpar filtros"
+    # partindo da lista ja filtrada, e nao de uma busca abortada no meio.
     wait_search(page, "new URLSearchParams(location.search).get('status_min') === '400'")
     page.get_by_role("button", name="Limpar filtros").click()
     page.wait_for_function(f"() => document.getElementById('count').textContent === {total!r}")
@@ -612,6 +614,40 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
     page.close()
     assert problems == []
     assert "nenhuma requisição" in count or "de 0" in count
+
+
+def test_the_latest_search_wins_when_the_previous_one_is_slow(browser, server):
+    """Trocar o segundo filtro com a busca anterior em voo busca de novo.
+
+    Regressao medida no CI: a busca so com `since` ainda estava em voo quando
+    `#until` mudou; a busca nova era descartada e a tela ficava em "24 de 24"
+    sob uma URL que pedia a janela de 5 minutos. O atraso de 500 ms na busca
+    so-com-`since` reproduz a corrida sem depender da carga da maquina.
+    """
+    page, problems = open_audit(browser, server)
+    buscas = []
+
+    def atrasa_since_sem_until(route):
+        url = route.request.url
+        buscas.append(url)
+        if "since=" in url and "until=" not in url:
+            time.sleep(0.5)
+        # A busca abortada pela tela pode fechar a requisicao antes daqui.
+        with contextlib.suppress(PlaywrightError):
+            route.continue_()
+
+    page.route("**/api/requests?*", atrasa_since_sem_until)
+    page.select_option("#period", "custom")
+    page.wait_for_selector("#since:visible")
+    page.fill("#since", "2026-09-19T00:00")
+    page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
+    page.fill("#until", "2026-09-19T00:05")
+    wait_search(page, "new URLSearchParams(location.search).has('until')")
+    count = page.inner_text("#count")
+    page.close()
+    assert problems == []
+    assert any("until=" in url for url in buscas), f"a busca com until nao saiu: {buscas}"
+    assert "nenhuma requisição" in count or "de 0" in count, count
 
 
 def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
