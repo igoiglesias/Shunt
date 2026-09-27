@@ -4,6 +4,7 @@ Cada teste aqui mede a decisao pelo efeito na rede -- quantas chamadas sairam e
 qual candidato respondeu -- e nao pelo estado interno do dispatcher.
 """
 
+from app.core import dispatcher
 from tests.e2e.fake_provider import Scripted, sse_chunks
 
 OK = {
@@ -28,6 +29,30 @@ def test_400_skips_to_the_next_candidate_without_retrying(shunt, provider):
     assert response.status_code == 200
     assert len(provider.calls) == 2
     assert response.headers["x-shunt-model"] == "vendor/free"
+
+
+def test_the_503_to_200_recovery_does_not_sleep_the_real_backoff(shunt, provider, monkeypatch):
+    """Sentinela: o e2e roda a cadeia 503 -> 200 sem dormir o backoff real.
+
+    Espiona `dispatcher.asyncio.sleep` e soma o que teria sido esperado. Sem a
+    fixture `no_real_backoff` (autouse em `tests/e2e/conftest.py`), a soma e
+    >= 1.0 porque o dispatcher dorme o backoff de verdade a cada retry.
+    """
+    waits: list[float] = []
+    real_sleep = dispatcher.asyncio.sleep
+
+    async def spy_sleep(seconds):
+        waits.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr(dispatcher.asyncio, "sleep", spy_sleep)
+    provider.queue(
+        Scripted(status=503, json_body={"error": {"message": "fora do ar"}}),
+        Scripted(json_body=OK),
+    )
+    response = shunt.post("/v1/messages", json=ASK)
+    assert response.status_code == 200
+    assert sum(waits) == 0
 
 
 def test_429_with_short_retry_after_retries_the_same_candidate(shunt, provider):

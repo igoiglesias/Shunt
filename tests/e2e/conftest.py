@@ -4,9 +4,29 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config.settings import ModelCaps, ModelConfig, ProviderConfig, Settings
+from app.core import dispatcher
 from app.core.upstream import UpstreamPool
 from app.main import app as shunt_app
 from tests.e2e.fake_provider import FakeProvider, ScriptedTransport
+
+
+@pytest.fixture(autouse=True)
+def no_real_backoff(monkeypatch):
+    """Zera o backoff entre tentativas para o e2e nao dormir o atraso real.
+
+    O dispatcher importa `backoff` de `app.core.attempt` (`dispatcher.py:47`) e
+    chama `dispatcher.backoff` em dois pontos -- caminho bufferizado e de
+    stream (`dispatcher.py:764,1261,1281`) --, entao trocar o nome no modulo
+    `dispatcher` cobre os dois. Sem isso a suite e2e gasta dezenas de segundos
+    esperando o backoff exponencial de verdade a cada retry simulado.
+
+    Risco: um e2e futuro que precise medir deadline contra backoff (por
+    exemplo, provar que um retry e pulado por estourar o prazo) tem que
+    desligar esta fixture -- via `monkeypatch.undo()` explicito ou um marker
+    dedicado -- porque com o backoff zerado a comparacao contra o deadline
+    nunca dispara.
+    """
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
 
 E2E_SETTINGS = Settings(
     providers={
