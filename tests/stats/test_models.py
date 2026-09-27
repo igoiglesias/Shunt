@@ -1,4 +1,4 @@
-"""O schema do armazem de estatisticas, conferido contra um SQLite de arquivo."""
+"""O schema do armazem de estatisticas, conferido contra um SQLite em memoria."""
 
 from datetime import UTC, datetime
 
@@ -8,8 +8,8 @@ from sqlalchemy.orm import Session
 from app.stats.models import RequestEvent
 
 
-def engine_for(make_engine, tmp_path):
-    return make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
+def engine_for(make_engine):
+    return make_engine()
 
 
 def sample(**over):
@@ -40,8 +40,8 @@ def sample(**over):
     return RequestEvent(**row)
 
 
-def test_an_event_round_trips_with_every_column(make_engine, tmp_path):
-    engine = engine_for(make_engine, tmp_path)
+def test_an_event_round_trips_with_every_column(make_engine):
+    engine = engine_for(make_engine)
     with Session(engine) as session:
         session.add(sample())
         session.commit()
@@ -54,9 +54,9 @@ def test_an_event_round_trips_with_every_column(make_engine, tmp_path):
     assert stored.id is not None
 
 
-def test_a_refused_request_stores_with_no_candidate(make_engine, tmp_path):
+def test_a_refused_request_stores_with_no_candidate(make_engine):
     """Requisicao recusada e justamente a que se quer contar, entao nada de NOT NULL ali."""
-    engine = engine_for(make_engine, tmp_path)
+    engine = engine_for(make_engine)
     with Session(engine) as session:
         session.add(
             sample(
@@ -75,8 +75,8 @@ def test_a_refused_request_stores_with_no_candidate(make_engine, tmp_path):
     assert stored.attempts == ["free: credential OPENROUTER_API_KEY is not set"]
 
 
-def test_events_insert_in_one_batch(make_engine, tmp_path):
-    engine = engine_for(make_engine, tmp_path)
+def test_events_insert_in_one_batch(make_engine):
+    engine = engine_for(make_engine)
     with Session(engine) as session:
         session.add_all([sample(request_id=f"r{i}") for i in range(200)])
         session.commit()
@@ -84,7 +84,7 @@ def test_events_insert_in_one_batch(make_engine, tmp_path):
         assert session.scalar(select(func.count()).select_from(RequestEvent)) == 200
 
 
-def test_the_time_axis_and_the_two_grouping_axes_are_indexed(make_engine, tmp_path):
+def test_the_time_axis_and_the_two_grouping_axes_are_indexed(make_engine):
     """Toda consulta do painel filtra por tempo e agrupa por provedor ou modelo."""
     indexed = {tuple(index.expressions[0].name for _ in [0]) for index in RequestEvent.__table__.indexes}
     columns = {name for (name,) in indexed}
@@ -92,9 +92,9 @@ def test_the_time_axis_and_the_two_grouping_axes_are_indexed(make_engine, tmp_pa
     assert {"provider", "candidate_model"} & columns
 
 
-def test_o_projeto_e_a_sessao_fazem_round_trip(make_engine, tmp_path):
+def test_o_projeto_e_a_sessao_fazem_round_trip(make_engine):
     """De qual projeto veio a requisicao, guardado na propria linha do evento."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'projeto.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(sample(project="/home/x/agenda", session_id="s-1"))
         session.commit()
@@ -105,10 +105,10 @@ def test_o_projeto_e_a_sessao_fazem_round_trip(make_engine, tmp_path):
     assert stored.session_id == "s-1"
 
 
-def test_requisicao_sem_projeto_continua_valida(make_engine, tmp_path):
+def test_requisicao_sem_projeto_continua_valida(make_engine):
     # Requisicao de outro cliente, ou de uma versao do harness que mudou o
     # rotulo: e justamente a que nao pode ser perdida.
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'projeto.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(sample())
         session.commit()

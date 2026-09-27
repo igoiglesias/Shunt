@@ -45,8 +45,8 @@ def row(**over):
 
 
 @pytest.fixture
-def engine(make_engine, tmp_path):
-    return make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
+def engine(make_engine):
+    return make_engine()
 
 
 @pytest.fixture

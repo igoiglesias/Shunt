@@ -76,8 +76,8 @@ def row(**over):
 
 
 @pytest.fixture
-def seeded(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
+def seeded(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -129,8 +129,8 @@ def test_the_latency_percentiles_are_observed_values(seeded):
     assert totals["p50_ttft_ms"] == 50
 
 
-def test_an_empty_window_answers_zeros_and_no_percentile(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'vazio.db'}")
+def test_an_empty_window_answers_zeros_and_no_percentile(make_engine):
+    engine = make_engine()
     totals = queries.totals(engine)
     assert totals["requests"] == 0
     assert totals["error_rate"] == 0.0
@@ -154,8 +154,8 @@ def test_the_series_buckets_follow_the_window(seeded):
     assert dia["points"][0]["at"] < dia["points"][-1]["at"]
 
 
-def test_a_short_window_gets_a_bucket_per_minute(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'minuto.db'}")
+def test_a_short_window_gets_a_bucket_per_minute(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -172,8 +172,8 @@ def test_a_short_window_gets_a_bucket_per_minute(make_engine, tmp_path):
     assert all(len(p["at"]) == len("2026-09-19T12:34") for p in curta["points"])
 
 
-def test_a_medium_window_groups_by_five_minutes(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cinco.db'}")
+def test_a_medium_window_groups_by_five_minutes(make_engine):
+    engine = make_engine()
     base = (NOW - timedelta(hours=3)).replace(minute=32, second=0, microsecond=0)
     with Session(engine) as session:
         session.add_all(
@@ -193,8 +193,8 @@ def test_a_medium_window_groups_by_five_minutes(make_engine, tmp_path):
     assert media["points"][1]["at"].endswith(":35")
 
 
-def test_a_long_window_groups_in_blocks_of_hours(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'longa.db'}")
+def test_a_long_window_groups_in_blocks_of_hours(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -228,8 +228,8 @@ def test_the_requested_model_is_a_different_question_from_the_served_one(seeded)
     assert asked[0]["requests"] == 4
 
 
-def test_routes_are_listed_with_their_own_traffic(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'rotas.db'}")
+def test_routes_are_listed_with_their_own_traffic(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -256,14 +256,14 @@ def test_chain_health_separates_a_clean_answer_from_a_fallback(seeded):
     assert chain["skips"] == [{"candidate": "free", "reason": "falhou na chamada", "count": 1}]
 
 
-def test_tools_are_listed_by_what_was_actually_called(make_engine, tmp_path):
+def test_tools_are_listed_by_what_was_actually_called(make_engine):
     """Um harness oferece o catalogo inteiro toda vez.
 
     Ordenar por oferta enche a tabela com as ferramentas que ninguem usou --
     medido no painel ao vivo: onze linhas, todas com 0%. Quem foi chamada vem
     primeiro.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ordem-tools.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -285,9 +285,9 @@ def test_tool_usage_shows_what_was_offered_against_what_was_called(seeded):
     assert tools["write"]["call_rate"] == 0.0
 
 
-def test_a_tool_called_without_ever_being_offered_still_shows_up(make_engine, tmp_path):
+def test_a_tool_called_without_ever_being_offered_still_shows_up(make_engine):
     """Modelo que inventa ferramenta e coisa que se quer ver, nao esconder."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'tools.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="x", tools_called=["inventada"]))
         session.commit()
@@ -322,7 +322,7 @@ def test_the_snapshot_carries_every_section_the_panel_draws(seeded):
     assert snapshot["window_hours"] == 1
 
 
-def test_the_percentile_sorts_before_it_picks(make_engine, tmp_path):
+def test_the_percentile_sorts_before_it_picks(make_engine):
     """Mutante M11: sem `sorted`, a suite passava.
 
     As linhas semeadas estavam em ordem crescente de duracao por acidente, e o
@@ -330,7 +330,7 @@ def test_the_percentile_sorts_before_it_picks(make_engine, tmp_path):
     embaralhada de proposito: a mediana de 10,20,...,90 e 50, venha na ordem
     que vier.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ordem.db'}")
+    engine = make_engine()
     durations = [90, 10, 50, 70, 30, 80, 20, 60, 40]
     with Session(engine) as session:
         session.add_all(
@@ -342,13 +342,13 @@ def test_the_percentile_sorts_before_it_picks(make_engine, tmp_path):
     assert totals["p95_duration_ms"] == 90
 
 
-def test_a_route_that_asks_for_no_model_is_not_a_requested_model(make_engine, tmp_path):
+def test_a_route_that_asks_for_no_model_is_not_a_requested_model(make_engine):
     """Medido com trafego real: `/v1/models` grava modelo vazio.
 
     Vazio nao e NULL, entao o filtro de nulos deixava passar uma linha sem nome
     no diagrama do painel.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'vazio.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -363,13 +363,13 @@ def test_a_route_that_asks_for_no_model_is_not_a_requested_model(make_engine, tm
     assert len(queries.by_route(engine)) == 2
 
 
-def test_a_stored_instant_comes_back_saying_it_is_utc(make_engine, tmp_path):
+def test_a_stored_instant_comes_back_saying_it_is_utc(make_engine):
     """O SQLite devolve `datetime` ingenuo mesmo em coluna com `timezone=True`.
 
     Medido no painel: a fita misturava o ISO sem offset do banco com o ISO em
     UTC do SSE, lia o primeiro como hora local e saia tres horas fora de ordem.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'fuso.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="z", started_at=datetime(2026, 9, 19, 8, 30, tzinfo=UTC)))
         session.commit()
@@ -399,13 +399,13 @@ def test_clearing_only_the_past_keeps_what_is_recent(seeded):
     assert queries.totals(seeded, hours=24)["requests"] == 4
 
 
-def test_clearing_takes_the_conversation_with_it(make_engine, tmp_path):
+def test_clearing_takes_the_conversation_with_it(make_engine):
     """Texto sem o evento dele fica invisivel para sempre na tela de auditoria."""
     from sqlalchemy import func, select
 
     from app.stats.models import RequestBody
 
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'com-corpo.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -427,13 +427,13 @@ def test_clearing_takes_the_conversation_with_it(make_engine, tmp_path):
         assert session.scalar(select(func.count()).select_from(RequestBody)) == 0
 
 
-def test_the_tool_table_stops_at_eight_rows(make_engine, tmp_path):
+def test_the_tool_table_stops_at_eight_rows(make_engine):
     """Um harness oferece o catalogo inteiro; a nona nunca foi chamada.
 
     Este teste existe porque o limite se perdeu uma vez ao restaurar arquivos
     depois de uma varredura de mutacao, e so o painel ao vivo mostrou.
     """
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'muitas.db'}")
+    engine = make_engine()
     catalogo = [f"Ferramenta{i:02d}" for i in range(15)]
     with Session(engine) as session:
         session.add_all(
@@ -444,9 +444,9 @@ def test_the_tool_table_stops_at_eight_rows(make_engine, tmp_path):
     assert len(queries.snapshot(engine)["tools"]) == 8
 
 
-def test_the_pair_says_which_request_landed_on_which_model(make_engine, tmp_path):
+def test_the_pair_says_which_request_landed_on_which_model(make_engine):
     """As duas listas separadas nao dizem se foi o opus que caiu no local."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'pares.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -472,10 +472,10 @@ def test_the_pair_says_which_request_landed_on_which_model(make_engine, tmp_path
     assert all(par["served"] for par in pares)
 
 
-def test_the_bucket_follows_the_traffic_and_not_only_the_window(make_engine, tmp_path):
+def test_the_bucket_follows_the_traffic_and_not_only_the_window(make_engine):
     """Medido no painel real: 72 requisicoes em 44 minutos dentro de uma janela
     de 24 horas davam DUAS barras."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'concentrado.db'}")
+    engine = make_engine()
     base = NOW - timedelta(minutes=44)
     with Session(engine) as session:
         session.add_all(
@@ -490,8 +490,8 @@ def test_the_bucket_follows_the_traffic_and_not_only_the_window(make_engine, tmp
     assert len(largo["points"]) == 22
 
 
-def test_traffic_spread_over_days_still_gets_a_coarse_bucket(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'espalhado.db'}")
+def test_traffic_spread_over_days_still_gets_a_coarse_bucket(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -508,10 +508,10 @@ def test_traffic_spread_over_days_still_gets_a_coarse_bucket(make_engine, tmp_pa
 # -- Historia E: o painel separa o descarte por motivo -------------------------
 
 
-def test_skips_are_grouped_by_reason(make_engine, tmp_path):
+def test_skips_are_grouped_by_reason(make_engine):
     """"Pulado por nao caber" e "pulado por estar fora do ar" pedem decisoes
     opostas do operador: um mexe no catalogo, o outro no provedor."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'motivos.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -531,9 +531,9 @@ def test_skips_are_grouped_by_reason(make_engine, tmp_path):
     assert por_motivo[("free", "sem suporte")] == 1
 
 
-def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine, tmp_path):
+def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine):
     """A linha que diz "fui chamado assim mesmo" e o contrario de um pulo."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'ultimo-recurso.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(
             row(
@@ -551,7 +551,7 @@ def test_the_last_resort_note_is_not_counted_as_a_skip(make_engine, tmp_path):
     ]
 
 
-def test_a_model_name_with_a_colon_is_not_cut_and_still_classifies(make_engine, tmp_path):
+def test_a_model_name_with_a_colon_is_not_cut_and_still_classifies(make_engine):
     """A linha e escrita como `<modelo>: <motivo>`, e nome de modelo tem dois-pontos.
 
     `nvidia/nemotron-3-ultra-550b-a55b:free` (catalogo real) cortado no primeiro
@@ -561,7 +561,7 @@ def test_a_model_name_with_a_colon_is_not_cut_and_still_classifies(make_engine, 
     opostas do operador colapsadas numa contagem so.
     """
     modelo = "nvidia/nemotron-3-ultra-550b-a55b:free"
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'dois-pontos.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -584,7 +584,7 @@ def test_a_model_name_with_a_colon_is_not_cut_and_still_classifies(make_engine, 
     assert por_motivo[(modelo, "não coube")] == 1
 
 
-def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_engine, tmp_path):
+def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_engine):
     """RED->GREEN cruzado: a linha de pulo REAL, escrita pelo dispatcher.
 
     Sem o cruzamento, os dois lados passariam a discordar em silencio -- o
@@ -629,7 +629,7 @@ def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_en
 
     assert trace == ["nvidia/nemotron-3-ultra-550b-a55b:free: no vision support"]
 
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cruzado.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="a", attempts=trace))
         session.commit()
@@ -647,8 +647,8 @@ def test_the_colon_parsing_survives_a_skip_row_written_by_the_dispatcher(make_en
 # nao um voto inteiro igual ao de uma de 8.000.
 
 
-def test_a_taxa_soma_tokens_sobre_tempo_de_geracao(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+def test_a_taxa_soma_tokens_sobre_tempo_de_geracao(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -672,8 +672,8 @@ def test_a_taxa_soma_tokens_sobre_tempo_de_geracao(make_engine, tmp_path):
     assert linha["tokens_per_second"] == 42.5
 
 
-def test_stream_sem_primeiro_token_fica_fora_da_taxa(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+def test_stream_sem_primeiro_token_fica_fora_da_taxa(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         # Streaming sem `ttft_ms`: nao ha como separar espera de geracao, e
         # contar a duracao inteira chamaria a espera de geracao.
@@ -693,8 +693,8 @@ def test_stream_sem_primeiro_token_fica_fora_da_taxa(make_engine, tmp_path):
     assert linha["tokens_per_second"] == 100.0
 
 
-def test_grupo_sem_nada_para_medir_responde_none(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+def test_grupo_sem_nada_para_medir_responde_none(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="vazio", output_tokens=0, duration_ms=120))
         session.commit()
@@ -706,8 +706,8 @@ def test_grupo_sem_nada_para_medir_responde_none(make_engine, tmp_path):
     assert linha["rated_requests"] == 0
 
 
-def test_duracao_zero_nao_divide_por_zero(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'taxa.db'}")
+def test_duracao_zero_nao_divide_por_zero(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -733,9 +733,9 @@ def test_a_janela_inteira_tem_a_propria_taxa(seeded):
     assert totais["tokens_per_second"] == 26.3
 
 
-def test_o_modelo_carrega_o_proprio_provedor(make_engine, tmp_path):
+def test_o_modelo_carrega_o_proprio_provedor(make_engine):
     """Sem isso a tela pareava modelo e provedor por POSICAO nas duas listas."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'par.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -751,8 +751,8 @@ def test_o_modelo_carrega_o_proprio_provedor(make_engine, tmp_path):
     assert por_modelo == {"qwen": "local", "oss": "groq"}
 
 
-def test_modelo_servido_por_dois_provedores_diz_varios(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'par.db'}")
+def test_modelo_servido_por_dois_provedores_diz_varios(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -766,9 +766,9 @@ def test_modelo_servido_por_dois_provedores_diz_varios(make_engine, tmp_path):
     assert queries.by_model(engine)[0]["provider"] == "vários"
 
 
-def test_por_projeto_mostra_tambem_o_que_nao_tem_projeto(make_engine, tmp_path):
+def test_por_projeto_mostra_tambem_o_que_nao_tem_projeto(make_engine):
     """A linha "sem projeto" e a medida da cobertura da extracao."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -788,8 +788,8 @@ def test_por_projeto_mostra_tambem_o_que_nao_tem_projeto(make_engine, tmp_path):
     assert sum(linhas.values()) == queries.totals(engine)["requests"]
 
 
-def test_o_projeto_entra_no_evento_e_nas_facetas(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+def test_o_projeto_entra_no_evento_e_nas_facetas(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="1", project="/home/x/agenda", session_id="s1"))
         session.commit()
@@ -802,8 +802,8 @@ def test_o_projeto_entra_no_evento_e_nas_facetas(make_engine, tmp_path):
     assert facetas["projects"] == [{"value": "/home/x/agenda", "count": 1}]
 
 
-def test_a_busca_filtra_e_acha_pelo_projeto(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'proj.db'}")
+def test_a_busca_filtra_e_acha_pelo_projeto(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -830,8 +830,8 @@ def test_a_busca_filtra_e_acha_pelo_projeto(make_engine, tmp_path):
 # leu este painel e recomendou ligar um cache que ja estava ligado.
 
 
-def test_a_taxa_de_cache_so_conta_quem_informou(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+def test_a_taxa_de_cache_so_conta_quem_informou(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
@@ -854,8 +854,8 @@ def test_a_taxa_de_cache_so_conta_quem_informou(make_engine, tmp_path):
     assert linha["cache_hit_rate"] == 0.5
 
 
-def test_provedor_que_nunca_informa_nao_ganha_taxa(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+def test_provedor_que_nunca_informa_nao_ganha_taxa(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add(row(request_id="mudo", provider="groq", input_tokens=3678))
         session.commit()
@@ -866,9 +866,9 @@ def test_provedor_que_nunca_informa_nao_ganha_taxa(make_engine, tmp_path):
     assert linha["cache_hit_rate"] is None
 
 
-def test_provedor_que_informa_zero_tem_taxa_zero(make_engine, tmp_path):
+def test_provedor_que_informa_zero_tem_taxa_zero(make_engine):
     """Zero E uma medicao: o provedor disse que nao reaproveitou nada."""
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+    engine = make_engine()
     with Session(engine) as session:
         session.add(
             row(request_id="frio", provider="openrouter", input_tokens=3620,
@@ -882,8 +882,8 @@ def test_provedor_que_informa_zero_tem_taxa_zero(make_engine, tmp_path):
     assert linha["cache_hit_rate"] == 0.0
 
 
-def test_a_janela_inteira_tem_a_propria_taxa_de_cache(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'cache.db'}")
+def test_a_janela_inteira_tem_a_propria_taxa_de_cache(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
