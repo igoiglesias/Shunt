@@ -616,38 +616,111 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
     assert "nenhuma requisição" in count or "de 0" in count
 
 
+def segura_buscas(page, segurar):
+    """Intercepta `/api/requests` e segura, sem responder, as que `segurar` escolhe.
+
+    Segurar e nao `time.sleep`: o handler sincrono roda na thread do driver do
+    Playwright, e dormir ali congela o driver inteiro -- a resposta "atrasada"
+    acabava chegando antes da nova. Segurada, a busca so volta quando o teste
+    solta, e a ordem das respostas deixa de depender da carga da maquina.
+    Devolve (urls vistas, rotas seguradas).
+    """
+    buscas, seguradas = [], []
+
+    def handler(route):
+        url = route.request.url
+        buscas.append(url)
+        if segurar(url):
+            seguradas.append(route)
+        else:
+            route.continue_()
+
+    page.route("**/api/requests?*", handler)
+    return buscas, seguradas
+
+
 def test_the_latest_search_wins_when_the_previous_one_is_slow(browser, server):
     """Trocar o segundo filtro com a busca anterior em voo busca de novo.
 
     Regressao medida no CI: a busca so com `since` ainda estava em voo quando
     `#until` mudou; a busca nova era descartada e a tela ficava em "24 de 24"
-    sob uma URL que pedia a janela de 5 minutos. O atraso de 500 ms na busca
-    so-com-`since` reproduz a corrida sem depender da carga da maquina.
+    sob uma URL que pedia a janela de 5 minutos. Aqui a busca so-com-`since`
+    fica segurada ate a nova terminar, e so entao e solta: a tela tem de ter
+    abortado a velha e nao pode deixa-la desenhar por cima.
     """
     page, problems = open_audit(browser, server)
-    buscas = []
-
-    def atrasa_since_sem_until(route):
-        url = route.request.url
-        buscas.append(url)
-        if "since=" in url and "until=" not in url:
-            time.sleep(0.5)
-        # A busca abortada pela tela pode fechar a requisicao antes daqui.
-        with contextlib.suppress(PlaywrightError):
-            route.continue_()
-
-    page.route("**/api/requests?*", atrasa_since_sem_until)
+    falhas = []
+    page.on("requestfailed", lambda request: falhas.append((request.url, request.failure)))
+    buscas, seguradas = segura_buscas(
+        page, lambda url: "since=" in url and "until=" not in url
+    )
     page.select_option("#period", "custom")
     page.wait_for_selector("#since:visible")
     page.fill("#since", "2026-09-19T00:00")
     page.wait_for_function("() => new URLSearchParams(location.search).has('since')")
     page.fill("#until", "2026-09-19T00:05")
     wait_search(page, "new URLSearchParams(location.search).has('until')")
-    count = page.inner_text("#count")
+    antes = page.inner_text("#count")
+    assert len(seguradas) == 1, buscas
+    # A requisicao ja foi abortada pela tela; soltar a rota pode reclamar disso.
+    with contextlib.suppress(PlaywrightError):
+        seguradas[0].continue_()
+    page.wait_for_timeout(300)
+    depois = page.inner_text("#count")
     page.close()
     assert problems == []
     assert any("until=" in url for url in buscas), f"a busca com until nao saiu: {buscas}"
-    assert "nenhuma requisição" in count or "de 0" in count, count
+    assert "nenhuma requisição" in antes, antes
+    abortadas = [
+        url for url, erro in falhas if "since=" in url and "until=" not in url
+    ]
+    assert abortadas, f"a busca velha nao foi abortada: {falhas}"
+    assert all(erro == "net::ERR_ABORTED" for _, erro in falhas), falhas
+    assert "nenhuma requisição" in depois, depois
+
+
+def test_loading_more_is_ignored_while_a_search_is_in_flight(browser, server):
+    """"Carregar mais" com a busca nova em voo nao sai nem duplica linhas.
+
+    Somar uma pagina da lista velha a uma lista que esta para ser trocada daria
+    linhas de dois filtros misturadas.
+    """
+    page, problems = open_audit(browser, server, query="?limit=8")
+    assert page.locator("#more").is_visible()
+    buscas, seguradas = segura_buscas(page, lambda url: "status_min=" in url)
+    page.get_by_role("button", name="falhas").click()
+    page.wait_for_function("() => new URLSearchParams(location.search).has('status_min')")
+    page.wait_for_function("() => loading")
+    page.click("#more")
+    page.wait_for_timeout(300)
+    enquanto_segura = list(buscas)
+    seguradas[0].continue_()
+    wait_search(page, "new URLSearchParams(location.search).has('status_min')")
+    ids = page.evaluate("() => [...document.querySelectorAll('#rows tr')].map(r => r.dataset.id)")
+    page.close()
+    assert problems == []
+    assert len(enquanto_segura) == 1, f"saiu busca alem da segurada: {enquanto_segura}"
+    assert "status_min=" in enquanto_segura[0]
+    assert "cursor=" not in " ".join(buscas), buscas
+    assert len(ids) == len(set(ids)), ids
+    assert ids, "a busca das falhas nao desenhou"
+
+
+def test_a_network_error_shows_up_and_releases_the_search(browser, server):
+    """Falha de rede na busca corrente aparece no status e solta `loading`."""
+    page, _ = open_audit(browser, server)
+    page.route(
+        "**/api/requests?*",
+        lambda route: route.abort() if "status_min=" in route.request.url else route.continue_(),
+    )
+    page.get_by_role("button", name="falhas").click()
+    page.wait_for_function(
+        "() => document.getElementById('status').textContent.includes('não deu para buscar')"
+        " && !loading"
+    )
+    status = page.inner_text("#status")
+    page.close()
+    assert status.startswith("não deu para buscar:"), status
 
 
 def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
