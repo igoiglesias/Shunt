@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.stats import queries
-from tests.stats.test_queries import row
+from tests.stats.test_queries import relay_row, row
 
 NOW = datetime.now(UTC)
 
@@ -86,6 +86,64 @@ def store(make_engine):
 
 def ids(page):
     return [event["request_id"] for event in page["events"]]
+
+
+@pytest.fixture
+def store_with_relay(make_engine):
+    """A loja com uma linha de relay: a busca FICA inclusiva, e o filtro por
+    `kind` e o que separa uma coisa da outra."""
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(
+                    request_id="ok-groq",
+                    started_at=NOW - timedelta(minutes=2),
+                    route="/v1/messages",
+                    provider="groq",
+                    candidate_model="openai/gpt-oss-120b",
+                    requested_model="claude-sonnet-4-5",
+                    duration_ms=300,
+                    input_tokens=100,
+                    output_tokens=50,
+                ),
+                row(
+                    request_id="erro-429",
+                    started_at=NOW - timedelta(minutes=20),
+                    route="/v1/chat/completions",
+                    dialect="openai",
+                    provider="openrouter",
+                    candidate_model="openrouter/free",
+                    status=429,
+                    error_type="rate_limit_error",
+                    duration_ms=80,
+                ),
+                relay_row(request_id="relay"),
+            ]
+        )
+        session.commit()
+    return engine
+
+
+def test_the_search_stays_inclusive_when_no_kind_is_asked(store_with_relay):
+    page = queries.search_events(store_with_relay)
+    assert set(ids(page)) == {"ok-groq", "erro-429", "relay"}
+    assert page["total"] == 3
+
+
+def test_the_kind_filter_selects_the_relay_line_alone(store_with_relay):
+    assert ids(queries.search_events(store_with_relay, kind="relay")) == ["relay"]
+
+
+def test_the_kind_filter_selects_the_model_lines_alone(store_with_relay):
+    page = queries.search_events(store_with_relay, kind="model")
+    # Linha antiga (NULL) e modelo: o filtro exclui so o relay.
+    assert sorted(ids(page)) == ["erro-429", "ok-groq"]
+
+
+def test_an_unknown_kind_is_rejected_instead_of_ignored(store_with_relay):
+    with pytest.raises(ValueError):
+        queries.search_events(store_with_relay, kind="x")
 
 
 def test_with_no_filter_everything_comes_back_newest_first(store):

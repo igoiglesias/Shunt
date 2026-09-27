@@ -337,7 +337,13 @@ def build(
     declared = _declared(filters)
     # Por NOME, e nao por posicao: a lista de filtros cresce, e um argumento a
     # mais no meio faria o valor de um filtro chegar como outro sem erro nenhum.
-    clauses = queries._search_clauses(**{field: filters.get(field) for field in FILTER_FIELDS})
+    # `kind` e FIXO em "model" e nao entra em `FILTER_FIELDS`: o dossie analisa
+    # o trafego de modelo, e a linha de relay e rastro de rede. A pessoa pede o
+    # dossie do periodo que esta vendo na tela, e a tela mostra modelo.
+    clauses = queries._search_clauses(
+        **{field: filters.get(field) for field in FILTER_FIELDS},
+        kind="model",
+    )
 
     with Session(engine) as session:
         total = int(
