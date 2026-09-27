@@ -132,6 +132,12 @@ def browser():
         instance.close()
 
 
+def api_get(url: str) -> httpx.Response:
+    """GET na API do painel com a sessao admin: `/api/*` responde 401 sem ela."""
+    cookie = f"{ADMIN_COOKIE}={issue_jwt(1, SESSION_SECRET, 3600)}"
+    return httpx.get(url, headers={"cookie": cookie}, timeout=10)
+
+
 def open_panel(browser, base, width, height, init_script=None):
     page = browser.new_page(viewport={"width": width, "height": height})
     page.context.add_cookies(
@@ -165,7 +171,7 @@ def test_the_panel_draws_without_a_single_console_error(browser, server):
 
 def test_the_numbers_on_screen_are_the_numbers_the_api_answered(browser, server):
     """Painel bonito com numero errado e pior do que painel nenhum."""
-    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    api = api_get(f"{server}/api/stats?window=24").json()
     page, _ = open_panel(browser, server, 1440, 1000)
     shown = page.evaluate(
         """() => ({
@@ -272,7 +278,7 @@ def test_the_panel_says_so_when_there_is_no_database(browser, tmp_path_factory):
 
 def test_the_api_answers_the_same_json_the_panel_parses(server):
     """Contrato entre as duas metades, preso sem navegador nenhum."""
-    body = httpx.get(f"{server}/api/stats", timeout=10).json()
+    body = api_get(f"{server}/api/stats").json()
     assert json.loads(json.dumps(body)) == body
     assert set(body) >= {"totals", "series", "by_model", "chain", "tools", "recent", "health"}
 
@@ -777,7 +783,7 @@ def test_the_clear_button_disarms_itself_when_left_alone(browser, server):
 
 def test_the_panel_shows_where_the_requests_came_from(browser, server):
     """Projeto na tela, com a linha "sem projeto" à vista."""
-    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    api = api_get(f"{server}/api/stats?window=24").json()
     page, problems = open_panel(browser, server, 1440, 1000)
     linhas = page.evaluate(
         """() => [...document.querySelectorAll('#projects tbody tr')].map(
@@ -796,7 +802,7 @@ def test_the_panel_shows_where_the_requests_came_from(browser, server):
 
 
 def test_the_generation_rate_is_on_screen_for_every_model(browser, server):
-    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    api = api_get(f"{server}/api/stats?window=24").json()
     page, problems = open_panel(browser, server, 1440, 1000)
     taxa = page.evaluate(
         """() => ({
@@ -824,7 +830,7 @@ def test_the_generation_rate_is_on_screen_for_every_model(browser, server):
 
 def test_the_panel_tells_a_silent_provider_from_a_cold_cache(browser, server):
     """"—" é "não informou"; "0%" é "informou que não reaproveitou nada"."""
-    api = httpx.get(f"{server}/api/stats?window=24", timeout=10).json()
+    api = api_get(f"{server}/api/stats?window=24").json()
     page, problems = open_panel(browser, server, 1440, 1000)
     lido = page.evaluate(
         """() => ({

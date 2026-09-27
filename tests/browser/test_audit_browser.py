@@ -17,10 +17,22 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.stats.models import Base, RequestBody, RequestEvent
+from app.config.config import ADMIN_COOKIE
+from app.core.security import hash_password, issue_jwt
+from app.stats.models import Base, RequestBody, RequestEvent, User
 
 pytest.importorskip("playwright.sync_api")
 from playwright.sync_api import sync_playwright
+
+# Segredo fixo so deste modulo: a auditoria exige sessao admin, e com o segredo
+# conhecido o teste assina o proprio cookie em vez de passar pela tela de login.
+# Nao e segredo de producao; so precisa ser estavel dentro do modulo.
+SESSION_SECRET = "segredo-fixo-do-teste-da-auditoria"
+
+# Admin semeado: so o teste do login usa a senha. Com um usuario no banco a tela
+# de login deixa de ser o "primeiro acesso" e pede usuario e senha.
+ADMIN_USER = "admin"
+ADMIN_PASSWORD = "senha-do-teste-de-navegador"
 
 
 def free_port() -> int:
@@ -89,6 +101,7 @@ def seed(path) -> None:
     with Session(engine) as session:
         session.add_all(rows)
         session.add_all(conversas)
+        session.add(User(username=ADMIN_USER, password_hash=hash_password(ADMIN_PASSWORD)))
         session.commit()
     engine.dispose()
 
@@ -100,7 +113,11 @@ def server(tmp_path_factory):
     port = free_port()
     process = subprocess.Popen(
         ["uv", "run", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(port)],
-        env={**os.environ, "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}"},
+        env={
+            **os.environ,
+            "TURSO_DATABASE_URL": f"sqlite+pysqlite:///{database}",
+            "ADMIN_SESSION_SECRET": SESSION_SECRET,
+        },
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -132,30 +149,35 @@ def browser():
         instance.close()
 
 
-def open_audit(browser, base, width=1500, height=1000, query=""):
-    """Abre a tela de auditoria, fazendo login se necessario.
+def admin_page(browser, base, width, height):
+    """Pagina nova com a sessao admin ja no cookie e os erros de JS coletados.
 
-    O fluxo novo exige autenticacao admin. Se a pagina de login aparecer,
-    cria o primeiro admin (usuario 'test', senha 'test') e prossegue.
+    O cookie e assinado aqui com o segredo do servidor: a tela de login tem o
+    seu proprio teste, e passar por ela em cada teste so gastaria tempo.
     """
     page = browser.new_page(viewport={"width": width, "height": height})
+    page.context.add_cookies(
+        [{"name": ADMIN_COOKIE, "value": issue_jwt(1, SESSION_SECRET, 3600), "url": base}]
+    )
     problems = []
     page.on("pageerror", lambda error: problems.append(str(error)))
     page.on(
         "console",
         lambda message: problems.append(message.text) if message.type == "error" else None,
     )
+    return page, problems
+
+
+def api_get(url: str) -> httpx.Response:
+    """GET na API da auditoria com a sessao admin: `/api/*` responde 401 sem ela."""
+    cookie = f"{ADMIN_COOKIE}={issue_jwt(1, SESSION_SECRET, 3600)}"
+    return httpx.get(url, headers={"cookie": cookie}, timeout=10)
+
+
+def open_audit(browser, base, width=1500, height=1000, query=""):
+    """Abre a tela de auditoria ja autenticado e espera a primeira linha."""
+    page, problems = admin_page(browser, base, width, height)
     page.goto(f"{base}/admin/requests{query}", wait_until="networkidle")
-
-    # Se caiu no login (primeiro acesso ou sessao expirada), cria o admin.
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{base}/admin/painel**")
-
-    # Agora deve estar na tela de requisicoes
     page.wait_for_selector("#rows tr", timeout=10000)
     return page, problems
 
@@ -168,6 +190,27 @@ def test_the_screen_lists_the_requests_newest_first(browser, server):
     assert problems == []
     assert ids[:3] == ["req-00", "req-01", "req-02"]
     assert "de 24 requisições" in count
+
+
+def test_login_leads_to_the_requested_page(browser, server):
+    """Um link filtrado aberto sem sessao volta ao mesmo filtro depois do login.
+
+    E o unico teste que passa pela tela de login: sem o `next=`, o login cairia
+    no painel e o link compartilhado perderia a busca.
+    """
+    alvo = f"{server}/admin/requests?provider=groq&has_tools=true"
+    page = browser.new_page(viewport={"width": 1400, "height": 900})
+    problems = []
+    page.on("pageerror", lambda error: problems.append(str(error)))
+    page.goto(alvo, wait_until="networkidle")
+    assert "/admin/login" in page.url
+    page.fill('input[name="username"]', ADMIN_USER)
+    page.fill('input[name="password"]', ADMIN_PASSWORD)
+    page.click('button[type="submit"]')
+    page.wait_for_url(alvo)
+    page.wait_for_selector("#rows tr", timeout=10000)
+    page.close()
+    assert problems == []
 
 
 def test_a_chip_narrows_the_list_and_the_count(browser, server):
@@ -229,7 +272,7 @@ def test_clicking_a_row_opens_the_whole_chain(browser, server):
     page.click(f'#rows tr[data-id="{target}"]')
     page.wait_for_selector("#detail .chain li")
     detail = page.inner_text("#detail")
-    api = httpx.get(f"{server}/api/requests/{target}", timeout=10).json()
+    api = api_get(f"{server}/api/requests/{target}").json()
     selected = page.evaluate(
         """() => document.querySelector('#rows tr[aria-selected="true"]').dataset.id"""
     )
@@ -277,7 +320,7 @@ def test_the_export_carries_the_same_filters(browser, server):
     query = page.get_attribute("#export", "data-query")
     page.close()
     assert "status_min=400" in query
-    csv_text = httpx.get(f"{server}/api/requests/export?{query}", timeout=10).text
+    csv_text = api_get(f"{server}/api/requests/export?{query}").text
     assert csv_text.startswith("started_at,request_id")
     assert csv_text.count("\n") > 1
 
@@ -416,25 +459,9 @@ def test_a_value_from_an_old_link_stays_selectable(browser, server):
     """Link antigo com um modelo que sumiu do banco nao pode mudar a busca sozinho.
 
     A lista vem vazia de proposito aqui, entao a pagina abre sem esperar linha.
-    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o open_audit
-    lidar com o login se necessario.
     """
-    page = browser.new_page(viewport={"width": 1400, "height": 900})
-    problems = []
-    page.on("pageerror", lambda error: problems.append(str(error)))
-    page.on(
-        "console",
-        lambda message: problems.append(message.text) if message.type == "error" else None,
-    )
+    page, problems = admin_page(browser, server, 1400, 900)
     page.goto(f"{server}/admin/requests?provider=um-provedor-que-sumiu", wait_until="networkidle")
-
-    # Se caiu no login, cria o admin
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{server}/admin/painel**")
 
     page.wait_for_function("() => document.querySelectorAll('#provider option').length > 1")
     chosen = page.input_value("#provider")
@@ -552,28 +579,12 @@ def test_choosing_two_dates_shows_the_fields_and_filters(browser, server):
 
 
 def test_an_old_link_with_dates_reopens_the_same_window(browser, server):
-    """A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha.
-    O fluxo novo passa pelo login; abrimos a URL nova e deixamos o login acontecer.
-    """
-    page = browser.new_page(viewport={"width": 1400, "height": 900})
-    problems = []
-    page.on("pageerror", lambda error: problems.append(str(error)))
-    page.on(
-        "console",
-        lambda message: problems.append(message.text) if message.type == "error" else None,
-    )
+    """A janela de 2020 devolve lista vazia, entao a pagina abre sem esperar linha."""
+    page, problems = admin_page(browser, server, 1400, 900)
     page.goto(
         f"{server}/admin/requests?since=2020-01-01T00:00:00Z&until=2020-01-02T00:00:00Z",
         wait_until="networkidle",
     )
-
-    # Se caiu no login, cria o admin
-    if page.url.endswith("/admin/login") or "Primeiro acesso" in page.content():
-        page.fill('input[name="username"]', "test")
-        page.fill('input[name="password"]', "test")
-        page.fill('input[name="confirm"]', "test")
-        page.click('button[type="submit"]')
-        page.wait_for_url(f"{server}/admin/painel**")
 
     page.wait_for_selector("#empty:visible", timeout=10000)
     mostrado = page.evaluate(
