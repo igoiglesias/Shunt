@@ -351,7 +351,6 @@ app.include_router(admin_users_router)
 app.include_router(admin_tokens_router)
 app.include_router(admin_config_router)
 
-
 @app.get(
     "/health",
     tags=["System"],
@@ -403,3 +402,7 @@ async def estilo() -> Response:
     return Response(
         ESTILO.read_text(encoding="utf-8"), media_type="text/css", headers=NO_STORE
     )
+
+from app.routers.relay import router as relay_router
+
+app.include_router(relay_router)

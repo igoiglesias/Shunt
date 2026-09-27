@@ -141,7 +141,11 @@ def protocol_of(path: str, headers: Mapping[str, str]) -> str:
     if path.startswith("/v1/models"):
         found = detect_protocol(headers)
         return "openai" if found == "unknown" else found
-    return "openai"
+    if path.startswith("/v1/"):
+        return "openai"
+    # Catch-all (T5): o path nao e /v1, entao o protocolo vem dos headers.
+    from app.core.relay import relay_target
+    return relay_target(headers)
 
 
 
