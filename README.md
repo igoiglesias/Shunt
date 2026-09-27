@@ -679,7 +679,7 @@ to hand a dead host to the libsql driver in the first place.
 
 ```bash
 make dev     # uvicorn with reload, port 8000
-make test    # the suite, without E2E, in parallel (-n auto)
+make test    # the suite, without E2E, including the headless browser suite, in parallel (-n auto)
 make lint    # ruff
 make type    # mypy
 make check   # lint + type + suite with coverage, in parallel (-n auto), no browser

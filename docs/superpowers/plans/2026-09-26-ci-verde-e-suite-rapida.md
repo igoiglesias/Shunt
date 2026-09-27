@@ -1,6 +1,6 @@
 # Plano: CI verde e suite mais rapida e mais leve
 
-Status: planejado, NAO executado. Decisoes do usuario (finais): login honra `next=`; argon2 leve so nos testes; pytest-xdist; sqlite em memoria onde der.
+Status: executado na branch `ci/verde-e-suite-rapida`, CI pendente. Decisoes do usuario (finais): login honra `next=`; argon2 leve so nos testes; pytest-xdist; sqlite em memoria onde der.
 
 Legenda de evidencia: **medi** (rodei e vi a saida), **li** (conferi a fonte, `file:line`), **assumi** (nem um nem outro).
 
@@ -66,6 +66,7 @@ Producao so muda no `next=` do login.
 **Regras que valem para toda tarefa:**
 - **Portao:** de TAREFA, com RED real antes do GREEN e so os testes focados e os vizinhos rodando. Colar comando e saida em cada RED e em cada GREEN. So o T9 cobra portao de historia.
 - **Revisao e fechamento:** `strict-code-reviewer` (portao de tarefa) e depois `mutation-sweep` antes de DONE.
+  - **Nota (2026-09-26):** decisao do usuario move mutacao para so-quando-pedido; o `mutation-sweep` desta regra nao rodou.
 - **Commits:**
   - `git add` explicito, nunca `-A`;
   - nunca incluir `app/core/official_hosts.py`, `tests/core/test_official_hosts.py` ou `stats.db.lock`;
@@ -100,6 +101,7 @@ Producao so muda no `next=` do login.
 - **Asserts existentes que continuam validos:** `"/admin/login" in location` (`test_admin_session.py:55,88,99` etc.) e `== "/admin/painel"` (`test_admin_auth.py:107,163`, `test_admin_users.py:134`, `test_admin_dashboard.py:98`).
 - **Rodar:** `uv run pytest -q tests/core/test_auth.py tests/routers/test_admin_*.py tests/stats/test_dashboard_page.py`.
 - **Risco:** open redirect. A mutacao precisa matar cada ramo de `safe_next`.
+  - **Nota (2026-09-26):** decisao do usuario move mutacao para so-quando-pedido; essa mutacao nao rodou.
 
 ### T2 - Os testes de navegador voltam a passar
 
@@ -183,6 +185,7 @@ Producao so muda no `next=` do login.
   - `tests/browser` headless;
   - `make lint`, `make type` e `make check`;
   - mutacao sobre `safe_next` e sobre a fixture de argon2.
+    - **Nota (2026-09-26):** decisao do usuario move mutacao para so-quando-pedido; essa mutacao nao rodou.
 - **Tabela antes/depois** (T0 contra o final): parede serial e xdist, e2e, stats, navegador e os dois jobs de CI.
 - **Documentacao:** README e `CLAUDE.md` do projeto passam a citar o `-n auto` e o `next=` no login.
 
@@ -191,7 +194,7 @@ Producao so muda no `next=` do login.
 1. O `:memory:` via `build_engine(url)` sem `StaticPool` vira um banco por conexao.
 2. `StaticPool` com a thread do `Recorder` e arriscado. Seria verificado rodando esses arquivos 20x em memoria.
 3. Os ganhos do T5 e do xdist.
-4. O `pytest-cov` agrega a cobertura com o xdist, e o `pytest-xdist` nao tem install script.
+4. ~~O `pytest-cov` agrega a cobertura com o xdist~~ -- **medido**: `TOTAL 4292 66 98%` em serial (1606 passed, 49.91s) e igual `TOTAL 4292 66 98%` com `-n auto --dist loadfile` (1606 passed, 23.69s). Falta so a parte do `pytest-xdist` nao ter install script.
 5. A quantidade de vCPUs do runner e o estado da branch protection.
 6. A origem do `stats.db.lock`: nao e o codigo de `app/`, e o `.gitignore` nao o cobre.
 
