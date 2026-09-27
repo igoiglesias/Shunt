@@ -739,10 +739,21 @@ def _parse_moment(raw: str | None) -> datetime:
 
 
 def _as_event(row: RequestEvent) -> dict:
-    """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo."""
+    """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo.
+
+    A linha de relay vem com medidas de token em None, e nao com os zeros que
+    estao no banco: as colunas `input_tokens` e `output_tokens` sao NOT NULL
+    (`app/stats/models.py`), entao o relay e gravado com 0, mas zero e uma
+    medicao -- e relay e passagem de rede, que nunca mediu token algum. A
+    distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
+    tokens continua sendo um modelo, e `ttft_ms` de uma requisicao em streaming
+    que nao cronometrou nada tambem e None.
+    """
+    relay = row.kind == "relay"
     return {
         "id": row.id,
         "request_id": row.request_id,
+        "kind": row.kind or "model",
         "started_at": _utc(row.started_at),
         "route": row.route,
         "dialect": row.dialect,
@@ -754,9 +765,9 @@ def _as_event(row: RequestEvent) -> dict:
         "candidate_model": row.candidate_model,
         "status": row.status,
         "error_type": row.error_type,
-        "input_tokens": row.input_tokens,
-        "output_tokens": row.output_tokens,
-        "ttft_ms": row.ttft_ms,
+        "input_tokens": None if relay else row.input_tokens,
+        "output_tokens": None if relay else row.output_tokens,
+        "ttft_ms": None if relay else row.ttft_ms,
         "duration_ms": row.duration_ms,
         "attempts": list(row.attempts or []),
         "fell_back": row.fell_back,
@@ -765,8 +776,8 @@ def _as_event(row: RequestEvent) -> dict:
         "thinking_blocks": row.thinking_blocks,
         "project": row.project,
         "session_id": row.session_id,
-        "cached_input_tokens": row.cached_input_tokens,
-        "cache_write_tokens": row.cache_write_tokens,
+        "cached_input_tokens": None if relay else row.cached_input_tokens,
+        "cache_write_tokens": None if relay else row.cache_write_tokens,
     }
 
 
