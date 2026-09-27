@@ -402,6 +402,10 @@ Everything under `/admin` and `/api` needs an admin session. Without one, a
 screen redirects to the login and an `/api` call gets a 401. The `/v1` routes
 and `/health` never ask for it.
 
+The login redirect carries the requested page in `?next=`, and a successful
+login returns there. Only same-origin paths under `/admin` are honoured;
+anything else, `/admin/login` included, lands on `/admin/painel`.
+
 `/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
 `x-api-key` or a Claude user agent; OpenAI shape to one sending only
 `Authorization: Bearer`; and a superset carrying both sets of keys when there is
@@ -675,14 +679,17 @@ to hand a dead host to the libsql driver in the first place.
 
 ```bash
 make dev     # uvicorn with reload, port 8000
-make test    # the suite, without E2E
+make test    # the suite, without E2E, in parallel (-n auto)
 make lint    # ruff
 make type    # mypy
-make check   # lint + type + suite with coverage
-make e2e     # the app end to end against a scripted provider
-make browser # the panel in a headless browser
+make check   # lint + type + suite with coverage, in parallel (-n auto), no browser
+make e2e     # the app end to end against a scripted provider (-n auto)
+make browser # the panel in a headless browser, two workers (-n 2)
 make prod    # no reload, one worker per core, access log off, shutdown capped at 5 s
 ```
+
+The test targets run on `pytest-xdist` with `--dist loadfile`, so each test
+file stays in one worker. `uv run pytest -q <file>` still runs one file serially.
 
 For a configured model, Shunt sends the provider key stored in the database.
 For a transparent one it forwards the caller's own header, unless the request

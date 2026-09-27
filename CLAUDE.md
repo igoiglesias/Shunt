@@ -10,20 +10,20 @@ Shunt is a local FastAPI proxy between a coding harness (Claude Code above all) 
 
 ```bash
 make dev        # uvicorn with --reload on port 8000
-make test       # uv run pytest -q tests --ignore=tests/e2e
-make e2e        # uv run pytest -q tests/e2e   (app end to end against tests/e2e/fake_provider.py)
-make browser    # uv run pytest -q tests/browser   (Playwright, headless; slow, kept out of `check`)
+make test       # uv run pytest -q -n auto --dist loadfile tests --ignore=tests/e2e   (includes tests/browser)
+make e2e        # uv run pytest -q -n auto --dist loadfile tests/e2e   (app end to end against tests/e2e/fake_provider.py)
+make browser    # uv run pytest -q -n 2 --dist loadfile tests/browser   (Playwright, headless; ~1 min, kept out of `check`)
 make lint       # uv run ruff check app tests
 make type       # uv run mypy app
-make check      # lint + type + suite with coverage (excludes tests/browser)
-make prod       # no reload, one worker per core
+make check      # lint + type + pytest -n auto --dist loadfile --cov=app --cov-report=term-missing --ignore=tests/browser
+make prod       # no reload, one worker per core, --timeout-graceful-shutdown 5
 
 uv run pytest -q tests/routers/test_messages.py                  # one file
 uv run pytest -q tests/routers/test_messages.py::test_name       # one test
 uv sync / uv add <pkg> / uv lock --upgrade                       # deps, never pinned
 ```
 
-Python 3.14. `pytest` runs with `asyncio_mode = "auto"`; HTTP to providers is mocked with `respx`. No coverage threshold is configured.
+Python 3.14. `pytest` runs with `asyncio_mode = "auto"`; HTTP to providers is mocked with `respx`. The make targets use `pytest-xdist` with `--dist loadfile` (one file per worker), so tests must not share global state or fixed paths across files. No coverage threshold is configured.
 
 ## Architecture
 
@@ -44,7 +44,7 @@ Streaming exists only on `/v1/messages` and `/v1/chat/completions`; `/v1/complet
 
 ### Admin and panel
 
-- Admin session is a JWT in the `shunt_admin` cookie (`app/core/security.py`, `app/core/auth.py::require_admin`). `is_api_request` decides between a login redirect (HTML) and a 401 (API/HTMX).
+- Admin session is a JWT in the `shunt_admin` cookie (`app/core/security.py`, `app/core/auth.py::require_admin`). `is_api_request` decides between a login redirect (HTML) and a 401 (API/HTMX). The redirect carries `?next=`; `safe_next` honours only same-origin paths under `/admin` (not `/admin/login`) and falls back to `/admin/painel`.
 - UI is server-rendered Jinja2 in `app/templates/` with HTMX partials (`_*.html` are fragments swapped into full pages).
 - `app/stats/` holds the ORM models, the async `Recorder`, and the queries/analysis/dossier code behind the usage panel.
 
