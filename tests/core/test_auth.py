@@ -3,7 +3,10 @@
 O valor vem da query/form, entao e entrada do atacante: um `next` aceito sem
 filtro vira open redirect logo apos o login. Cada vetor abaixo ja derrubou
 algum filtro de redirect por ai; a lista cobre um vetor por guarda de
-`safe_next`, para que remover qualquer guarda deixe um teste vermelho.
+`safe_next`, para que remover qualquer guarda deixe um teste vermelho -- com
+uma excecao: a guarda de `scheme` e defesa em profundidade (ver docstring de
+`safe_next`) e nao tem vetor que a alcance sozinha, porque todo `scheme:...`
+real ja e barrado antes pela guarda "sem `/` no inicio".
 """
 
 import pytest

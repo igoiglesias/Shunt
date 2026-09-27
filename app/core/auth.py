@@ -87,7 +87,8 @@ NEXT_FALLBACK = "/admin/painel"
 def safe_next(raw: str | None) -> str:
     """Devolve `raw` se for caminho de mesma origem sob `/admin`, senao o painel.
 
-    Cada guarda fecha um vetor que as outras nao fecham:
+    Cada guarda fecha um vetor que as outras nao fecham, exceto a de `scheme`
+    (ver nota abaixo):
     - barra invertida, espaco e controle: o navegador le `\\` como `/` e
       descarta espaco/controle nas pontas, o que transforma `/\\evil.com` ou
       ` //evil.com` em outro host;
@@ -96,11 +97,13 @@ def safe_next(raw: str | None) -> str:
       para `/admin/x` e passaria, devolvendo o cru;
     - `//` no inicio: `urlsplit("///admin/x")` da netloc vazia e path
       `/admin/x`, mas o navegador le `///admin` como host `admin`;
-    - `scheme`: `https://evil.com/admin/x` e `javascript:/admin/x` tem path
-      sob `/admin` e mesmo assim saem da origem. Nao ha checagem de `netloc`
-      separado: o `urlsplit` so preenche netloc quando o texto (depois do
-      scheme) comeca com `//`, e os dois casos ja cairam nas guardas acima;
-      o espaco inicial, que o `urlsplit` descarta, cai na primeira guarda;
+    - `scheme`: defesa em profundidade, sem teste que a alcance sozinha.
+      `urlsplit` so preenche `scheme` quando o texto ANTES do `:` bate com
+      `[a-zA-Z][a-zA-Z0-9+.-]*` -- e essa mesma checagem so roda depois da
+      guarda "sem `/` no inicio" (linha acima), que ja barra todo `scheme:...`
+      real (`https://evil.com/admin/x`, `javascript:/admin/x`), porque nenhum
+      deles comeca com `/`. Fica como cinto e suspensorio caso a guarda
+      anterior mude;
     - path decodificado sob `/admin`: e o que o servidor roteia; `%2F`/`%5C`
       codificados (`/%2F%2Fevil.com`) nao comecam com `/admin/` e caem aqui;
     - segmento `.`/`..`: o navegador resolve `/admin/../docs` (e a forma

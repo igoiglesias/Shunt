@@ -390,7 +390,6 @@ def test_the_tape_can_show_only_the_failures(browser, server):
 RESUMO_COM_DADOS = """() => {
     if (!window.__emVoo) {
         window.__emVoo = true;
-        window.__cargas += 1;
         load()
             .then(() => { window.__comDados = hours === 2 && snapshot.totals.requests > 0; })
             .finally(() => { window.__emVoo = false; });
@@ -412,7 +411,7 @@ def test_a_worker_without_a_database_does_not_blank_the_panel(browser, server):
     page, problems = open_panel(browser, server, 1400, 900)
     # Janela de duas horas: o resumo e cacheado por cinco segundos POR JANELA, e
     # a de 24 h acabou de ser respondida zerada pelo teste que limpou o banco.
-    page.evaluate("() => { hours = 2; window.__cargas = 0; window.__comDados = false; }")
+    page.evaluate("() => { hours = 2; window.__comDados = false; }")
     # O painel recarrega sozinho a cada 15 s; aqui o teste pede a atualizacao em
     # vez de esperar por ela, e repete o pedido ate o lote do worker aparecer no
     # resumo -- a condicao e o banco ter as linhas, e nao um tempo fixo.
