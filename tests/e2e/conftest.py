@@ -29,6 +29,7 @@ def no_real_backoff(monkeypatch):
     """
     monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
 
+
 E2E_SETTINGS = Settings(
     providers={
         "openrouter": ProviderConfig(

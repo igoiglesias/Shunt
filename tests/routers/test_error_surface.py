@@ -76,7 +76,9 @@ def test_a_malformed_body_is_refused_as_json_not_as_text(route, payload, dialect
         (529, "overloaded_error"),
     ],
 )
-def test_an_upstream_status_becomes_the_matching_anthropic_error_type(monkeypatch, status, expected):
+def test_an_upstream_status_becomes_the_matching_anthropic_error_type(
+    monkeypatch, status, expected
+):
     # O `last_resort` de `828591e` tenta o transparente no host oficial quando
     # a rota esgota: sem mock dele a chamada saida para a internet. A mesma
     # resposta mantem o 502 de "nada respondeu" com o status do upstream.
