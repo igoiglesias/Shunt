@@ -52,6 +52,10 @@ def test_safe_next_accepts_same_origin_admin_paths(value):
         "/%2F%2Fevil.com",
         "%2F%2Fevil.com",
         "/%5Cevil.com",
+        # codificado sem barra inicial: decodifica para /admin, mas o valor cru
+        # e relativo e o navegador o resolve contra /admin/login
+        "%2Fadmin/x",
+        "%2fadmin",
         # fora de /admin
         "/api/stats",
         "/docs",

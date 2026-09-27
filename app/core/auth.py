@@ -91,6 +91,9 @@ def safe_next(raw: str | None) -> str:
     - barra invertida, espaco e controle: o navegador le `\\` como `/` e
       descarta espaco/controle nas pontas, o que transforma `/\\evil.com` ou
       ` //evil.com` em outro host;
+    - sem `/` no inicio: o valor cru seria relativo a `/admin/login`, e as
+      guardas seguintes olham o path DECODIFICADO -- `%2Fadmin/x` decodifica
+      para `/admin/x` e passaria, devolvendo o cru;
     - `//` no inicio: `urlsplit("///admin/x")` da netloc vazia e path
       `/admin/x`, mas o navegador le `///admin` como host `admin`;
     - `scheme`: `https://evil.com/admin/x` e `javascript:/admin/x` tem path
@@ -107,6 +110,8 @@ def safe_next(raw: str | None) -> str:
     if not raw:
         return NEXT_FALLBACK
     if any(ch == "\\" or ch.isspace() or not ch.isprintable() for ch in raw):
+        return NEXT_FALLBACK
+    if not raw.startswith("/"):
         return NEXT_FALLBACK
     if raw.startswith("//"):
         return NEXT_FALLBACK
