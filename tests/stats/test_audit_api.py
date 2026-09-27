@@ -17,16 +17,10 @@ from app.core.observability import set_recorder
 from app.routers import audit
 from app.stats.recorder import Recorder
 from tests.core.test_dispatcher import SETTINGS
-from tests.stats.test_dashboard_api import _request_with
+from tests.stats.test_dashboard_api import _json, _request_with
 from tests.stats.test_queries import relay_row, row
 
 NOW = datetime.now(UTC)
-
-
-def _corpo_vazio():
-    """POST sem corpo: o caminho normal do botao de analisar."""
-    raise ValueError("sem corpo")
-
 
 
 @pytest.fixture
@@ -42,6 +36,12 @@ def store(make_engine, tmp_path):
                     candidate_model="openai/gpt-oss-120b",
                     project="/home/x/agenda",
                     session_id="s-1",
+                    # Medidas reais de proposito: `None if relay else ...` so e
+                    # distinguivel de "sempre None" quando a linha de modelo
+                    # carrega de fato os valores.
+                    input_tokens=10,
+                    output_tokens=5,
+                    ttft_ms=120,
                     cached_input_tokens=8,
                     cache_write_tokens=2,
                     tools_offered=["Read"],
@@ -85,8 +85,16 @@ def store_with_relay(store, tmp_path):
             relay_row(
                 request_id="repasse",
                 started_at=NOW - timedelta(seconds=30),
+                # Valores NAO nulos de proposito: o banco aceita os dois (sao
+                # `nullable=True`, `app/stats/models.py`), e e justamente o
+                # `kind` quem tem de deciding -- se a API copiasse o valor, a
+                # linha do relay afirmaria "cacheou 8 tokens" sobre um trafego
+                # de rede que nunca cacheou nada.
                 input_tokens=0,
                 output_tokens=0,
+                ttft_ms=42,
+                cached_input_tokens=8,
+                cache_write_tokens=2,
             )
         )
         session.commit()
@@ -352,9 +360,10 @@ async def test_o_detalhe_e_o_csv_levam_o_cache_informado(store):
 async def test_a_linha_de_relay_vem_com_kind_e_sem_medidas(store_with_relay):
     """RED 1: o relay e rastro de rede, e nao uma chamada de modelo.
 
-    Tokens e TTFT nao existem para ele -- o banco guarda 0 por causa do NOT
-    NULL, e a API e quem traduz 0 em "nao existe" olhando o `kind`. Sem isso a
-    linha afirmaria "zero tokens" sobre um trafego que nunca mediu tokens.
+    Tokens, TTFT e cache nao existem para ele. O banco guarda valores de
+    proposito (0 nos tokens NOT NULL, reais nas colunas `nullable`), e a API e
+    quem zera tudo olhando o `kind`: sem isso a linha afirmaria "oito tokens em
+    cache" sobre um trafego de rede que nunca cacheou nada.
     """
     eventos = {
         e["request_id"]: e for e in body_of(await audit.search_requests(with_params(store_with_relay)))[
@@ -364,9 +373,13 @@ async def test_a_linha_de_relay_vem_com_kind_e_sem_medidas(store_with_relay):
     relay = eventos["repasse"]
 
     assert relay["kind"] == "relay"
+    # As CINCO chaves de medicao: as duas NOT NULL chegam como 0 e as outras
+    # como valores reais no banco, e nenhuma pode vazar para a tela.
     assert relay["input_tokens"] is None
     assert relay["output_tokens"] is None
     assert relay["ttft_ms"] is None
+    assert relay["cached_input_tokens"] is None
+    assert relay["cache_write_tokens"] is None
     # A linha de modelo continua medindo, e continua sendo `model`.
     assert eventos["ok"]["kind"] == "model"
     assert eventos["ok"]["input_tokens"] == 10
@@ -415,14 +428,19 @@ async def test_a_analise_filha_de_kind_desconhecido_nao_quebra(
     # dossie nunca veria a chave, e o 500 seria impossivel por outro motivo.
     assert "kind" in audit.filters_from({"kind": "relay"})
 
-    request = with_params(store_with_relay, kind="relay")
+    request = with_params(store_with_relay, kind="relay", route="/api/oauth/usage")
     request.app.state.settings = SETTINGS.model_copy(update={"default_model": "cheap"})
     request.app.state.pool = None
-    request.json = _corpo_vazio
+    # POST sem corpo, o caminho normal do botao: `_body_of` trata o vazio.
+    request.json = _json({})
 
     resposta = await audit.analyse_period(request)
 
     assert resposta.status_code == 200
     corpo = body_of(resposta)
-    # O dossie ecoa so o que ele entende: `kind` nao aparece no recorte.
-    assert "kind" not in corpo["dossier"]["period"]["filters"]
+    # O dossie ecoa so o que ele entende: `kind` nao aparece no recorte...
+    filtros = corpo["dossier"]["period"]["filters"]
+    assert "kind" not in filtros
+    # ...mas ecoa de fato o resto que a tela pediu. Sem isto, um `pop` a mais
+    # (tirar `route`, por exemplo) passaria despercebido.
+    assert filtros["route"] == "/api/oauth/usage"
