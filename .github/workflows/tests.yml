@@ -1,8 +1,20 @@
-# Roda a suite inteira (unitarios, tests/e2e e tests/browser com Chromium headless).
-# Este workflow so BLOQUEIA merge em master quando o check `tests` estiver marcado
-# como obrigatorio na branch protection / ruleset do repositorio.
-# Com o check obrigatorio, toda mudanca entra em master por PR; push direto e recusado.
+# Roda a suite em dois jobs: `unit` (tests --ignore=tests/browser, com pytest-xdist)
+# e `browser` (tests/browser, Playwright/Chromium headless).
+# Este workflow so BLOQUEIA merge em master quando os checks `unit` e `browser`
+# estiverem marcados como obrigatorios na branch protection / ruleset do
+# repositorio (o check antigo `tests` saiu da lista de obrigatorios).
+# Com os checks obrigatorios, toda mudanca entra em master por PR; push direto e recusado.
 # setup-uv deixou de publicar tag major flutuante a partir da v8; por isso a tag completa.
+#
+# timeout-minutes:
+# - unit: medido localmente (8 vCPUs) com `-n auto --dist loadfile`: 1606 passed em
+#   20.30s. 2x da medicao fica abaixo do minimo combinado de 10 min (que ja cobre
+#   o runner da CI ter menos vCPUs e o tempo de checkout/uv sync), entao usamos o minimo.
+# - browser: medido localmente (T6) com `-n 2 --dist loadfile`: ~64s. 2x da medicao
+#   da ~2,2 min so para os testes; isso NAO cobre checkout/setup-uv/uv sync nem o
+#   `playwright install --with-deps chromium`, que nao foram medidos aqui (ASSUMIDO).
+#   Por isso o valor final soma um buffer assumido para essas etapas de instalacao
+#   em vez de usar so o 2x cru da medicao. Ajustar com as duracoes reais do PR.
 name: tests
 
 on:
@@ -20,10 +32,29 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  tests:
-    name: tests
+  unit:
+    name: unit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: uv sync --locked
+
+      - name: Rodar a suite unitaria
+        run: uv run pytest -q -rs -n auto --dist loadfile tests --ignore=tests/browser
+
+  browser:
+    name: browser
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -39,5 +70,5 @@ jobs:
       - name: Instalar Chromium do Playwright
         run: uv run playwright install --with-deps chromium
 
-      - name: Rodar a suite
-        run: uv run pytest -q -rs tests
+      - name: Rodar a suite de navegador
+        run: uv run pytest -q -rs --maxfail=5 -n 2 --dist loadfile tests/browser

@@ -22,7 +22,7 @@ from app.core.dispatcher import (
 )
 from app.core.upstream import UpstreamPool
 from app.translate.sse_parse import SSEEvent
-from tests.core.test_dispatcher import CLIENT_HEADERS, SETTINGS, TRANSPARENT, NO_ANTHROPIC_DECLARED
+from tests.core.test_dispatcher import CLIENT_HEADERS, NO_ANTHROPIC_DECLARED, SETTINGS, TRANSPARENT
 
 BODY = {
     "model": "claude-opus-4-5",

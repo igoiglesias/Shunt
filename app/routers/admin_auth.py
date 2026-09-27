@@ -5,18 +5,24 @@ sao a porta de entrada e a saida dela. O resto do admin passa por
 `require_admin` (ver `app/core/auth.py`). O fluxo de primeiro acesso cria o
 primeiro usuario direto na tela, sem ambiente nem seed: quando a tabela de
 usuarios esta vazia, a tela de login vira a de criacao.
+
+O `next` (a pagina que o navegador pediu antes de cair no login, ver
+`login_redirect` em `app/core/auth.py`) viaja num campo oculto do formulario e
+passa por `safe_next` nos dois pontos: ao renderizar e ao redirecionar. O POST
+nao confia no que o GET renderizou -- o formulario pode ser enviado direto.
 """
 
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config.config import ADMIN_COOKIE, ADMIN_COOKIE_MAX_AGE, ADMIN_COOKIE_PATH
+from app.core.auth import safe_next
 from app.core.security import hash_password, issue_jwt, verify_password
 from app.routers.admin_config import request_engine
 from app.stats.models import User
@@ -41,7 +47,10 @@ def _set_session_cookie(response: RedirectResponse, request: Request, user_id: i
 
 
 @router.get("/login", response_class=HTMLResponse, include_in_schema=False)
-async def login_page(request: Request):
+async def login_page(
+    request: Request,
+    next: Annotated[str | None, Query()] = None,
+):
     """A porta de entrada.
 
     O banco pode nao existir no boot (sem Turso) ou falhar; a tela deve
@@ -61,7 +70,7 @@ async def login_page(request: Request):
             count = session.scalar(select(func.count()).select_from(User)) or 0
         if count == 0:
             mode = "create"
-    return render("login.html", request=request, mode=mode, error=None)
+    return render("login.html", request=request, mode=mode, error=None, next=safe_next(next))
 
 
 @router.post("/login", response_class=HTMLResponse, include_in_schema=False)
@@ -70,8 +79,10 @@ async def login_submit(
     username: Annotated[str, Form()],
     password: Annotated[str, Form()],
     confirm: Annotated[str | None, Form()] = None,
+    next: Annotated[str | None, Form()] = None,
 ):
     """Valida o login (ou cria o primeiro admin) e abre a sessao no cookie."""
+    destination = safe_next(next)
     engine = request_engine(request)
     with Session(engine) as session:
         count = session.scalar(select(func.count()).select_from(User)) or 0
@@ -82,6 +93,7 @@ async def login_submit(
                 resp = render(
                     "login.html", request=request, mode="create",
                     error="Preencha usuario e as duas senhas (iguais).",
+                    next=destination,
                 )
                 resp.status_code = 400
                 return resp
@@ -98,6 +110,7 @@ async def login_submit(
                 resp = render(
                     "login.html", request=request, mode="create",
                     error="Já existe um administrador; faça login.",
+                    next=destination,
                 )
                 resp.status_code = 400
                 return resp
@@ -111,6 +124,7 @@ async def login_submit(
                 resp = render(
                     "login.html", request=request, mode="login",
                     error="Usuario ou senha invalidos.",
+                    next=destination,
                 )
                 resp.status_code = 401
                 return resp
@@ -118,7 +132,7 @@ async def login_submit(
             session.commit()
             user_id = existing.id
 
-    target = RedirectResponse("/admin/painel", status_code=303)
+    target = RedirectResponse(destination, status_code=303)
     _set_session_cookie(target, request, user_id)
     return target
 

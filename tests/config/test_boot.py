@@ -11,14 +11,48 @@ os.environ["OPENROUTER_API_KEY"] = "sk-or-test"
 os.environ["GROQ_API_KEY"] = "gsk-test"
 os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test"
 
+import pytest
+
 from app.config import seed
 from app.config.settings import Settings, load_settings_from_db
 from app.stats.models import Base
 
+_STATE_ATTRS = ("settings", "pool", "recorder", "admin_session_secret")
 
-def test_boot_with_engine_returns_seeded_settings():
+
+@pytest.fixture(autouse=True)
+def _isolated_app_state():
+    """Guarda e esvazia o `app.state` antes de cada teste, e devolve depois.
+
+    O lifespan so carrega o catalogo quando `app.state.settings` nao existe
+    (`app/main.py`, "tests set `state.settings`"). Medido com pytest-xdist: um
+    worker que rodou antes `tests/routers/test_openai_routes.py` deixou o
+    `SETTINGS` de teste no `app` singleton, e o boot deste arquivo subiu com 1
+    provedor em vez dos 3 do seed. Em serie passava so porque `tests/config`
+    vem antes na ordem alfabetica. Mesmo padrao de `tests/test_main.py`.
+    """
+    from app.main import app
+
+    saved = {}
+    for attr in _STATE_ATTRS:
+        if hasattr(app.state, attr):
+            saved[attr] = getattr(app.state, attr)
+            delattr(app.state, attr)
+    try:
+        yield
+    finally:
+        for attr in _STATE_ATTRS:
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+        for attr, value in saved.items():
+            setattr(app.state, attr, value)
+
+
+def test_boot_with_engine_returns_seeded_settings(tmp_path):
     """Com engine, load_settings_from_db devolve o catálogo seedado."""
-    engine = create_engine("sqlite+pysqlite:////tmp/shunt-test-boot.db")
+    # `tmp_path`, e nao um caminho fixo em /tmp: duas rodadas simultaneas
+    # (workers do xdist, dois checkouts) disputariam o mesmo arquivo.
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'boot.db'}")
     try:
         Base.metadata.create_all(engine)
         seed.seed_catalog_if_empty(engine)
@@ -39,7 +73,7 @@ def test_boot_with_engine_returns_seeded_settings():
         assert settings.default_model == "open-gpt-oss-120"
         assert len(settings.routes) == 10
     finally:
-        os.remove("/tmp/shunt-test-boot.db")
+        engine.dispose()
 
 
 def test_boot_without_engine_returns_empty_settings():

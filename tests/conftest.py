@@ -11,6 +11,7 @@ o ambiente sem banco, e a persistencia fica desligada a menos que o proprio
 teste injete um `Recorder` com engine de arquivo temporario.
 """
 
+import argon2
 import pytest
 from fastapi.testclient import TestClient
 
@@ -19,6 +20,37 @@ TEST_SHUNT_TOKEN = "token-da-suite-de-testes"
 # um teste de revogacao nunca derruba o token da suite.
 TEST_SHUNT_TOKEN_ID = 999_999
 _ORIGINAL_INIT = TestClient.__init__
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "real_argon2: mantem o argon2 de producao no teste (desliga a fixture light_argon2)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def light_argon2(request, monkeypatch):
+    """Troca `app.core.security._hasher` por um argon2 barato em todo teste.
+
+    O default do argon2-cffi custa ~75-145ms por hash+verify, e a suite faz
+    muitos logins; sem isso, a suite inteira fica lenta por causa de um
+    parametro de seguranca que nao muda o comportamento testado. Funciona
+    porque `hash_password`/`verify_password` leem o global `_hasher` na hora
+    da chamada (`app/core/security.py:24,35`), entao a troca por
+    `monkeypatch.setattr` vale mesmo sem reimportar o modulo.
+
+    O teste-guarda usa `@pytest.mark.real_argon2` para desligar a troca e
+    confirmar que `_hasher` de producao continua no default da biblioteca.
+    """
+    if request.node.get_closest_marker("real_argon2"):
+        yield
+        return
+    from app.core import security
+
+    leve = argon2.PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
+    monkeypatch.setattr(security, "_hasher", leve)
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +84,16 @@ def without_shunt_token(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _recorder_not_leaked():
+    from app.core import observability
+
+    # O `lifespan` tambem troca o gravador GLOBAL de `observability`
+    # (`set_recorder`) e ninguem o devolve. Medido com `pytest -n auto --dist
+    # load`: um worker que subiu o app com banco (`tests/config/test_boot.py`)
+    # deixou um `Recorder` ligado, e `tests/stats/test_extraction.py`, que
+    # confere o no-op padrao, falhou. Em serie passava so pela ordem dos arquivos.
+    global_recorder = observability._recorder
     yield
+    observability.set_recorder(global_recorder)
     # Testes que injetam um `Recorder` com engine fazem isso no `app.state`;
     # sem limpeza o proximo `TestClient` reaproveita o objeto (worker encerrado,
     # engine antiga) e o teste que exige o comportamento "sem banco" (503)

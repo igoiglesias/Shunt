@@ -20,8 +20,8 @@ NOW = datetime.now(UTC)
 
 
 @pytest.fixture
-def store(make_engine, tmp_path):
-    engine = make_engine(f"sqlite+pysqlite:///{tmp_path / 'stats.db'}")
+def store(make_engine):
+    engine = make_engine()
     with Session(engine) as session:
         session.add_all(
             [
