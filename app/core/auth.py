@@ -10,7 +10,16 @@ O redirect nao e devolvido pela dependencia em si, porque o FastAPI injetaria o
 `RedirectResponse` no parametro da rota em vez de enviar como resposta, e a rota
 entao responderia o proprio HTML. Em vez disso a dependencia levanta
 `LoginRequired`; o handler registrado em `app/main.py` o converte no redirect.
+
+O redirect leva o caminho pedido em `?next=`, e o login volta para ele. Esse
+valor vem do navegador, entao e entrada hostil: `safe_next` so deixa passar
+caminho relativo de mesma origem sob `/admin` (exceto o proprio login, que
+seria um laco) e troca todo o resto pelo painel. Sem esse filtro o login vira
+open redirect -- o atacante manda um link de login legitimo que, depois da
+senha digitada, leva a vitima para o dominio dele.
 """
+
+from urllib.parse import quote, unquote, urlsplit
 
 from fastapi import HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -71,6 +80,59 @@ def require_admin(request: Request) -> int:
     return int(claims["sub"])
 
 
+# Destino pos-login quando o `next` falta ou e recusado.
+NEXT_FALLBACK = "/admin/painel"
+
+
+def safe_next(raw: str | None) -> str:
+    """Devolve `raw` se for caminho de mesma origem sob `/admin`, senao o painel.
+
+    Cada guarda fecha um vetor que as outras nao fecham:
+    - barra invertida, espaco e controle: o navegador le `\\` como `/` e
+      descarta espaco/controle nas pontas, o que transforma `/\\evil.com` ou
+      ` //evil.com` em outro host;
+    - `//` no inicio: `urlsplit("///admin/x")` da netloc vazia e path
+      `/admin/x`, mas o navegador le `///admin` como host `admin`;
+    - `scheme`: `https://evil.com/admin/x` e `javascript:/admin/x` tem path
+      sob `/admin` e mesmo assim saem da origem. Nao ha checagem de `netloc`
+      separado: o `urlsplit` so preenche netloc quando o texto (depois do
+      scheme) comeca com `//`, e os dois casos ja cairam nas guardas acima;
+      o espaco inicial, que o `urlsplit` descarta, cai na primeira guarda;
+    - path decodificado sob `/admin`: e o que o servidor roteia; `%2F`/`%5C`
+      codificados (`/%2F%2Fevil.com`) nao comecam com `/admin/` e caem aqui;
+    - segmento `.`/`..`: o navegador resolve `/admin/../docs` (e a forma
+      `%2e%2e`) para fora de `/admin`;
+    - o proprio login: voltar para ele depois de logar seria um laco.
+    """
+    if not raw:
+        return NEXT_FALLBACK
+    if any(ch == "\\" or ch.isspace() or not ch.isprintable() for ch in raw):
+        return NEXT_FALLBACK
+    if raw.startswith("//"):
+        return NEXT_FALLBACK
+    parts = urlsplit(raw)
+    if parts.scheme:
+        return NEXT_FALLBACK
+    path = unquote(parts.path)
+    if path != "/admin" and not path.startswith("/admin/"):
+        return NEXT_FALLBACK
+    segments = path.split("/")
+    if "." in segments or ".." in segments:
+        return NEXT_FALLBACK
+    if path.rstrip("/") == LOGIN_URL:
+        return NEXT_FALLBACK
+    return raw
+
+
 def login_redirect(request: Request) -> RedirectResponse:
-    """Handler do `LoginRequired`: manda o navegador para a tela de login."""
-    return RedirectResponse(LOGIN_URL, status_code=303)
+    """Handler do `LoginRequired`: manda o navegador para a tela de login.
+
+    Leva o caminho pedido (com a query, quando houver) em `?next=`, codificado
+    com `quote(..., safe="/")` para que `?`, `=` e `&` do destino nao se
+    misturem a query do proprio login. O filtro fica no login (`safe_next`),
+    que e onde o valor e consumido.
+    """
+    target = request.url.path
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+    return RedirectResponse(f"{LOGIN_URL}?next={quote(target, safe='/')}", status_code=303)
