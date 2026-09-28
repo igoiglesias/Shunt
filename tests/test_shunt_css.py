@@ -44,6 +44,17 @@ def _luminance(color: str) -> float:
     return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
 
 
+def _blend(foreground: str, background: str, alpha: float) -> str:
+    """Compoe alpha de foreground sobre background e devolve o hex resultante
+    (o que o navegador faz com rgba(...,alpha))."""
+    red_a, green_a, blue_a = _hex(foreground)
+    red_b, green_b, blue_b = _hex(background)
+    red = round((red_a * alpha + red_b * (1 - alpha)) * 255)
+    green = round((green_a * alpha + green_b * (1 - alpha)) * 255)
+    blue = round((blue_a * alpha + blue_b * (1 - alpha)) * 255)
+    return f"#{red:02x}{green:02x}{blue:02x}"
+
+
 def _contrast(foreground: str, background: str) -> float:
     light = _luminance(foreground)
     dark = _luminance(background)
@@ -102,21 +113,35 @@ def test_the_cap_toggle_thumb_stays_contrasting_on_good():
 
 
 # ---------------------------------------------------------------------------
-# D4: `.chip.bad` (sem filtro de estado). O chip falso vem SEM aria-pressed
-# (D1), entao `.chip.bad[aria-pressed="true"]` nunca casa: a regra era morta e
-# o vermelho do "sem tools" nunca pintava.
+# D4: `.chip.bad`. Existem dois .chip.bad na area admin:
+#   - os rotulos de capacidade das tabelas (<span class="chip bad">, SEM
+#     aria-pressed);
+#   - o botao de filtro "falhas" da auditoria (audit.html:326, COM
+#     aria-pressed, alternado pelo JS de audit.html:1148).
+# A regra de estado so e morta se NENHUM .chip.bad tiver aria-pressed. Como
+# o da auditoria tem, ela serve um elemento real.
 # ---------------------------------------------------------------------------
 
 
-def test_chip_bad_has_no_dead_state_filter():
+def test_chip_bad_rule_paints_the_error_red():
     source = CSS.read_text(encoding="utf-8")
     assert ".chip.bad {" in source
-    # O seletor antigo colava um estado que o chip nao tem mais (e nunca
-    # tera: ele e rotulo, nao controle).
-    assert '.chip.bad[aria-pressed="true"]' not in source
-    # E a regra que existe pinta de fato o vermelho.
+    # A regra de base pinta de fato o vermelho.
     block = source.split(".chip.bad {", 1)[1].split("}", 1)[0]
     assert "var(--error)" in block
+
+
+def test_chip_bad_pressed_rule_is_not_dead():
+    """O filtro 'falhas' da auditoria e .chip.bad E tem aria-pressed: a
+    regra de estado casa um elemento que existe de verdade."""
+    audit = (CSS.parent / "audit.html").read_text(encoding="utf-8")
+    chips_bad = [
+        line for line in audit.splitlines()
+        if "chip bad" in line and "aria-pressed" in line
+    ]
+    assert chips_bad, "o filtro .chip.bad com aria-pressed sumou da auditoria"
+    source = CSS.read_text(encoding="utf-8")
+    assert '.chip.bad[aria-pressed="true"] {' in source
 
 
 def test_shunt_css_is_served_with_no_store():
@@ -128,3 +153,117 @@ def test_shunt_css_is_served_with_no_store():
     assert r.status_code == 200
     assert "cache-control" in r.headers
     assert "no-store" in r.headers["cache-control"]
+
+
+# ---------------------------------------------------------------------------
+# R1 (revisao D-round): o seletor sticky de acoes estava morto. As quatro
+# tabelas da config admin nao tem td.actions/th.actions -- a classe .actions
+# esta no DIV de dentro (<td class="n"><div class="actions">). O seletor
+# casava nada e a coluna de acoes continuava alem da dobra no mobile.
+# ---------------------------------------------------------------------------
+
+
+CONFIG = CSS.parent / "admin_config.html"
+
+
+def test_the_sticky_actions_rule_matches_a_real_cell():
+    """A regra sticky precisa casar uma celula real. Cada partial poe as
+    acoes na ultima coluna, e o seletor tem que alcancar o <td> externo --
+    nao o div de dentro."""
+    source = CONFIG.read_text(encoding="utf-8")
+    media = source.split("@media (max-width: 760px)", 1)[1]
+    # O seletor vivo: alcanca a ultima coluna das quatro tabelas.
+    assert ".table-container td:last-child" in media
+    assert ".table-container th:last-child" in media
+    # O seletor morto nao pode sobrar como regra (casava so a classe que
+    # esta no div interno). Assercao no seletor, nao em substring solto:
+    # o comentario que documenta o bug cita as palavras.
+    assert "td.actions," not in media
+    assert "td.actions {" not in media
+    assert "th.actions," not in media
+    assert "th.actions {" not in media
+
+
+@pytest.mark.parametrize(
+    "template",
+    ["_models.html", "_providers.html", "_routes.html", "_history.html"],
+)
+def test_every_config_table_has_actions_as_its_last_cell(template):
+    """A regra e :last-child, então ela so vale se a coluna de acoes for
+    realmente a ultima de cada tabela. Quebrar a ordem quebra o sticky."""
+    path = CSS.parent / template
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "<th" in line and "Ações" in line:
+            assert line.rstrip().endswith("</th>")
+            assert "<td" not in line
+            return
+    raise AssertionError(f"cabecalho de acoes nao encontrado em {template}")
+
+
+# ---------------------------------------------------------------------------
+# R2: --error escureceu para #c13a2e, e tres textos ainda usavam o token
+# direto. O novo vermelho como TEXTO sobre --ground ou sobre a tint falha
+# AA (3.46:1 e 3.23:1). --error-text #e2695c existe para isso.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("template", "selector"),
+    [
+        ("login.html", ".error"),
+        ("dashboard.html", ".tape li.bad .what b"),
+    ],
+)
+def test_error_text_uses_the_readable_variant(template, selector):
+    """Texto vermelho sobre fundo escuro: tem que ser --error-text, nao
+    --error. AA para texto pequeno e 4.5:1."""
+    path = CSS.parent / template
+    source = path.read_text(encoding="utf-8")
+    rule = source.split(selector + " {", 1)[1].split("}", 1)[0]
+    assert "var(--error-text)" in rule, (
+        f"{template} {selector} nao usa --error-text; contraste insuficiente"
+    )
+    assert "var(--error)" not in rule
+
+
+def test_error_text_token_reaches_aa_on_ground():
+    """O par que as duas regras acima montam: --error-text sobre --ground."""
+    tokens = _tokens()
+    ratio = _contrast(tokens["--error-text"], tokens["--ground"])
+    assert ratio >= 4.5, f"--error-text sobre --ground da {ratio:.2f}:1"
+
+
+def test_error_text_token_reaches_aa_on_the_bad_tint():
+    """O .tape li.bad tem tint de --error a 10% por baixo do <b>. O piso
+    do vermelho direto la era 3.23:1; o --error-text chega a 5.29:1."""
+    tokens = _tokens()
+    tint = _blend(tokens["--error"], tokens["--panel"], 0.10)
+    assert _contrast(tokens["--error-text"], tint) >= 4.5
+    # O vermelho direto nao passa no mesmo fundo -- e o que esta regra prova.
+    assert _contrast(tokens["--error"], tint) < 4.5
+
+
+# ---------------------------------------------------------------------------
+# R3: o chip .bad pressionado. O estado ligado e generico (texto --ground
+# sobre fundo --ink) e pinta por cima do branco do .chip.bad: no novo
+# --error, texto escuro sobre vermelho da 3.46:1. O .slow e .chain ja tem
+# a sua variante de estado; o .bad e o que faltava.
+# ---------------------------------------------------------------------------
+
+
+def test_chip_bad_pressed_keeps_a_light_text():
+    source = CSS.read_text(encoding="utf-8")
+    assert '.chip.bad[aria-pressed="true"] {' in source
+    block = source.split('.chip.bad[aria-pressed="true"] {', 1)[1].split("}", 1)[0]
+    assert "var(--ink)" in block or "#fff" in block
+    assert "var(--error)" in block  # mantem o fundo vermelho
+
+
+def test_chip_bad_pressed_text_reaches_aa():
+    tokens = _tokens()
+    fg = tokens["--ink"]
+    bg = tokens["--error"]
+    ratio = _contrast(fg, bg)
+    assert ratio >= 4.5, f"--ink sobre --error da {ratio:.2f}:1"
+    # O que a regra generica arrastava para o chip: escuro sobre vermelho.
+    assert _contrast(tokens["--ground"], bg) < 4.5

@@ -36,6 +36,7 @@
   --good: #3fa34d;
   --warning: #e0a021;
   --error: #c13a2e;
+  --error-rgb: 193, 58, 46;
   --error-text: #e2695c;
 
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace;
@@ -229,6 +230,12 @@ a:focus-visible {
   background: var(--error);
   border-color: var(--error);
   color: #fff;
+}
+
+.chip.bad[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--error);
+  border-color: var(--error);
 }
 
 .chip.slow[aria-pressed="true"] {

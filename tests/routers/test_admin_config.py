@@ -189,8 +189,16 @@ def test_mobile_media_query_glues_the_actions_column_to_the_right_edge(monkeypat
     source = r.text
     media = source.split("@media (max-width: 760px)", 1)[1]
     # A regra so existe DENTRO do media query (nao vira sticky no desktop).
-    for needle in ("position: sticky", "right: 0", "td.actions", "th.actions"):
+    # Os seletores casam a ULTIMA celula: as quatro tabelas da config pem as
+    # acoes em <td class="n"><div class="actions"> -- a classe .actions esta
+    # no div de dentro, entao td.actions/th.actions nao casavam nada.
+    for needle in ("position: sticky", "right: 0",
+                   "td:last-child", "th:last-child"):
         assert needle in media, f"{needle} precisa estar no media query de 760px"
+    # O seletor morto nao pode sobrar como regra. Assercao no seletor, nao
+    # em substring solto: o comentario que documenta o bug cita as palavras.
+    assert "td.actions," not in media
+    assert "td.actions {" not in media
     # Fundo opaco: transparent deixa a linha anterior aparecer na rolagem.
     assert "background: var(--panel)" in media
 

@@ -86,8 +86,11 @@
        e a coluna final (Editar/Excluir) fica alem da dobra do scroll. Colada
        a direita ela segue visivel enquanto a tabela desliza. O fundo opaco
        tapa o conteudo que passaria por baixo. */
-    .table-container td.actions,
-    .table-container th.actions { position: sticky; right: 0; background: var(--panel); z-index: 1; }
+    /* A classe .actions vive no DIV de dentro (<td class="n"><div class="actions">),
+       entao td.actions/th.actions casavam nada. As quatro tabelas da config
+       tem acoes como ultima coluna: last-child e o seletor que alcaca a celula. */
+    .table-container td:last-child,
+    .table-container th:last-child { position: sticky; right: 0; background: var(--panel); z-index: 1; }
 
     /* Alvo de toque: 26px nao serve para dedo. Os botoes de acao das tabelas
        sao os que o usuario mais toca nesta tela. */
