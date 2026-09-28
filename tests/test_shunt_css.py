@@ -113,6 +113,28 @@ def test_the_cap_toggle_thumb_stays_contrasting_on_good():
 
 
 # ---------------------------------------------------------------------------
+# D5: --dim e o cinza dos rotulos 11px/600/uppercase (`.form-group label`,
+# "Atual" em _default.html, th, `.card h3`, `.hint`). A rodada anterior mediu
+# o token so contra --panel (#1c1b18, 4.64:1) e o deu como bom, mas o rotulo
+# "Atual" vive num card --panel-2 (#232220), que e MAIS CLARO, e la a razao
+# cai para 4.28:1 -- abaixo do piso AA de 4.5:1. Medir o token contra a
+# superficie errada e a armadilha que pegou o thumb do toggle (D3).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("background_token", ["--panel", "--panel-2"])
+def test_dim_label_reaches_aa_on_both_panel_surfaces(background_token):
+    """--dim e texto pequeno: tem que passar AA em cada superficie onde ele
+    e usado. A de --panel-2 e a regressao que escapou na rodada anterior."""
+    tokens = _tokens()
+    ratio = _contrast(tokens["--dim"], tokens[background_token])
+    assert ratio >= 4.5, (
+        f"--dim {tokens['--dim']} sobre {background_token}="
+        f"{tokens[background_token]} da {ratio:.2f}:1; o piso AA e 4.5:1"
+    )
+
+
+# ---------------------------------------------------------------------------
 # D4: `.chip.bad`. Existem dois .chip.bad na area admin:
 #   - os rotulos de capacidade das tabelas (<span class="chip bad">, SEM
 #     aria-pressed);
