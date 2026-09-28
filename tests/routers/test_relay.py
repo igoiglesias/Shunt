@@ -276,6 +276,33 @@ def test_relay_head_prefix_removed():
     assert TEST_SHUNT_TOKEN not in sent
 
 
+@respx.mock
+def test_relay_head_passes_upstream_content_length():
+    """HEAD com content-length upstream: o valor do upstream sobe, e nao um
+    `content-length: 0` inventado pela Response vazia.
+
+    O caminho de HEAD constroi a resposta com `headers={}` (o Starlette so
+    aceita Mapping e populava content-length: 0) e entao atribui
+    `raw_headers` -- a lista precisa trazer o content-length do upstream,
+    ou o cliente veria um corpo de tamanho zero onde o upstream disse outro.
+    """
+    respx.head("https://api.anthropic.com/api/hello").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-length": "42", "content-type": "text/plain"},
+            content=b"",
+        )
+    )
+    with client() as c:
+        response = c.head(
+            "/api/hello",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    assert response.headers["content-length"] == "42"
+    assert response.headers["content-type"] == "text/plain"
+
+
 # ---------------------------------------------------------------------------
 # RED 1b (fix round 2): ?token= no vai ao upstream em nenhum metodo
 # ---------------------------------------------------------------------------
@@ -389,7 +416,7 @@ def test_relay_v1_unimplemented_method_still_relays():
 class _GzipRawStream(httpx.AsyncByteStream):
     """Stream do mock que entrega os bytes comprimidos em pedacos.
 
-    Nao e um `httpx.ByteStream` (sincrono), entao o respx nao o pre-lê com
+    Nao e um `httpx.ByteStream` (sincrono), entao o respx nao o pre-le com
     `aread()` -- e o pre-leitura e exatamente o que corromperia o teste: o
     httpx substitui o stream pelo conteudo DECODIFICADO, e o relay nunca
     veria os bytes cruros. Stream assincrono proprio = os bytes chegam no
@@ -447,6 +474,76 @@ def test_relay_gzip_passes_through():
     assert wire == compressed
     # E os bytes da wire de fato descomprimem para o payload original.
     assert _gzip.decompress(wire) == payload
+
+
+# ---------------------------------------------------------------------------
+# RED 12: Set-Cookie duplicados sobem separados (nao colapsados por virgula)
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_relay_preserves_duplicate_set_cookie_headers():
+    """Dois `Set-Cookie` na resposta upstream chegam ao cliente como DOIS
+    headers, e nao um so com os valores juntados por virgula.
+
+    Colapsar e o defeito sutil: o `Expires`/`Date` de cada cookie tambem tem
+    virgula, entao "a=1; Expires=..., b=2; Expires=..." e uma cookie so para
+    o navegador. `dict` (Headers.items()) faz exatamente esse colapso;
+    `multi_items()` preserva as duplicatas."""
+    cookies = [
+        "sess=abc; Path=/; Expires=Wed, 09 Jun 2026 10:18:14 GMT; HttpOnly",
+        "csrf=xyz; Path=/; Expires=Wed, 09 Jun 2026 10:18:14 GMT",
+    ]
+    respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        return_value=httpx.Response(
+            200,
+            headers=[
+                ("set-cookie", cookies[0]),
+                ("content-type", "application/json"),
+                ("set-cookie", cookies[1]),
+            ],
+            json={"ok": 1},
+        )
+    )
+    with client() as c:
+        response = c.get(
+            "/api/oauth/usage",
+            headers={"anthropic-version": "2023-06-01"},
+        )
+    assert response.status_code == 200
+    # Dois headers separados: o colapso por virgula os uniria em um so.
+    assert response.headers.get_list("set-cookie") == cookies
+    # O content-type tambem sobe (raw_headers sobrescreve o da init_headers).
+    assert response.headers["content-type"] == "application/json"
+
+
+@respx.mock
+def test_relay_preserves_duplicate_set_cookie_headers_on_stream():
+    """O mesmo no caminho de stream: a regra e a do header da resposta, e
+    nao pode depender do corpo ter sido ou nao lido."""
+    cookies = [
+        "sess=abc; Path=/; Expires=Wed, 09 Jun 2026 10:18:14 GMT; HttpOnly",
+        "csrf=xyz; Path=/; Expires=Wed, 09 Jun 2026 10:18:14 GMT",
+    ]
+    respx.get("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            headers=[
+                ("set-cookie", cookies[0]),
+                ("content-type", "text/event-stream"),
+                ("set-cookie", cookies[1]),
+            ],
+            stream=_GzipRawStream(b"event: ping\ndata: 1\n\n"),
+        )
+    )
+    with client() as c, c.stream(
+        "GET",
+        "/v1/messages",
+        headers={"anthropic-version": "2023-06-01"},
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers.get_list("set-cookie") == cookies
+        assert response.headers["content-type"] == "text/event-stream"
 
 # ---------------------------------------------------------------------------
 # RED 11: httpx.ConnectError -> 502, httpx.ReadTimeout -> 504
@@ -618,7 +715,7 @@ class _ClosingAsyncByteStream(httpx.AsyncByteStream):
     """Stream async minimalista com flag `closed`.
 
     Implementa o protocolo que o httpx espera dele -- `__aiter__` (gerador
-    acima, o que o `aiter_raw()` itera) e `aclose` (o que o
+    abaixo, o que o `aiter_raw()` itera) e `aclose` (o que o
     `response.aclose()` delega, `_models.py:1065-1076`). A porta no meio do
     corpo trava a iteracao para o teste poder cancelar a task de fato NO
     MEIO do stream, e nao depois dele terminar."""
@@ -641,7 +738,7 @@ class _ClosingAsyncByteStream(httpx.AsyncByteStream):
 @asynccontextmanager
 async def _own_client() -> AsyncIterator[httpx.AsyncClient]:
     """Replica o caminho de cliente proprio do `UpstreamPool.client`
-    (app/core/upstream.py:296-301): um cliente por uso, fechado na saida. O
+    (app/core/upstream.py:298-304): um cliente por uso, fechado na saida. O
     relay o entra num `AsyncExitStack`, e esse stack e a outra metade do que
     o `finally` do corpo tem de fechar."""
     client = httpx.AsyncClient()

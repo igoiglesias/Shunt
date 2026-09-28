@@ -142,7 +142,9 @@ def test_the_kind_filter_selects_the_model_lines_alone(store_with_relay):
 
 
 def test_an_unknown_kind_is_rejected_instead_of_ignored(store_with_relay):
-    with pytest.raises(ValueError):
+    # `match="kind"`: o ValueError precisa vir do filtro de tipo, e nao de
+    # qualquer outro lugar que a busca valide.
+    with pytest.raises(ValueError, match="kind"):
         queries.search_events(store_with_relay, kind="x")
 
 

@@ -462,6 +462,9 @@ async function loadFacets() {
 }
 
 function fill(id, values) {
+  // `kind` e estatico (model/relay/todas): nao vem das facets e nao pode
+  // ser reconstruido aqui -- chamar fill('kind') apagaria as 3 options.
+  if (id === "kind") return;
   const select = el(id);
   const chosen = state[id] || "";
   const options = [`<option value="">${SELECTS[id]}: todos</option>`];

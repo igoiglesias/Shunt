@@ -23,7 +23,7 @@
   .form-row { display: flex; gap: 12px; flex-wrap: wrap; }
   .form-row .form-group { flex: 1; min-width: 150px; }
 
-  .table-container { overflow-x: auto; }
+  .table-container { overflow-x: auto; scrollbar-gutter: stable; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { padding: 8px 12px 8px 0; text-align: left; border-bottom: 1px solid var(--edge); }
   th { color: var(--dim); font-weight: 600; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
@@ -81,6 +81,18 @@
   @media (max-width: 760px) {
     .form-grid { grid-template-columns: 1fr; }
     .admin-nav { justify-content: center; }
+
+    /* Acoes fora do alcance no mobile: a tabela e mais larga que o container
+       e a coluna final (Editar/Excluir) fica alem da dobra do scroll. Colada
+       a direita ela segue visivel enquanto a tabela desliza. O fundo opaco
+       tapa o conteudo que passaria por baixo. */
+    .table-container td.actions,
+    .table-container th.actions { position: sticky; right: 0; background: var(--panel); z-index: 1; }
+
+    /* Alvo de toque: 26px nao serve para dedo. Os botoes de acao das tabelas
+       sao os que o usuario mais toca nesta tela. */
+    .btn { min-height: 44px; }
+    .btn-sm { min-height: 44px; padding: 8px 12px; font-size: 13px; }
   }
 </style>
 </head>
@@ -145,6 +157,24 @@
     </div>
     <button class="btn btn-primary" hx-post="/admin/config/reload" hx-target="#reload-result" hx-swap="innerHTML">Recarregar do Banco</button>
     <div id="reload-result" style="margin-top: 12px;"></div>
+    <script>
+      // A rota responde JSON cru (`{"status": "reloaded", ...`), que sem isto
+      // aparecia na tela como texto. O alvo so mostra o que um humano le.
+      document.addEventListener("htmx:afterRequest", (event) => {
+        const alvo = document.getElementById("reload-result");
+        if (event.detail.target !== alvo || !alvo) return;
+        try {
+          const dados = JSON.parse(event.detail.xhr.responseText);
+          if (dados.status === "reloaded") {
+            alvo.textContent = "Configuração recarregada"
+              + (dados.default_model ? " — modelo padrão: " + dados.default_model : "")
+              + ".";
+          }
+        } catch {
+          // Erro nao e JSON de reload: o HTMX ja colocou o corpo no alvo.
+        }
+      });
+    </script>
   </section>
 </main>
 

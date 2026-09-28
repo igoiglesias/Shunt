@@ -17,7 +17,7 @@
 <tr>
   <td><b>{{ p.name }}</b></td>
   <td class="mono">{{ p.base_url }}</td>
-  <td><span class="chip" aria-pressed="true">{{ p.protocol }}</span></td>
+  <td><span class="chip">{{ p.protocol }}</span></td>
   <td class="mono">{% if p.api_key %}••••{{ p.api_key[-4:] }}{% else %}—{% endif %}</td>
   <td class="n">{{ p.max_concurrency if p.max_concurrency else '—' }}</td>
   <td class="n">

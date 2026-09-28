@@ -35,7 +35,7 @@
   /* Sinais: estado, nunca identidade. */
   --good: #3fa34d;
   --warning: #e0a021;
-  --error: #d5463a;
+  --error: #c13a2e;
   --error-text: #e2695c;
 
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", "DejaVu Sans Mono", monospace;
@@ -225,7 +225,7 @@ a:focus-visible {
   font-weight: 600;
 }
 
-.chip.bad[aria-pressed="true"] {
+.chip.bad {
   background: var(--error);
   border-color: var(--error);
   color: #fff;

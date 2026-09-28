@@ -431,7 +431,8 @@ async def test_a_analise_filha_de_kind_desconhecido_nao_quebra(
     request = with_params(store_with_relay, kind="relay", route="/api/oauth/usage")
     request.app.state.settings = SETTINGS.model_copy(update={"default_model": "cheap"})
     request.app.state.pool = None
-    # POST sem corpo, o caminho normal do botao: `_body_of` trata o vazio.
+    # POST sem corpo, o caminho normal do botao: `payload vazio` (nao
+    # exercita o ValueError de `_body_of` -- o dossie so nao recebe chaves).
     request.json = _json({})
 
     resposta = await audit.analyse_period(request)

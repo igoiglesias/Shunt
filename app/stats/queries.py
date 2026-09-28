@@ -58,7 +58,7 @@ def _model_rows():
     sem o `or_` apagaria todo o historico do painel de uma so vez. Por isso o
     pareamento: nulo ou qualquer coisa que nao seja relay.
 
-    O filtro entra em TODO agregado, nao em alguns: os grafos contam o tráfego
+    O filtro entra em TODO agregado, nao em alguns: os grafos contam o trafego
     de modelo, e a linha de relay e rastro de rede -- se vazar em um so deles,
     o 502 dela e os 99 s de duracao fariam o periodo parecer quebrado. As
     leituras de auditoria (`search_events`, `event_detail`, `body_of`) ficam
@@ -911,9 +911,24 @@ def search_events(
     limit = max(1, min(limit, MAX_SEARCH_LIMIT))
     by_duration = order_by == "duration"
     clauses = _search_clauses(
-        since, until, text, route, dialect, provider, candidate_model, requested_model,
-        error_type, status_min, status_max, stream, fell_back, has_tools,
-        min_duration_ms, min_tokens, project, kind,
+        since=since,
+        until=until,
+        text=text,
+        route=route,
+        dialect=dialect,
+        provider=provider,
+        candidate_model=candidate_model,
+        requested_model=requested_model,
+        error_type=error_type,
+        status_min=status_min,
+        status_max=status_max,
+        stream=stream,
+        fell_back=fell_back,
+        has_tools=has_tools,
+        min_duration_ms=min_duration_ms,
+        min_tokens=min_tokens,
+        project=project,
+        kind=kind,
     )
     # Ordenar por `id` NAO e ordenar por tempo: o id cresce com a INSERCAO, e o
     # gravador entrega em lote, entao duas requisicoes da mesma rajada podem

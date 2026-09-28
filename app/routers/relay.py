@@ -72,11 +72,15 @@ def _partial_local_match(request: Request) -> bool:
     Desenho 1b do plano: `Match.PARTIAL` (path casa, metodo nao) numa rota
     declarada local fora da familia `/v1` responde 405 local ANTES de
     repassar -- senao um `POST /api/stats` com token valido subiria ate o
-    host oficial. `/v1/*` com metodo sem rota propria NAO entra aqui: o
-    plano manda repassar (nao existe 404 por falta de sinal).
+    host oficial. `/v1` e `/v1/*` com metodo sem rota propria NAO entram
+    aqui: o plano manda repassar (nao existe 404 por falta de sinal).
     """
     path = request.url.path
-    if path.startswith("/v1"):
+    # `startswith("/v1")` sozinho casa "/v1x"/"/v10", que nao sao da familia
+    # `/v1`. Como estes nao tem rota local declarada, o PARTIAL nao acontece
+    # e eles sobem ao host oficial de qualquer jeito -- a precisao aqui e
+    # para o dia em que uma rota `/v1x` existir e tiver que ser repassada.
+    if path == "/v1" or path.startswith("/v1/"):
         return False
     for route in request.app.routes:
         matches = getattr(route, "matches", None)
@@ -94,11 +98,23 @@ def _partial_local_match(request: Request) -> bool:
     return False
 
 
-def _response_headers(response: httpx.Response) -> dict[str, str]:
+def _raw_response_headers(response: httpx.Response) -> list[tuple[bytes, bytes]]:
     """Headers da resposta upstream sem os hopping (que nao fazem sentido
-    repassados). `content-encoding` e `content-length` sobem verbatim: sao
-    corretos para os bytes cruros que o corpo carrega."""
-    return {k: v for k, v in response.headers.items() if k.lower() not in RESPONSE_DROP}
+    repassados), como LISTA DE DUPLAS preservando ordem e duplicatas.
+
+    Por que lista e nao dict: dois `Set-Cookie` upstream sao dois headers
+    separados, e `Headers.items()` os junta com ", " -- o que corrompe o
+    `Expires`/`Date` de cada cookie (ambos tem virgula), virando um cookie
+    so para o cliente. `multi_items()` entrega cada duplicata em separado.
+
+    O `content-encoding` e o `content-length` sobem verbatim: sao os
+    corretos para os bytes crus que o corpo carrega."""
+    drop = RESPONSE_DROP
+    return [
+        (k.encode("latin-1"), v.encode("latin-1"))
+        for k, v in response.headers.multi_items()
+        if k.lower() not in drop
+    ]
 
 
 async def _close_on_error(
@@ -208,10 +224,11 @@ async def relay_endpoint(request: Request) -> Response:
         if request.method == "HEAD":
             # HEAD nao tem corpo: sem stream. O aclose e imediato (headers
             # so) e o stack libera o cliente antes do return.
-            resp = Response(
-                status_code=response.status_code,
-                headers=_response_headers(response),
-            )
+            # `headers={}` (Mapping vazio) e a forma que o Starlette aceita
+            # (`init_headers` chama `.items()`); os headers reais entram
+            # depois, no atributo publico que o ASGI le no send.
+            resp = Response(status_code=response.status_code, headers={})
+            resp.raw_headers = _raw_response_headers(response)
             await response.aclose()
             await stack.aclose()
             return resp
@@ -246,12 +263,22 @@ async def relay_endpoint(request: Request) -> Response:
                 finally:
                     await stack.aclose()
 
-        return ClosingStreamingResponse(
+        # A stream precisa do `media_type` (vira content-type no cliente),
+        # mas `init_headers` so aceita Mapping e colapsaria duplicatas --
+        # dois `Set-Cookie` upstream tem de chegar separados. Sobe-se um
+        # Mapping vazio e entao se atribui o atributo publico que o ASGI le
+        # no send (`raw_headers`, medido em starlette/responses.py: e lido
+        # por `stream_response` e nunca re-derivado). Por isso o
+        # content-type entra na lista explicitamente: o que a `init_headers`
+        # populou fica de fora dela.
+        stream_response = ClosingStreamingResponse(
             body(),
             status_code=response.status_code,
-            headers=_response_headers(response),
+            headers={},
             media_type=response.headers.get("content-type"),
         )
+        stream_response.raw_headers = _raw_response_headers(response)
+        return stream_response
     except httpx.TimeoutException as err:
         # Qualquer timeout (pool, connect, read, write) e 504. Medido que
         # `ReadTimeout` so cobria um deles: o pool expira antes de conectar
