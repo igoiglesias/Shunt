@@ -9,6 +9,23 @@ antes do repasse, e a query perde o `token`.
 A ordem importa: este router e o ultimo. Tudo que o FastAPI nao casou
 com rotas declaradas cai aqui -- inclusive um `/v1/v1/files` mal formado
 que nao casou com a rota real de `/v1`.
+
+Tres detalhes do repasse que so importam porque foram medidos:
+
+- **Um catch-all registrado por ultimo vence o `Match.PARTIAL`.** O FastAPI
+  responde 405 so quando nenhuma rota casa; com o catch-all presente, um
+  `OPTIONS /v1/messages` (path conhecido, metodo sem rota propria) cai nele e
+  e repassado, e um `DELETE /health` idem. A unica excecao e o PARTIAL de uma
+  rota FORA de `/v1` (`_partial_local_match`): um `POST /api/stats` com token
+  valido nao pode subir ao host oficial, e responde 405 local.
+- **O gzip passa cru.** A resposta e lida com `aiter_raw()`, que NAO
+  descomprime: os bytes sobem intactos e o `content-encoding`/`content-length`
+  que os acompanham sao os certos para eles (`.content` descomprimiria e o
+  cliente descomprimiria de novo, corrompendo o corpo).
+- **A URL usa a ORIGEM do host, nao o `base_url`.** O `base_url` oficial da
+  OpenAI ja termina em `/v1`, entao colar o path do cliente sobre ele produzia
+  `/v1/v1/files`; `OfficialHost.origin` e so esquema+host, e o path que sobe e
+  exatamente o que o cliente pediu.
 """
 
 import contextlib

@@ -180,6 +180,11 @@ is checked, and makes Shunt send the provider key it holds. `x-api-key` and \
 `Authorization: Bearer` are not checked: Shunt forwards them to transparent \
 providers and replaces them with the configured key for the others.
 
+Any other route the client asks for is relayed verbatim to the official host of \
+the caller's protocol, with the client's own credential and the Shunt token \
+stripped from the request. These relayed calls appear on the request screen as \
+type `relay` and are kept out of every panel number.
+
 `/api` and `/admin` need the admin session cookie `shunt_admin`, set by signing in \
 at `/admin/login`.
 """

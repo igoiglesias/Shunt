@@ -33,6 +33,10 @@ class FakeProvider:
         self.script: list[Scripted] = []
         self.calls: list[httpx.Request] = []
         self.bodies: list[dict] = []
+        # Corpo CRU dos paths que nao sao de modelo: o relay repassa bytes
+        # identicos, e `request.json()` nao serve -- um corpo parcial ou
+        # comprimido nao parseia (e nao deve parsear).
+        self.raw_bodies: list[bytes] = []
         self.app = self._build()
 
     def queue(self, *responses: Scripted, **single: object) -> None:
@@ -85,6 +89,39 @@ class FakeProvider:
         ):
             app.post(path)(handle)
             app.post(f"/v1{path}")(handle)
+
+        # Catch-all DEPOIS dos paths de modelo, com os 7 metodos do relay
+        # (`app/routers/relay.py`): uma rota desconhecida pode virar GET, HEAD
+        # ou OPTIONS, e `handle` so serve POST de corpo JSON. O corpo e lido
+        # CRU: o relay promete bytes identicos, e parsear aqui faria o falso
+        # rejeitar um corpo que o upstream verdadeiro aceitaria.
+        async def catch_all(request: Request):
+            self.raw_bodies.append(await request.body())
+            scripted = self.pop()
+            if scripted.sse:
+
+                async def sse_body():
+                    for chunk in scripted.sse:
+                        if scripted.chunk_delay:
+                            await asyncio.sleep(scripted.chunk_delay)
+                        yield chunk
+
+                return StreamingResponse(
+                    sse_body(),
+                    status_code=scripted.status,
+                    media_type="text/event-stream",
+                    headers=scripted.headers,
+                )
+            return JSONResponse(
+                status_code=scripted.status,
+                content=scripted.json_body or {},
+                headers=scripted.headers,
+            )
+
+        app.api_route(
+            "/{path:path}",
+            methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        )(catch_all)
         return app
 
 
