@@ -58,6 +58,7 @@
   .tag { color: var(--muted); font-size: 12px; }
   .tag.fell { color: var(--fallback-text); }
   .tag.bad { color: var(--error-text); }
+  .tag.relay { color: var(--fallback-text); }
   .mark {
     display: inline-block;
     margin-left: 6px;
@@ -355,6 +356,11 @@
   <select id="project" name="project" aria-label="projeto">
     <option value="">projeto: todos</option>
   </select>
+  <select id="kind" name="kind" aria-label="tipo de tráfego">
+    <option value="">todas</option>
+    <option value="model">so modelo</option>
+    <option value="relay">so relay</option>
+  </select>
   <span class="spacer"></span>
   <button type="button" class="ghost" id="reset">Limpar filtros</button>
   <button type="button" class="ghost" id="export">Exportar CSV</button>
@@ -430,6 +436,11 @@ const SELECTS = {
   candidate_model: "modelo que respondeu",
   project: "projeto",
   provider: "provedor",
+  // `kind` e o tipo de trafego, e nao vem das facets: `/api/requests/facets`
+  // nao devolve tipos, e as options sao fixas no HTML. Por isso o ramo
+  // `kind` abaixo e separado de `fill` -- `fill` monta as options do zero e
+  // apagaria as tres do seletor se fosse chamado aqui.
+  kind: "tipo",
 };
 
 // Os seletores mostram só o que existe no banco: oferecer um provedor que
@@ -443,12 +454,17 @@ async function loadFacets() {
     fill("candidate_model", facets.candidate_models);
     fill("provider", facets.providers);
     fill("project", facets.projects);
+    // So as 4 facets reais passam por `fill`. `kind` tem options estaticas e
+    // so precisa do valor que veio da URL, que `readUrl` ja setou.
   } catch {
     // Sem os seletores a busca por texto continua funcionando.
   }
 }
 
 function fill(id, values) {
+  // `kind` e estatico (model/relay/todas): nao vem das facets e nao pode
+  // ser reconstruido aqui -- chamar fill('kind') apagaria as 3 options.
+  if (id === "kind") return;
   const select = el(id);
   const chosen = state[id] || "";
   const options = [`<option value="">${SELECTS[id]}: todos</option>`];
@@ -572,13 +588,46 @@ function render(page, append) {
 // Sem candidato há histórias diferentes: o `count_tokens` estimado aqui, o
 // catálogo, a cadeia que ninguém atendeu, e o cliente que desistiu.
 function servedLabel(event) {
+  // O relay e passagem de rede bruta e vem PRIMEIRO: nenhuma regra abaixo faz
+  // sentido para uma rota que o Shunt nao implementa.
+  if (event.kind === "relay") return "repasse";
   if (event.status === 499) return "cliente desistiu";
   if ((event.route || "").includes("count_tokens")) return "estimada aqui";
   if ((event.route || "").includes("models")) return "catálogo";
   return "nenhum candidato respondeu";
 }
 
+// A linha de relay so diz o que ela e e por onde passou: sem modelo, sem
+// tokens, sem sinais. A tag de repasse ocupa o lugar de "Respondeu" porque e
+// o que alguem procurando aquela linha precisa ler primeiro.
+function relayRowOf(event) {
+  const bad = event.status >= 400;
+  return `<tr data-id="${esc(event.request_id)}" class="${bad ? "failed" : ""}">
+    <td class="when" data-label="Quando" title="${esc(day(event.started_at))}">${esc(
+      clock(event.started_at, true)
+    )}</td>
+    <td class="route" data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
+    <td data-label="Pedido">—</td>
+    <td data-label="Respondeu"><span class="tag relay">repasse · ${esc(
+      event.dialect || ""
+    )}</span></td>
+    <td class="project" data-label="Projeto" title="${esc(event.project || "")}">${
+      event.project ? esc(String(event.project).replace(/\/+$/, "").split("/").pop()) : "—"
+    }</td>
+    <td class="signals" data-label="Sinais"><span class="none">—</span></td>
+    <td class="n" data-label="Tokens">—</td>
+    <td class="n" data-label="Duração">${ms(event.duration_ms)}</td>
+    <td class="n status ${bad ? "bad" : ""}" data-label="Status">${event.status}</td>
+  </tr>`;
+}
+
 function rowOf(event) {
+  // O relay e rastro de rede, e nao uma chamada de modelo: nenhuma das
+  // medidas abaixo foi medido por ninguem. Em JS `null + null === 0`, e
+  // `compact(0)` devolve "0" -- a linha diria ter medido zero tokens sobre
+  // um trafego que nunca cronometrou nada (`app/stats/queries.py` entrega os
+  // tokens do relay em `None`, e nao em zero, justamente por isso).
+  if (event.kind === "relay") return relayRowOf(event);
   const bad = event.status >= 400 || event.status === 499;
   const tokens = event.input_tokens + event.output_tokens;
   const tools = event.tools_called || [];
@@ -820,7 +869,40 @@ el("detail").addEventListener("click", (event) => {
   button.textContent = open ? "mostrar menos" : "mostrar tudo";
 });
 
+// O detalhe de relay so mostra o rastro de rede: rota, dialect, status e
+// duracao. As secoes de modelo (regra, tokens, cache, raciocinio, cadeia,
+// ferramentas) falam da cadeia de provedores -- e relay e passagem bruta.
+function relayDetailOf(event) {
+  const bad = event.status >= 400;
+  return `
+    <div class="detail-head">
+      <h2>repasse</h2>
+      <button type="button" class="ghost" id="close-detail">Fechar</button>
+    </div>
+    <p class="id">${esc(event.request_id)}</p>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-tab="summary" aria-selected="true">Resumo</button>
+      <button type="button" role="tab" data-tab="talk" aria-selected="false">Conversa</button>
+      <button type="button" role="tab" data-tab="raw" aria-selected="false">Requisição</button>
+    </div>
+    <div id="raw" hidden></div>
+    <div id="talk" hidden></div>
+    <div id="summary">
+    <dl>
+      <dt>Quando</dt><dd>${esc(day(event.started_at))} ${esc(clock(event.started_at, true))}</dd>
+      <dt>Rota</dt><dd>${esc(event.route)} · ${esc(event.dialect)}${event.stream ? " · stream" : ""}</dd>
+      <dt>Projeto</dt><dd title="${esc(event.project || "")}">${esc(event.project || "—")}</dd>
+      <dt>Status</dt><dd>${event.status}${event.error_type ? ` · ${esc(event.error_type)}` : ""}</dd>
+      <dt>Duração</dt><dd>${ms(event.duration_ms)}</dd>
+    </dl>
+    <p class="empty">Passagem de rede para um host oficial: o Shunt não implementa esta rota, então não há modelo, tokens nem cadeia.</p>
+    </div>
+  `;
+}
+
 function detailOf(event) {
+  // O relay nao e uma chamada de modelo e tem o seu proprio detalhe.
+  if (event.kind === "relay") return relayDetailOf(event);
   const tokens = event.input_tokens + event.output_tokens;
   // A cadeia como aconteceu: cada tentativa que falhou, e no fim quem
   // respondeu. É a pergunta que traz alguém a esta tela.

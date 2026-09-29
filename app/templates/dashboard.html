@@ -181,7 +181,7 @@
     border-color: var(--error);
   }
   h2 .toggle:focus-visible { outline: 2px solid var(--tokens); outline-offset: 2px; }
-  .tape li.bad { background: rgba(213, 70, 58, 0.10); }
+  .tape li.bad { background: rgba(var(--error-rgb), 0.10); }
   .tape li {
     display: grid;
     grid-template-columns: 9ch minmax(0, 1fr) 13ch;
@@ -200,7 +200,7 @@
   .tape li.bad .what small,
   .tape li.fell .what small { color: var(--muted); }
   .tape .cost { font-family: var(--mono); color: var(--muted); text-align: right; }
-  .tape li.bad .what b { color: var(--error); }
+  .tape li.bad .what b { color: var(--error-text); }
   .tape li.fell .what b { color: var(--fallback); }
   .tape li.fresh { animation: land 900ms ease-out; }
   @keyframes land {
@@ -324,7 +324,7 @@
     flex-wrap: wrap;
   }
 
-  .danger[data-armed="true"] { color: var(--ground); background: var(--error); border-color: var(--error); }
+  .danger[data-armed="true"] { color: #fff; background: var(--error); border-color: var(--error); }
 
   .danger[disabled] { opacity: 0.5; cursor: default; }
   #clear-said { color: var(--muted); }

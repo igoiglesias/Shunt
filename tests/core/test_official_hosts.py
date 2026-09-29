@@ -21,6 +21,14 @@ def test_only_the_official_targets_are_embedded():
     assert "openrouter" not in OFFICIAL_HOSTS
 
 
+def test_origin_is_the_base_url_without_path():
+    # O origin e a base sem path/query/fragment: o catch-all (T5) monta a URL
+    # do repasse com o path do cliente sobre ele, e /v1 duplicado
+    # (`/v1/v1/files`) era o defeito medido na secao 2 do plano.
+    assert OFFICIAL_HOSTS["openai"].origin == "https://api.openai.com"
+    assert OFFICIAL_HOSTS["anthropic"].origin == "https://api.anthropic.com"
+
+
 def test_entries_are_frozen():
     host = OFFICIAL_HOSTS["anthropic"]
     try:

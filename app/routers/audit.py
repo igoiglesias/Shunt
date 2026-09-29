@@ -30,6 +30,7 @@ router = APIRouter()
 CSV_COLUMNS = (
     "started_at",
     "request_id",
+    "kind",
     "route",
     "dialect",
     "stream",
@@ -97,6 +98,24 @@ def _moment(params, name: str) -> datetime | None:
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
+# Os dois unicos tipos de trafego que uma linha pode ser (ver
+# `RequestEvent.kind`, em `app/stats/models.py`). O /docs publica a lista, e a
+# busca recusa outro nome com `ValueError` (`_search_clauses`): um valor que nao
+# e nenhum dos dois e um filtro que veio de outra tela, e nao um recorte pedido.
+KINDS = ("model", "relay")
+
+
+def _kind(params) -> str | None:
+    """O tipo de trafego, ou None quando o valor nao e um dos dois nominais.
+
+    Diferente de `_text`: um nome que nao existe nao e "filtro vazio", e o
+    contrato de "quem nao parseia e ignorado" faz a busca devolver tudo -- o
+    leitor prefere ver o resultado mais largo a ser trancado por um nome errado.
+    """
+    value = params.get("kind")
+    return value if value in KINDS else None
+
+
 def filters_from(params) -> dict:
     """Os parametros da URL virando argumentos da busca.
 
@@ -122,6 +141,7 @@ def filters_from(params) -> dict:
         "has_tools": _flag(params, "has_tools"),
         "min_duration_ms": _number(params, "min_duration_ms"),
         "min_tokens": _number(params, "min_tokens"),
+        "kind": _kind(params),
         "order_by": "duration" if params.get("order_by") == "duration" else "time",
     }
 
@@ -195,7 +215,18 @@ _ORDER_PARAM = _query(
     "`duration` lists the slowest first; anything else lists the newest first.",
     {"type": "string", "enum": ["time", "duration"], "default": "time"},
 )
-_FILTER_PARAMS = [*_ANALYSIS_FILTER_PARAMS, _ORDER_PARAM]
+# So a busca documenta: e um filtro que a listagem de fato aplica. O dossie nao
+# (`_analysis_filters` o retira), e por isso ele fica fora de
+# `_ANALYSIS_FILTER_PARAMS` -- publicar ali seria prometer um recorte que a
+# analise sempre recusa em favor do trafego de modelo.
+_KIND_PARAM = _query(
+    "kind",
+    "Kind of traffic: `model` for a request routed through the provider chain, "
+    "`relay` for a route the proxy does not implement, passed through verbatim to "
+    "the official host. Any other value is ignored, not refused.",
+    {"type": "string", "enum": list(KINDS)},
+)
+_FILTER_PARAMS = [*_ANALYSIS_FILTER_PARAMS, _KIND_PARAM, _ORDER_PARAM]
 # O corpo que `analysis.analyse` monta quando a chamada ao modelo falha.
 _ANALYSIS_FAILURE = {
     "type": "object",
@@ -453,6 +484,11 @@ def _analysis_filters(params) -> dict:
     # `order_by` ordena uma listagem; um dossie nao tem ordem de leitura, e
     # passa-lo adiante seria um filtro que a busca entende e a analise nao.
     filters.pop("order_by", None)
+    # `kind` e parecido, mas ao contrario: o dossie SEMPRE le trafego de modelo
+    # (`kind="model"` fixo em `app/stats/dossier.py`), e a chave nao entra em
+    # `FILTER_FIELDS`, que recusaria filtro desconhecido com `ValueError` -- ou
+    # seja, repassa-la seria transformar um filtro da tela num 500 na analise.
+    filters.pop("kind", None)
     return filters
 
 

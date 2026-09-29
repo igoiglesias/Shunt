@@ -461,3 +461,43 @@ def test_sem_ninguem_informando_a_taxa_de_cache_e_nula(engine):
 
     assert cache["hit_rate"] is None
     assert cache["silent_requests"] == 1
+
+
+# --- A linha de relay nao entra no dossie ------------------------------------
+#
+# O dossie analisa o trafego de MODELO; a linha de relay e so rastro de rede e
+# falaria a analise: viraria erro 502 e latencia de 99 s num periodo que foi
+# rapido e saudavel.
+
+
+def test_a_relay_line_does_not_change_the_volume(seeded):
+    with Session(seeded) as session:
+        session.add(
+            row(
+                request_id="relay",
+                kind="relay",
+                requested_model="",
+                rule="none",
+                matched=None,
+                provider=None,
+                candidate_model=None,
+                route="/api/oauth/usage",
+                status=502,
+                error_type="upstream_unreachable",
+                duration_ms=99999,
+            )
+        )
+        session.commit()
+
+    volume = dossier.build(seeded)["volume"]
+
+    assert volume["requests"] == 3
+    assert volume["errors"] == 1
+    assert volume["duration_ms"] == {"p50": 300, "p95": 900, "p99": 900}
+
+
+def test_the_dossier_refuses_a_kind_filter(seeded):
+    """`kind` nao e filtro da tela; o dossie nao inventa recorte que ela nao
+    oferece."""
+    with pytest.raises(ValueError, match="kind"):
+        dossier.build(seeded, filters={"kind": "relay"})

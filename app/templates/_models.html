@@ -23,10 +23,10 @@
   <td class="mono">{{ m.upstream_model }}</td>
   <td class="n">{{ m.context_window }}</td>
   <td class="n">{{ m.max_output_tokens }}</td>
-  <td><span class="chip {{ 'bad' if not m.supports_tools else '' }}" aria-pressed="{{ 'true' if m.supports_tools else 'false' }}">{{ '✓' if m.supports_tools else '✗' }}</span></td>
-  <td><span class="chip {{ 'bad' if not m.supports_streaming else '' }}" aria-pressed="{{ 'true' if m.supports_streaming else 'false' }}">{{ '✓' if m.supports_streaming else '✗' }}</span></td>
-  <td><span class="chip {{ 'bad' if not m.supports_vision else '' }}" aria-pressed="{{ 'true' if m.supports_vision else 'false' }}">{{ '✓' if m.supports_vision else '✗' }}</span></td>
-  <td>{% if m.is_default %}<span class="chip" aria-pressed="true">default</span>{% endif %}</td>
+  <td><span class="chip {{ 'bad' if not m.supports_tools else '' }}">{{ '✓' if m.supports_tools else '✗' }}</span></td>
+  <td><span class="chip {{ 'bad' if not m.supports_streaming else '' }}">{{ '✓' if m.supports_streaming else '✗' }}</span></td>
+  <td><span class="chip {{ 'bad' if not m.supports_vision else '' }}">{{ '✓' if m.supports_vision else '✗' }}</span></td>
+  <td>{% if m.is_default %}<span class="chip">default</span>{% endif %}</td>
   <td class="n">
     <div class="actions">
       <button class="btn btn-sm" hx-get="/admin/config/models/{{ m.alias }}/edit" hx-target="#model-form" hx-swap="outerHTML">Editar</button>

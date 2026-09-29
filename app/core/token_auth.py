@@ -147,13 +147,18 @@ async def _lookup(request: Request, digest: str, *, strict: bool) -> int | None:
 async def require_shunt_token(request: Request) -> int:
     """A dependencia que exige o token em `/v1`.
 
-    Seta `request.state.shunt_token_id` (0 quando isento) e
+    Seta `request.state.shunt_token_id` (0 quando isento),
     `request.state.credential_is_token` (True quando a credencial apresentada
-    E o token: a chave do provedor configurada substitui qualquer outra).
+    E o token: a chave do provedor configurada substitui qualquer outra) e
+    `request.state.token_headers` (nomes dos headers onde o token do Shunt
+    casou; o repasse de rotas desconhecidas (T5) remove esses headers antes
+    de enviar a requisicao ao upstream, entao o token nunca viaja).
     """
     request.state.credential_is_token = False
+    matched: set[str] = set()
     if request.url.path in EXEMPT_PATHS:
         request.state.shunt_token_id = None
+        request.state.token_headers = frozenset()
         return 0
     try:
         explicit = read_token(
@@ -176,8 +181,10 @@ async def require_shunt_token(request: Request) -> int:
         if found is not None:
             request.state.credential_is_token = True
             token_id = token_id or found
+            matched.add(name)
     if token_id is None:
         raise TokenRejected(401, "missing shunt token: send x-shunt-token, /t/<token>/ or ?token=")
+    request.state.token_headers = frozenset(matched)
     request.state.shunt_token_id = token_id
     recorder = getattr(request.app.state, "recorder", None)
     if recorder is not None:

@@ -75,37 +75,76 @@ def row(**over):
     return RequestEvent(**base)
 
 
+def relay_row(**over):
+    """Linha de relay, com valores extremos de proposito: se vazar em um
+    agregado, ela mexe em erro, p95, cadeia, ferramentas e facetas ao mesmo
+    tempo."""
+    return row(
+        kind="relay",
+        requested_model="",
+        rule="none",
+        matched=None,
+        provider=None,
+        candidate_model=None,
+        route="/api/oauth/usage",
+        dialect="anthropic",
+        status=502,
+        error_type="upstream_unreachable",
+        duration_ms=99999,
+        attempts=["x: 502 (attempt 1)"],
+        tools_offered=["read"],
+        tools_called=["read"],
+        **over,
+    )
+
+
+def _base_rows():
+    return [
+        row(request_id="a", duration_ms=100, input_tokens=10, output_tokens=5),
+        row(request_id="b", duration_ms=200, input_tokens=20, output_tokens=10),
+        row(
+            request_id="c",
+            duration_ms=300,
+            status=429,
+            error_type="rate_limit_error",
+            provider="openrouter",
+            candidate_model="vendor/free",
+        ),
+        row(
+            request_id="d",
+            stream=True,
+            ttft_ms=50,
+            duration_ms=400,
+            attempts=["free: 400 (attempt 1)"],
+            fell_back=True,
+            tools_offered=["read", "write"],
+            tools_called=["read"],
+            thinking_blocks=2,
+        ),
+        # Fora da janela de 1 hora, e dentro da de 24.
+        row(request_id="antigo", started_at=NOW - timedelta(hours=5), duration_ms=999),
+    ]
+
+
 @pytest.fixture
 def seeded(make_engine):
     engine = make_engine()
     with Session(engine) as session:
-        session.add_all(
-            [
-                row(request_id="a", duration_ms=100, input_tokens=10, output_tokens=5),
-                row(request_id="b", duration_ms=200, input_tokens=20, output_tokens=10),
-                row(
-                    request_id="c",
-                    duration_ms=300,
-                    status=429,
-                    error_type="rate_limit_error",
-                    provider="openrouter",
-                    candidate_model="vendor/free",
-                ),
-                row(
-                    request_id="d",
-                    stream=True,
-                    ttft_ms=50,
-                    duration_ms=400,
-                    attempts=["free: 400 (attempt 1)"],
-                    fell_back=True,
-                    tools_offered=["read", "write"],
-                    tools_called=["read"],
-                    thinking_blocks=2,
-                ),
-                # Fora da janela de 1 hora, e dentro da de 24.
-                row(request_id="antigo", started_at=NOW - timedelta(hours=5), duration_ms=999),
-            ]
-        )
+        session.add_all(_base_rows())
+        session.commit()
+    return engine
+
+
+@pytest.fixture
+def seeded_with_relay(make_engine):
+    """A janela de modelo com uma linha de relay atravesada.
+
+    O relay entra DENTRO da janela de 1 hora de proposito: fora dela nenhum
+    agregado o veria, e o teste nao provaria nada.
+    """
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all([*_base_rows(), relay_row(request_id="relay")])
         session.commit()
     return engine
 
@@ -899,3 +938,118 @@ def test_a_janela_inteira_tem_a_propria_taxa_de_cache(make_engine):
     assert totais["cache_reported_requests"] == 2
     assert totais["cached_input_tokens"] == 2000
     assert totais["cache_hit_rate"] == 0.5
+
+
+# --- A linha de relay nao vaza em agregado -----------------------------------
+#
+# Cada teste semeia a mesma janela do vizinho ja existente MAIS uma linha de
+# relay, e afirma o MESMO numero: se o relay vazar, o numero muda. Os valores
+# extremos do `relay_row` fazem a linha aparecer em erro, p95, cadeia,
+# ferramentas e facetas ao mesmo tempo.
+
+
+def test_a_relay_line_does_not_enter_the_totals(seeded_with_relay):
+    one_hour = queries.totals(seeded_with_relay, hours=1)
+    assert one_hour["requests"] == 4
+    assert one_hour["input_tokens"] == 10 + 20 + 10 + 10
+    assert one_hour["output_tokens"] == 5 + 10 + 5 + 5
+    assert one_hour["errors"] == 1
+    assert one_hour["error_rate"] == 0.25
+    assert one_hour["fallbacks"] == 1
+    assert one_hour["streams"] == 1
+    assert one_hour["p95_duration_ms"] == 400
+    assert queries.totals(seeded_with_relay, hours=24)["requests"] == 5
+
+
+def test_a_relay_line_does_not_enter_the_series(seeded_with_relay):
+    hora = queries.series(seeded_with_relay, hours=1)
+    assert sum(point["requests"] for point in hora["points"]) == 4
+
+
+def test_a_relay_line_does_not_enter_by_model(seeded_with_relay):
+    groups = {group["model"]: group for group in queries.by_model(seeded_with_relay, hours=1)}
+    assert groups["gpt-oss-120b"]["tokens"] == (10 + 5) + (20 + 10) + (10 + 5)
+    assert groups["gpt-oss-120b"]["requests"] == 3
+
+
+def test_a_relay_line_does_not_enter_by_provider(seeded_with_relay):
+    groups = {
+        group["provider"]: group for group in queries.by_provider(seeded_with_relay, hours=1)
+    }
+    assert groups["groq"]["requests"] == 3
+    assert groups["openrouter"]["requests"] == 1
+    assert groups["openrouter"]["errors"] == 1
+    assert groups["groq"]["errors"] == 0
+
+
+def test_a_relay_line_does_not_enter_by_route(seeded_with_relay):
+    rotas = {group["route"] for group in queries.by_route(seeded_with_relay, hours=1)}
+    assert "/api/oauth/usage" not in rotas
+
+
+def test_a_relay_line_does_not_enter_by_requested_model(seeded_with_relay):
+    asked = queries.by_requested_model(seeded_with_relay, hours=1)
+    assert asked[0]["requested_model"] == "claude-haiku-4-5"
+    assert asked[0]["requests"] == 4
+
+
+def test_a_relay_line_does_not_grow_the_no_project_line(seeded_with_relay):
+    linhas = {
+        linha["name"]: linha["requests"] for linha in queries.by_project(seeded_with_relay, hours=1)
+    }
+    assert linhas["sem projeto"] == 4
+
+
+def test_a_relay_line_does_not_enter_the_pairs(seeded_with_relay):
+    pares = queries.pairs(seeded_with_relay, hours=1)
+    assert [
+        (par["asked"], par["served"], par["requests"]) for par in pares
+    ] == [
+        ("claude-haiku-4-5", "gpt-oss-120b", 3),
+        ("claude-haiku-4-5", "vendor/free", 1),
+    ]
+
+
+def test_a_relay_line_does_not_enter_errors_by_type(seeded_with_relay):
+    errors = queries.errors_by_type(seeded_with_relay, hours=1)
+    assert errors == [{"status": 429, "error_type": "rate_limit_error", "requests": 1}]
+
+
+def test_a_relay_line_does_not_enter_the_chain(seeded_with_relay):
+    chain = queries.chain_health(seeded_with_relay, hours=1)
+    assert chain["requests"] == 4
+    assert chain["first_candidate_answered"] == 3
+    assert chain["first_candidate_rate"] == 0.75
+    assert chain["skips"] == [{"candidate": "free", "reason": "falhou na chamada", "count": 1}]
+
+
+def test_a_relay_line_does_not_enter_tool_usage(seeded_with_relay):
+    tools = {tool["tool"]: tool for tool in queries.tool_usage(seeded_with_relay, hours=1)}
+    assert tools["read"] == {"tool": "read", "offered": 1, "called": 1, "call_rate": 1.0}
+    assert tools["write"]["called"] == 0
+
+
+def test_a_relay_line_does_not_appear_in_recent(seeded_with_relay):
+    recent = queries.recent(seeded_with_relay)
+    assert [item["request_id"] for item in recent] == ["antigo", "d", "c", "b", "a"]
+
+
+def test_a_relay_line_does_not_enter_the_facets(seeded_with_relay):
+    facetas = queries.facets(seeded_with_relay)
+    assert all(item["value"] != "/api/oauth/usage" for item in facetas["routes"])
+    assert all(item["value"] != "upstream_unreachable" for item in facetas["error_types"])
+
+
+def test_a_relay_line_does_not_enter_the_snapshot(seeded_with_relay):
+    snapshot = queries.snapshot(seeded_with_relay, hours=1)
+    assert snapshot["totals"]["requests"] == 4
+
+
+def test_lines_without_kind_are_counted_as_model_lines(seeded):
+    """Toda linha antiga tem `kind` NULL, e NULL significa modelo.
+
+    Se o filtro fosse `kind != 'relay'` sozinho, a janela inteira -- que e
+    historia sem coluna -- somaria zero: medido em SQLite, a comparacao exclui
+    o NULL. O `or_` com `is_(None)` e o que mantem essa conta em 4.
+    """
+    assert queries.totals(seeded, hours=1)["requests"] == 4

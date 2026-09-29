@@ -161,6 +161,41 @@ hash.
 
 ---
 
+## Routes Shunt does not implement
+
+Everything else the client asks for — a route Shunt has no handler for, like
+`/api/oauth/usage`, `/v1/messages/batches` or `/v1/files`, and any method Shunt
+does not serve on a route it does know — is relayed verbatim to the official
+host of the caller's protocol: `api.anthropic.com` or `api.openai.com`. The
+path, the query, the headers and the body are passed through byte by byte, so
+the upstream sees exactly what the client sent, and the answer comes back the
+same way, `content-encoding` included.
+
+The destination comes from the signals in the request, not from the path: a
+header starting with `anthropic-`, `x-api-key`, a `Bearer sk-ant-...` token, or
+a `claude`-ish user agent means the Anthropic host; `openai-*` headers or a
+user agent mentioning `openai` means the OpenAI host. Anything ambiguous falls
+back to `detect_protocol` (a lone `Bearer` goes to OpenAI, the rest to
+Anthropic), so an unknown route is never answered with a 404 for lack of a
+signal.
+
+A valid Shunt token is required, the same `x-shunt-token` (or `/t/<token>/`, or
+`?token=`) used everywhere else. Without it the answer is a 401 in the caller's
+own error envelope, and nothing is sent upstream. The token itself never
+travels: it is removed from the headers and from the query before the request
+leaves, and the provider key from the catalog is never injected here — the
+client's own credential is the one that authenticates with the official host.
+
+These calls show up on the request screen as the type `relay`, with the route
+the client asked for, the status and the latency. They do **not** enter the
+panel numbers: totals, errors, latency percentiles, series, breakdowns, the
+live feed and the dossiers all count model traffic only, so a burst of
+background calls never makes a period look broken or slow. Filter the type
+with the `kind` chip on the request screen, or `?kind=relay` / `?kind=model` on
+`/api/requests`.
+
+---
+
 ## How a request travels
 
 ```text
@@ -496,7 +531,10 @@ request's whole chain: each candidate that was skipped and why, then the one
 that answered, with tokens, latency and time to first token.
 
 The search lives in the URL, so an investigation is a link you can send to
-someone. **Exportar CSV** hands the same result to a spreadsheet.
+someone. The **tipo** chip separates the two kinds of traffic: `model` is a
+request that was routed and translated, `relay` is a route Shunt passed through
+verbatim — the relay rows carry no tokens, so they show "—" where a model row
+would show numbers. **Exportar CSV** hands the same result to a spreadsheet.
 
 ### Reading the conversation
 

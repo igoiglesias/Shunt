@@ -435,3 +435,78 @@ def test_a_request_without_measured_duration_started_when_it_ended(monkeypatch):
     )
     assert event["started_at"] == _FROZEN_END
     assert event["started_at"].tzinfo is UTC
+
+
+# --------------------------------------------------------------------------
+# kind: o painel precisa separar requisicao de modelo do trafego repassado
+# --------------------------------------------------------------------------
+
+
+class _SpyRecorder:
+    def __init__(self):
+        self.stored = []
+        self.records = []
+
+    def record(self, event):
+        self.records.append(event)
+
+    def store(self, event):
+        self.stored.append(event)
+
+
+def test_log_request_stores_the_event_with_kind_model():
+    """Toda requisicao de modelo vai para o banco com `kind` preenchido.
+
+    NULL tambem significaria modelo, mas as linhas antigas so existem porque a
+    coluna e nova: daqui em diante a escrita deixa claro o que gravou.
+    """
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    observability.set_recorder(spy)
+    try:
+        log_request(RequestLog(request_id="r1", requested_model="m", rule="exact",
+                               matched=None, candidate=None))
+    finally:
+        observability.set_recorder(original)
+    assert len(spy.records) == 1
+    assert spy.records[0]["kind"] == "model"
+    assert spy.stored == []
+
+
+def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
+    """`log_relay`: linha JSON sem credencial, e `store` em vez de `record`.
+
+    O relay nao entra no barramento do painel (SSE/`recent`): o trafego de
+    passagem nao e uma requisicao de modelo, e misturar os dois faria cada
+    repasse aparecer na tela como se o proxy tivesse chamado um modelo.
+    """
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    observability.set_recorder(spy)
+    with caplog.at_level(logging.INFO, logger="shunt"):
+        try:
+            observability.log_relay(observability.RelayLog(
+                path="/t/secreto-do-token/api/oauth/usage",
+                target="anthropic",
+                status=200,
+                error_type=None,
+                duration_ms=42,
+            ))
+        finally:
+            observability.set_recorder(original)
+
+    line = json.dumps(lines(caplog)[-1])
+    assert "secreto-do-token" not in line, "o valor do token nao pode sair no log"
+    assert "token=" not in line, "a query crua nao pode sair no log"
+
+    assert len(spy.stored) == 1, "o relay grava pelo `store`"
+    assert spy.records == [], "o relay nao publica no barramento do painel"
+    event = spy.stored[0]
+    assert event["kind"] == "relay"
+    assert event["route"] == "/t/***/api/oauth/usage"
+    assert event["dialect"] == "anthropic"
+    assert event["status"] == 200
+    assert event["rule"] == "none"
+    assert event["requested_model"] == ""
+    assert event["input_tokens"] == 0
+    assert event["candidate_model"] is None
