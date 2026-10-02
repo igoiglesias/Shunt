@@ -41,9 +41,11 @@
     <small id="max_concurrency-help" class="notice">Vazio = sem limite</small>
   </div>
 </div>
-<div style="margin-top: 16px; display: flex; gap: 8px;">
+<div style="margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap;">
   <button type="submit" class="btn btn-primary">{% if provider %}Salvar{% else %}Criar{% endif %}</button>
+  <button type="button" class="btn" hx-post="/admin/config/providers/test" hx-include="closest form" hx-target="#test-result" hx-swap="innerHTML">Testar Conexão</button>
   <button type="button" class="btn" hx-get="/admin/config/sections/provider/form-reset" hx-target="#provider-form" hx-swap="outerHTML">Cancelar</button>
 </div>
+<div id="test-result" style="margin-top: 8px; min-height: 20px;"></div>
 </form>
 </div>

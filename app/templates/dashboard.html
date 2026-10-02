@@ -1007,7 +1007,7 @@ function wireSeries(points) {
       bar.classList.toggle("on", Number(bar.dataset.i) === i);
     }
     tip.innerHTML = `
-      <b>${esc(clock(p.at, false))}</b>
+      <b>${esc(day(p.at) + " " + clock(p.at, false))}</b>
       <span><i class="sw req"></i>${p.requests} req</span>
       <span><i class="sw tok"></i>${compact(g.tokensOf(p))} tokens</span>
       ${p.errors ? `<span class="bad"><i class="sw err"></i>${p.errors} com erro</span>` : ""}`;

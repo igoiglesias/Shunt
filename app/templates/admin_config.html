@@ -182,5 +182,22 @@
 </main>
 
 <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<script>
+  // Reset provider/model/route forms after successful create/edit/delete
+  document.body.addEventListener("providerFormReset", () => {
+    const formEl = document.getElementById("provider-form");
+    if (formEl) {
+      formEl.innerHTML = ""; // limpa; botao Novo recria via hx-get
+    }
+    const modelFormEl = document.getElementById("model-form");
+    if (modelFormEl) {
+      modelFormEl.innerHTML = "";
+    }
+    const routeFormEl = document.getElementById("route-form");
+    if (routeFormEl) {
+      routeFormEl.innerHTML = "";
+    }
+  });
+</script>
 </body>
 </html>

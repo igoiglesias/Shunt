@@ -604,7 +604,7 @@ function relayRowOf(event) {
   const bad = event.status >= 400;
   return `<tr data-id="${esc(event.request_id)}" class="${bad ? "failed" : ""}">
     <td class="when" data-label="Quando" title="${esc(day(event.started_at))}">${esc(
-      clock(event.started_at, true)
+      day(event.started_at) + " " + clock(event.started_at, true)
     )}</td>
     <td class="route" data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
     <td data-label="Pedido">—</td>
@@ -642,7 +642,7 @@ function rowOf(event) {
   ].filter(Boolean).join("");
   return `<tr data-id="${esc(event.request_id)}" class="${bad ? "failed" : ""}">
     <td class="when" data-label="Quando" title="${esc(day(event.started_at))}">${esc(
-      clock(event.started_at, true)
+      day(event.started_at) + " " + clock(event.started_at, true)
     )}</td>
     <td class="route" data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
     <td data-label="Pedido">${esc(event.requested_model || "—")}</td>
