@@ -603,18 +603,23 @@ _DIALECT = (
 
 
 def _model_entries(settings: Settings) -> list[dict]:
-    """A uniao dos dois formatos. Cada dialeto e uma projecao deste registro."""
+    """A tabela de rotas do Shunt. Cada dialeto e uma projecao deste registro.
+
+    Lista as rotas configuradas no Shunt (pattern + candidatos), nao os modelos
+    brutos dos providers. Cada rota e um modelo logico que o Shunt expõe.
+    """
     return [
         {
-            "id": alias,
+            "id": pattern,
             "object": "model",
             "created": MODEL_CREATED,
-            "owned_by": model.provider,
+            "owned_by": "shunt",
             "type": "model",
-            "display_name": f"{alias} ({model.model})",
+            "display_name": f"{pattern} -> {', '.join(candidates)}",
             "created_at": MODEL_CREATED_AT,
+            "candidates": candidates,
         }
-        for alias, model in settings.models.items()
+        for pattern, candidates in settings.routes
     ]
 
 
