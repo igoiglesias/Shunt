@@ -221,6 +221,50 @@ def test_um_banco_em_uso_ganha_as_colunas_de_projeto_no_boot(tmp_path):
         engine.dispose()
 
 
+def test_um_banco_em_uso_ganha_a_coluna_kind_no_boot(tmp_path):
+    """Banco criado antes do repasse: `request_events` sem `kind`.
+
+    A coluna e NULLABLE de proposito: a migracao so compila o tipo, sem
+    default, e as linhas antigas ficam NULL -- e NULL significa modelo. O
+    filtro do painel por isso e `or_(kind IS NULL, kind != 'relay')`, nunca a
+    comparacao sozinha (medido em SQLite: `k != 'relay'` exclui o NULL).
+    """
+    import sqlite3
+
+    from sqlalchemy import inspect
+
+    from app.stats.engine import add_missing_columns
+
+    caminho = tmp_path / "sem-kind.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE request_events ("
+        " id INTEGER PRIMARY KEY, request_id VARCHAR(64), started_at DATETIME,"
+        " route VARCHAR(64), dialect VARCHAR(16), stream BOOLEAN, status INTEGER)"
+    )
+    antigo.execute(
+        "INSERT INTO request_events (request_id, started_at, route, dialect, stream, status)"
+        " VALUES ('antiga', '2026-09-01 10:00:00', '/v1/messages', 'anthropic', 0, 200)"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        colunas = {c["name"] for c in inspect(engine).get_columns("request_events")}
+        assert "kind" in colunas
+        assert add_missing_columns(engine) == []
+        # A linha que ja estava la continua legivel, com o `kind` vazio.
+        with engine.connect() as conexao:
+            from sqlalchemy import text as sql
+
+            linha = conexao.execute(sql("SELECT request_id, kind FROM request_events")).one()
+        assert linha == ("antiga", None)
+    finally:
+        engine.dispose()
+
+
 def test_uma_tabela_de_provedores_antiga_ganha_o_limite_de_concorrencia(tmp_path):
     """Banco criado antes do limite por provedor: `providers` sem
     `max_concurrency`. O boot acrescenta a coluna e a linha antiga fica com

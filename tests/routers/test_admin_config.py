@@ -111,6 +111,111 @@ def test_config_page_renders_seeded_names(monkeypatch, tmp_path):
     assert "opus" in r.text
 
 
+# ---------------------------------------------------------------------------
+# D1: os chips das tabelas de config sao ROTULOS, nao controles. Sem handler
+# de clique e sem data-filter, `aria-pressed` e um atributo mentiroso -- o
+# axe-core relata aria-allowed-attr. NAO viram <button>: um botao sem acao e
+# um defeito pior. Os chips da audit/dashboard sao <button> de verdade e
+# continuam fora disto.
+# ---------------------------------------------------------------------------
+
+
+def test_provider_chips_carry_no_aria_pressed(monkeypatch, tmp_path):
+    """O chip de protocolo do provedor nao declara estado de botao."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(
+                Provider(name="p1", base_url="https://p1.test", protocol="openai")
+            )
+            s.commit()
+        r = c.get("/admin/config/providers", cookies=COOKIE)
+    assert r.status_code == 200
+    assert 'class="chip"' in r.text
+    # A presenca do atributo e o defeito; ele mente interatividade.
+    assert 'aria-pressed' not in r.text
+
+
+def test_model_chips_carry_no_aria_pressed(monkeypatch, tmp_path):
+    """Os 4 chips de capacidade/default da linha do modelo nao declaram
+    estado de botao -- inclui o chip .bad, que pinta o vermelho."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai")
+            s.add(p)
+            s.flush()
+            # supports_tools False -> o chip vem com a classe .bad
+            s.add(
+                Model(
+                    alias="m1",
+                    provider_id=p.id,
+                    upstream_model="x",
+                    supports_tools=False,
+                    supports_streaming=True,
+                    supports_vision=False,
+                    is_default=True,
+                    context_window=8192,
+                    max_output_tokens=4096,
+                )
+            )
+            s.commit()
+        r = c.get("/admin/config/models", cookies=COOKIE)
+    assert r.status_code == 200
+    assert 'class="chip bad"' in r.text
+    assert 'class="chip"' in r.text
+    assert "aria-pressed" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# D3/D5: no mobile a tabela de config e mais larga que a tela e a coluna de
+# acoes (Editar/Excluir) caia alem da dobra do scroll. A coluna fica colada a
+# direita; os botoes tambem crescem para o dedo (44px). Estas sao regras de
+# CSS dentro de @media (max-width: 760px) -- mesmo padrao que o arquivo ja
+# usava. Sem navegador aqui, a assercao e sobre a regra existir ligada a
+# essa media query; a prova de layout fica no suite de browser.
+# ---------------------------------------------------------------------------
+
+
+def test_mobile_media_query_glues_the_actions_column_to_the_right_edge(monkeypatch, tmp_path):
+    """D3: a coluna de acoes e sticky a direita dentro do media query de
+    760px, com fundo opaco para o conteudo nao mostrar por baixo."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="https://p1.test", protocol="openai"))
+            s.commit()
+        r = c.get("/admin/config", cookies=COOKIE)
+    source = r.text
+    media = source.split("@media (max-width: 760px)", 1)[1]
+    # A regra so existe DENTRO do media query (nao vira sticky no desktop).
+    # Os seletores casam a ULTIMA celula: as quatro tabelas da config pem as
+    # acoes em <td class="n"><div class="actions"> -- a classe .actions esta
+    # no div de dentro, entao td.actions/th.actions nao casavam nada.
+    for needle in ("position: sticky", "right: 0",
+                   "td:last-child", "th:last-child"):
+        assert needle in media, f"{needle} precisa estar no media query de 760px"
+    # O seletor morto nao pode sobrar como regra. Assercao no seletor, nao
+    # em substring solto: o comentario que documenta o bug cita as palavras.
+    assert "td.actions," not in media
+    assert "td.actions {" not in media
+    # Fundo opaco: transparent deixa a linha anterior aparecer na rolagem.
+    assert "background: var(--panel)" in media
+
+
+def test_mobile_media_query_raises_the_button_height_to_44px(monkeypatch, tmp_path):
+    """D5: .btn e .btn-sm ganham min-height de 44px no media query de 760px
+    (o piso para toque WCAG)."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            seed_db(s)
+        r = c.get("/admin/config", cookies=COOKIE)
+    media = r.text.split("@media (max-width: 760px)", 1)[1]
+    assert ".btn { min-height: 44px; }" in media
+    assert ".btn-sm" in media and "44px" in media
+
+
 def test_providers_list_never_renders_the_full_key(monkeypatch, tmp_path):
     """A chave completa nunca entra no HTML; so os 4 ultimos digitos aparecem
     depois da mascara."""
@@ -133,7 +238,6 @@ def test_providers_list_never_renders_the_full_key(monkeypatch, tmp_path):
 
 
 # ---- Providers -------------------------------------------------------------
-
 
 def test_create_provider(monkeypatch, tmp_path):
     monkeypatch.setenv("ADMIN_TOKEN", "t")

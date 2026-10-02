@@ -135,6 +135,19 @@ def test_limit_param_declares_default_and_states_the_clamp(schema):
     assert params["order_by"]["schema"]["enum"] == ["time", "duration"]
 
 
+def test_kind_param_declares_the_two_kinds_of_traffic(schema):
+    """`kind` e o tipo de trafego, e so ha dois nominais: `model` e `relay`.
+
+    O /docs publica a lista porque "qualquer outro valor vira filtro ausente" e
+    a regra da tela, e nao algo que se adivinha lendo a descricao da rota.
+    """
+    params = {p["name"]: p for p in _op(schema, "get", "/api/requests")["parameters"]}
+    kind = params["kind"]
+    assert kind["schema"]["type"] == "string"
+    assert kind["schema"]["enum"] == ["model", "relay"]
+    assert "relay" in kind["description"]
+
+
 def test_window_param_declares_default_and_states_the_clamp(schema):
     from app.config.config import DEFAULT_HOURS, MAX_HOURS
 
@@ -200,6 +213,7 @@ PARAM_TYPES = {
     "has_tools": ("boolean", None),
     "min_duration_ms": ("integer", None),
     "min_tokens": ("integer", None),
+    "kind": ("string", None),
     "order_by": ("string", None),
     "limit": ("integer", None),
     "cursor": ("string", None),

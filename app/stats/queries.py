@@ -49,6 +49,24 @@ def _since(hours: float) -> datetime:
     return datetime.now(UTC) - timedelta(hours=hours)
 
 
+def _model_rows():
+    """A linha de MODELO, e nao a de relay: o filtro que todo agregado leva.
+
+    `kind` e NULLABLE (`app/stats/models.py`): as linhas antigas nunca tiveram a
+    coluna e ficam NULL -- e NULL significa modelo. `kind != 'relay'` sozinho
+    EXCLUI o NULL (medido em SQLite: a comparacao com nulo nao casa), e o filtro
+    sem o `or_` apagaria todo o historico do painel de uma so vez. Por isso o
+    pareamento: nulo ou qualquer coisa que nao seja relay.
+
+    O filtro entra em TODO agregado, nao em alguns: os grafos contam o trafego
+    de modelo, e a linha de relay e rastro de rede -- se vazar em um so deles,
+    o 502 dela e os 99 s de duracao fariam o periodo parecer quebrado. As
+    leituras de auditoria (`search_events`, `event_detail`, `body_of`) ficam
+    inclusivas de proposito: quem investiga a rede precisa ver a linha.
+    """
+    return or_(RequestEvent.kind.is_(None), RequestEvent.kind != "relay")
+
+
 def _percentile(values: list[int], fraction: float) -> int | None:
     """Percentil por indice, sem numpy e sem interpolacao.
 
@@ -87,18 +105,22 @@ def totals(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                     func.sum(case((_cache_reported(), RequestEvent.input_tokens), else_=0)), 0
                 ),
                 func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
-            ).where(RequestEvent.started_at >= since)
+            ).where(RequestEvent.started_at >= since, _model_rows())
         ).one()
         durations = list(
             session.scalars(
-                select(RequestEvent.duration_ms).where(RequestEvent.started_at >= since)
+                select(RequestEvent.duration_ms).where(
+                    RequestEvent.started_at >= since, _model_rows()
+                )
             )
         )
         ttfts = [
             value
             for value in session.scalars(
                 select(RequestEvent.ttft_ms).where(
-                    RequestEvent.started_at >= since, RequestEvent.ttft_ms.is_not(None)
+                    RequestEvent.started_at >= since,
+                    RequestEvent.ttft_ms.is_not(None),
+                    _model_rows(),
                 )
             )
             if value is not None
@@ -209,7 +231,7 @@ def series(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
     with Session(engine) as session:
         extremos = session.execute(
             select(func.min(RequestEvent.started_at), func.max(RequestEvent.started_at)).where(
-                RequestEvent.started_at >= since
+                RequestEvent.started_at >= since, _model_rows()
             )
         ).one()
     span_hours = hours
@@ -227,7 +249,7 @@ def series(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
                 func.coalesce(func.sum(RequestEvent.output_tokens), 0),
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
             )
-            .where(RequestEvent.started_at >= since)
+            .where(RequestEvent.started_at >= since, _model_rows())
             .group_by(bucket)
             .order_by(bucket)
         ).all()
@@ -325,7 +347,12 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
                 ),
                 func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
             )
-            .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
+            .where(
+                RequestEvent.started_at >= since,
+                column.is_not(None),
+                column != "",
+                _model_rows(),
+            )
             .group_by(column)
             .order_by(func.count(RequestEvent.id).desc())
             .limit(limit)
@@ -370,6 +397,7 @@ def _providers_of(engine: Engine, hours: float, models: list[str]) -> dict[str, 
                 RequestEvent.started_at >= since,
                 RequestEvent.candidate_model.in_(models),
                 RequestEvent.provider.is_not(None),
+                _model_rows(),
             )
             .group_by(RequestEvent.candidate_model, RequestEvent.provider)
         ).all()
@@ -442,7 +470,7 @@ def by_project(
                 ),
                 func.coalesce(func.sum(case((_cache_reported(), 1), else_=0)), 0),
             )
-            .where(RequestEvent.started_at >= since)
+            .where(RequestEvent.started_at >= since, _model_rows())
             .group_by(rotulo)
             .order_by(func.count(RequestEvent.id).desc())
             .limit(limit)
@@ -491,6 +519,7 @@ def pairs(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = 12) -> list
                 RequestEvent.started_at >= since,
                 RequestEvent.requested_model != "",
                 RequestEvent.candidate_model.is_not(None),
+                _model_rows(),
             )
             .group_by(RequestEvent.requested_model, RequestEvent.candidate_model)
             .order_by(func.count(RequestEvent.id).desc())
@@ -509,7 +538,11 @@ def errors_by_type(
     with Session(engine) as session:
         rows = session.execute(
             select(RequestEvent.status, RequestEvent.error_type, func.count(RequestEvent.id))
-            .where(RequestEvent.started_at >= since, RequestEvent.status >= 400)
+            .where(
+                RequestEvent.started_at >= since,
+                RequestEvent.status >= 400,
+                _model_rows(),
+            )
             .group_by(RequestEvent.status, RequestEvent.error_type)
             .order_by(func.count(RequestEvent.id).desc())
             .limit(limit)
@@ -560,7 +593,7 @@ def chain_health(engine: Engine, hours: float = DEFAULT_HOURS) -> dict:
         rows = list(
             session.execute(
                 select(RequestEvent.attempts, RequestEvent.candidate_model).where(
-                    RequestEvent.started_at >= since
+                    RequestEvent.started_at >= since, _model_rows()
                 )
             ).all()
         )
@@ -609,7 +642,7 @@ def tool_usage(
         rows = list(
             session.execute(
                 select(RequestEvent.tools_offered, RequestEvent.tools_called).where(
-                    RequestEvent.started_at >= since
+                    RequestEvent.started_at >= since, _model_rows()
                 )
             ).all()
         )
@@ -635,7 +668,12 @@ def recent(engine: Engine, limit: int = 20) -> list[dict]:
     """As ultimas requisicoes, que e o que se olha quando algo acabou de quebrar."""
     with Session(engine) as session:
         rows = list(
-            session.scalars(select(RequestEvent).order_by(RequestEvent.id.desc()).limit(limit))
+            session.scalars(
+                select(RequestEvent)
+                .where(_model_rows())
+                .order_by(RequestEvent.id.desc())
+                .limit(limit)
+            )
         )
     return [
         {
@@ -701,10 +739,21 @@ def _parse_moment(raw: str | None) -> datetime:
 
 
 def _as_event(row: RequestEvent) -> dict:
-    """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo."""
+    """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo.
+
+    A linha de relay vem com medidas de token em None, e nao com os zeros que
+    estao no banco: as colunas `input_tokens` e `output_tokens` sao NOT NULL
+    (`app/stats/models.py`), entao o relay e gravado com 0, mas zero e uma
+    medicao -- e relay e passagem de rede, que nunca mediu token algum. A
+    distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
+    tokens continua sendo um modelo, e `ttft_ms` de uma requisicao em streaming
+    que nao cronometrou nada tambem e None.
+    """
+    relay = row.kind == "relay"
     return {
         "id": row.id,
         "request_id": row.request_id,
+        "kind": row.kind or "model",
         "started_at": _utc(row.started_at),
         "route": row.route,
         "dialect": row.dialect,
@@ -716,9 +765,9 @@ def _as_event(row: RequestEvent) -> dict:
         "candidate_model": row.candidate_model,
         "status": row.status,
         "error_type": row.error_type,
-        "input_tokens": row.input_tokens,
-        "output_tokens": row.output_tokens,
-        "ttft_ms": row.ttft_ms,
+        "input_tokens": None if relay else row.input_tokens,
+        "output_tokens": None if relay else row.output_tokens,
+        "ttft_ms": None if relay else row.ttft_ms,
         "duration_ms": row.duration_ms,
         "attempts": list(row.attempts or []),
         "fell_back": row.fell_back,
@@ -727,8 +776,8 @@ def _as_event(row: RequestEvent) -> dict:
         "thinking_blocks": row.thinking_blocks,
         "project": row.project,
         "session_id": row.session_id,
-        "cached_input_tokens": row.cached_input_tokens,
-        "cache_write_tokens": row.cache_write_tokens,
+        "cached_input_tokens": None if relay else row.cached_input_tokens,
+        "cache_write_tokens": None if relay else row.cache_write_tokens,
     }
 
 
@@ -774,6 +823,7 @@ def _search_clauses(
     min_duration_ms: int | None,
     min_tokens: int | None,
     project: str | None = None,
+    kind: str | None = None,
 ) -> list:
     clauses = []
     if since is not None:
@@ -809,6 +859,17 @@ def _search_clauses(
         clauses.append(RequestEvent.duration_ms >= min_duration_ms)
     if min_tokens is not None:
         clauses.append(RequestEvent.input_tokens + RequestEvent.output_tokens >= min_tokens)
+    if kind is not None:
+        # `kind` e o tipo de trafego, e nao um seletor da tela: NULL e modelo,
+        # e por isso so os dois valores nominais sao aceitos. Outro nome seria
+        # um filtro que existe em outro lugar e chegou aqui por engano -- e
+        # ignorar em silencio devolveria um recorte que ninguem pediu.
+        if kind == "model":
+            clauses.append(_model_rows())
+        elif kind == "relay":
+            clauses.append(RequestEvent.kind == "relay")
+        else:
+            raise ValueError(f"kind desconhecido: {kind!r}")
     return clauses
 
 
@@ -832,6 +893,7 @@ def search_events(
     min_duration_ms: int | None = None,
     min_tokens: int | None = None,
     project: str | None = None,
+    kind: str | None = None,
     order_by: str = "time",
     limit: int = SEARCH_LIMIT,
     cursor: str | None = None,
@@ -849,9 +911,24 @@ def search_events(
     limit = max(1, min(limit, MAX_SEARCH_LIMIT))
     by_duration = order_by == "duration"
     clauses = _search_clauses(
-        since, until, text, route, dialect, provider, candidate_model, requested_model,
-        error_type, status_min, status_max, stream, fell_back, has_tools,
-        min_duration_ms, min_tokens, project,
+        since=since,
+        until=until,
+        text=text,
+        route=route,
+        dialect=dialect,
+        provider=provider,
+        candidate_model=candidate_model,
+        requested_model=requested_model,
+        error_type=error_type,
+        status_min=status_min,
+        status_max=status_max,
+        stream=stream,
+        fell_back=fell_back,
+        has_tools=has_tools,
+        min_duration_ms=min_duration_ms,
+        min_tokens=min_tokens,
+        project=project,
+        kind=kind,
     )
     # Ordenar por `id` NAO e ordenar por tempo: o id cresce com a INSERCAO, e o
     # gravador entrega em lote, entao duas requisicoes da mesma rajada podem
@@ -932,7 +1009,12 @@ def facets(engine: Engine, hours: float = 24 * 30, limit: int = 60) -> dict:
         with Session(engine) as session:
             rows = session.execute(
                 select(column, func.count(RequestEvent.id))
-                .where(RequestEvent.started_at >= since, column.is_not(None), column != "")
+                .where(
+                    RequestEvent.started_at >= since,
+                    column.is_not(None),
+                    column != "",
+                    _model_rows(),
+                )
                 .group_by(column)
                 .order_by(func.count(RequestEvent.id).desc())
                 .limit(limit)
