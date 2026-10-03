@@ -80,10 +80,10 @@ def test_the_anthropic_shape_carries_exactly_the_anthropic_keys():
         body = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"}).json()
     assert set(body) == {"data", "has_more", "first_id"}
     assert set(body["data"][0]) == {"type", "id", "display_name", "created_at"}
-    assert body["data"][0]["id"] == "free"
-    assert body["data"][0]["display_name"] == "free (vendor/free)"
+    assert body["data"][0]["id"] == "opus"
+    assert body["data"][0]["display_name"] == "opus -> free, cheap"
     assert body["data"][0]["created_at"] == "2026-01-01T00:00:00Z"
-    assert body["first_id"] == "free"
+    assert body["first_id"] == "opus"
 
 
 def test_models_answers_openai_shape_for_an_openai_caller():
@@ -100,8 +100,8 @@ def test_the_openai_shape_carries_exactly_the_openai_keys():
         body = c.get("/v1/models", headers={"authorization": "Bearer sk"}).json()
     assert set(body) == {"object", "data"}
     assert set(body["data"][0]) == {"id", "object", "created", "owned_by"}
-    assert body["data"][0]["id"] == "free"
-    assert body["data"][0]["owned_by"] == "openrouter"
+    assert body["data"][0]["id"] == "opus"
+    assert body["data"][0]["owned_by"] == "shunt"
     assert body["data"][0]["created"] == 1700000000
 
 
@@ -117,8 +117,8 @@ def test_models_falls_back_to_a_superset_both_parsers_accept():
 def test_the_superset_lists_every_configured_model_in_order():
     with client() as c:
         body = c.get("/v1/models").json()
-    assert [e["id"] for e in body["data"]] == ["free", "cheap"]
-    assert body["first_id"] == "free"
+    assert [e["id"] for e in body["data"]] == ["opus"]
+    assert body["first_id"] == "opus"
 
 
 def test_an_installation_with_no_models_has_no_first_id():
@@ -132,34 +132,34 @@ def test_an_installation_with_no_models_has_no_first_id():
 
 def test_get_one_model_answers_anthropic_shape_for_an_anthropic_caller():
     with client() as c:
-        resp = c.get("/v1/models/free", headers={"anthropic-version": "2023-06-01"})
+        resp = c.get("/v1/models/opus", headers={"anthropic-version": "2023-06-01"})
     assert resp.status_code == 200
     entry = resp.json()
-    assert entry["id"] == "free"
+    assert entry["id"] == "opus"
     assert entry["type"] == "model"
-    assert entry["display_name"] == "free (vendor/free)"
+    assert entry["display_name"] == "opus -> free, cheap"
     assert entry["created_at"] == "2026-01-01T00:00:00Z"
     assert set(entry) == {"type", "id", "display_name", "created_at"}
 
 
 def test_get_one_model_answers_openai_shape_for_an_openai_caller():
     with client() as c:
-        resp = c.get("/v1/models/free", headers={"authorization": "Bearer sk"})
+        resp = c.get("/v1/models/opus", headers={"authorization": "Bearer sk"})
     assert resp.status_code == 200
     entry = resp.json()
-    assert entry["id"] == "free"
+    assert entry["id"] == "opus"
     assert entry["object"] == "model"
-    assert entry["owned_by"] == "openrouter"
+    assert entry["owned_by"] == "shunt"
     assert entry["created"] == 1700000000
     assert set(entry) == {"id", "object", "created", "owned_by"}
 
 
 def test_get_one_model_falls_back_to_a_superset_when_the_dialect_is_unknown():
     with client() as c:
-        resp = c.get("/v1/models/cheap")
+        resp = c.get("/v1/models/opus")
     assert resp.status_code == 200
     entry = resp.json()
-    assert entry["id"] == "cheap"
+    assert entry["id"] == "opus"
     assert entry["object"] == "model" and entry["type"] == "model"
     assert entry["owned_by"] and entry["display_name"]
 
@@ -198,10 +198,10 @@ def test_get_one_model_records_observability_like_the_listing(monkeypatch):
     calls: list = []
     monkeypatch.setattr(v1, "log_request", lambda entry: calls.append(entry))
     with client() as c:
-        assert c.get("/v1/models/free", headers={"x-api-key": "sk"}).status_code == 200
+        assert c.get("/v1/models/opus", headers={"x-api-key": "sk"}).status_code == 200
         assert c.get("/v1/models/nao-existe", headers={"x-api-key": "sk"}).status_code == 404
     ok, miss = calls
     assert ok.route == "/v1/models" and ok.dialect == "anthropic" and ok.status == 200
-    assert ok.requested_model == "free"
+    assert ok.requested_model == "opus"
     assert miss.route == "/v1/models" and miss.dialect == "anthropic" and miss.status == 404
     assert miss.requested_model == "nao-existe"

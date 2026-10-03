@@ -41,6 +41,14 @@ def test_rate_limit_retries_when_retry_after_exactly_at_budget():
     assert classify(429, None, RETRY_AFTER_BUDGET) is Outcome.RETRY
 
 
+def test_rate_limit_skips_just_above_the_retry_after_budget():
+    # A fronteira e inclusiva no lado de baixo: o orcamento exato ainda RETRY
+    # (teste acima), mas qualquer valor ACIMA dele SKIP. Mutar `<=` para `<`
+    # so falharia no exato; este e o guarda do lado de cima.
+    assert classify(429, None, RETRY_AFTER_BUDGET + 1e-6) is Outcome.SKIP
+    assert classify(429, None, RETRY_AFTER_BUDGET + 1.0) is Outcome.SKIP
+
+
 def test_rate_limit_skips_when_retry_after_is_not_a_number():
     assert classify(429, None, float("nan")) is Outcome.SKIP
 
