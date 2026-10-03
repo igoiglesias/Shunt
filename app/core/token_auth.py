@@ -202,7 +202,10 @@ async def require_shunt_token_or_transparent(request: Request) -> int | None:
       Sem banco para conferir, `strict=False` devolve None, e None aqui significa
       "nao e token do Shunt", nao "falta de credencial" -- sem esta distincao um
       Shunt sem banco derrubaria todo pedido do harness que so leva a propria
-      chave (e foi o 401 em /api/oauth/usage medido em producao).
+      chave (e foi o 401 em /api/oauth/usage medido em producao). O lado negativo
+      e o inverso: com o banco fora, um token Shunt invalido em x-api-key tambem
+      vira credencial. Nao ha vazamento (ninguem autenticou), e a revogacao so
+      falha nessa janela; as formas explicitas continuam bloqueando.
     - Nenhuma credencial: 401.
     """
     request.state.credential_is_token = False
@@ -225,14 +228,18 @@ async def require_shunt_token_or_transparent(request: Request) -> int | None:
         if token_id is None:
             raise TokenRejected(401, "unknown or expired shunt token")
         presented = True
-    # x-api-key e Authorization: se EXISTE engine (banco), checa se sao
-    # token Shunt; se nao ha engine, NAO tentamos validar e tratamos
-    # SEMPRE como credencial do caller (bypass transparente). Isso evita
-    # vazamento do token do Shunt quando o banco esta frio (cache miss + sem
-    # engine): o _lookup strict=False devolve None = "nao consegui conferir",
-    # mas o codigo antigo confundia com "nao e token" e deixava o header
-    # seguir para o upstream. As formas explicitas (x-shunt-token, /t/, ?token=)
-    # continuam validadas (strict=True) e bloqueiam o pedido se invalido.
+    # x-api-key e Authorization: se EXISTE engine (banco), checa se o valor e
+    # token Shunt; se nao e, e a credencial do caller (bypass transparente).
+    # Sem engine nao ha como conferir, e tudo vira credencial do caller --
+    # caso contrario um Shunt sem banco derrubaria todo pedido do harness
+    # que so leva a propria chave (foi o 401 em /api/oauth/usage medido em
+    # producao).
+    #
+    # O custo dessa escolha: com o banco fora, um token Shunt invalido em
+    # x-api-key tambem vira credencial e segue ao provedor. Nao e vazamento
+    # do segredo (ninguem autenticou), e o operador so perde a revogacao
+    # enquanto o DB esta fora. As formas EXPLICITAS (x-shunt-token, /t/,
+    # ?token=) continuam strict=True e rejeitam.
     recorder = getattr(request.app.state, "recorder", None)
     has_engine = recorder is not None and recorder.engine is not None
     for name in ("x-api-key", "authorization"):
@@ -241,12 +248,19 @@ async def require_shunt_token_or_transparent(request: Request) -> int | None:
             continue
         presented = True
         value = raw.removeprefix("Bearer ").strip() if name == "authorization" else raw.strip()
+        # Se o valor e identico ao token Shunt EXPLICITO ja validado, reusa o token_id.
+        if explicit and value == explicit:
+            matched.add(name)
+            continue
         if has_engine:
-            found = token_id if (explicit and value == explicit) else await _lookup(request, token_hash(value), strict=False)
+            found = await _lookup(request, token_hash(value), strict=False)
             if found is not None:
+                # Valor E token Shunt (achou no banco). Validado -> matched.
                 request.state.credential_is_token = True
                 token_id = token_id or found
                 matched.add(name)
+            # else: valor NAO e token Shunt (nao achou no banco) -> credencial do caller.
+            # Bypass transparente: header nao entra em matched, segue para upstream.
         # else: sem engine -> NAO checa, trata como credencial do caller.
         # Header NAO entra em matched, segue para o upstream (bypass transparente).
     if not presented:
