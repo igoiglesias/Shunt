@@ -154,11 +154,11 @@ def test_relay_oauth_usage_bearer_only_200(without_shunt_token):
     # App limpo: sem token_cache, sem recorder -> simula Shunt em producao
     # sem banco acessivel no momento (o pool ainda roda, so a validacao de
     # token falha e devolve None).
+    from app.config.settings import ProviderConfig, Settings
+    from app.core.observability import set_recorder
     from app.core.upstream import UpstreamPool
-    from app.config.settings import Settings, ProviderConfig
     from app.main import app
     from app.stats.recorder import Recorder
-    from app.core.observability import set_recorder
 
     clean_settings = Settings(
         providers={"local": ProviderConfig(base_url="http://localhost:8080/v1", protocol="openai", api_key=None)},

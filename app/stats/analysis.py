@@ -235,8 +235,8 @@ async def analyse(
         provider=result.real_provider,
         status=result.status,
         text=text,
-        input_tokens=int(usage.get("input_tokens") or 0),
-        output_tokens=int(usage.get("output_tokens") or 0),
+        input_tokens=usage.get("input_tokens") if usage.get("input_tokens") is not None else usage.get("prompt_tokens"),
+        output_tokens=usage.get("output_tokens") if usage.get("output_tokens") is not None else usage.get("completion_tokens"),
         duration_ms=duration_ms,
     )
     return {

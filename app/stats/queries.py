@@ -749,11 +749,9 @@ def _parse_moment(raw: str | None) -> datetime:
 def _as_event(row: RequestEvent) -> dict:
     """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo.
 
-    A linha de relay vem com medidas de token em None, e nao com os zeros que
-    estao no banco: as colunas `input_tokens` e `output_tokens` sao NOT NULL
-    (`app/stats/models.py`), entao o relay e gravado com 0, mas zero e uma
-    medicao -- e relay e passagem de rede, que nunca mediu token algum. A
-    distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
+    A linha de relay vem com medidas de token em None (nullable=True apos Task 2),
+    e nao com zeros: o relay e passagem de rede, que nunca mediu token algum.
+    A distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
     tokens continua sendo um modelo, e `ttft_ms` de uma requisicao em streaming
     que nao cronometrou nada tambem e None.
     """

@@ -225,21 +225,30 @@ async def require_shunt_token_or_transparent(request: Request) -> int | None:
         if token_id is None:
             raise TokenRejected(401, "unknown or expired shunt token")
         presented = True
-    # x-api-key e Authorization: se sao token Shunt, valida; se sao credencial
-    # do caller, permite bypass transparente (o header segue para o upstream).
+    # x-api-key e Authorization: se EXISTE engine (banco), checa se sao
+    # token Shunt; se nao ha engine, NAO tentamos validar e tratamos
+    # SEMPRE como credencial do caller (bypass transparente). Isso evita
+    # vazamento do token do Shunt quando o banco esta frio (cache miss + sem
+    # engine): o _lookup strict=False devolve None = "nao consegui conferir",
+    # mas o codigo antigo confundia com "nao e token" e deixava o header
+    # seguir para o upstream. As formas explicitas (x-shunt-token, /t/, ?token=)
+    # continuam validadas (strict=True) e bloqueiam o pedido se invalido.
+    recorder = getattr(request.app.state, "recorder", None)
+    has_engine = recorder is not None and recorder.engine is not None
     for name in ("x-api-key", "authorization"):
         raw = request.headers.get(name)
         if not raw:
             continue
         presented = True
         value = raw.removeprefix("Bearer ").strip() if name == "authorization" else raw.strip()
-        found = token_id if (explicit and value == explicit) else await _lookup(request, token_hash(value), strict=False)
-        if found is not None:
-            request.state.credential_is_token = True
-            token_id = token_id or found
-            matched.add(name)
-        # else: credencial do caller. NAO entra em matched, para que
-        # relay_headers nao drop o header (ele precisa chegar ao upstream).
+        if has_engine:
+            found = token_id if (explicit and value == explicit) else await _lookup(request, token_hash(value), strict=False)
+            if found is not None:
+                request.state.credential_is_token = True
+                token_id = token_id or found
+                matched.add(name)
+        # else: sem engine -> NAO checa, trata como credencial do caller.
+        # Header NAO entra em matched, segue para o upstream (bypass transparente).
     if not presented:
         raise TokenRejected(401, "missing shunt token or caller credentials: send x-shunt-token, /t/<token>/, ?token=, or provide x-api-key/Authorization")
     request.state.token_headers = frozenset(matched)

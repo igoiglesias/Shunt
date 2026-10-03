@@ -5,7 +5,7 @@ A lacuna mapeada: nenhum teste fazia um `stream: True` chegar a
 `NO_ANTHROPIC_DECLARED` (provider ausente, default_model=None). Os testes
 existentes com essas settings esperavam 400 -- ou o destino estrangeiro da
 credencial (T5/R2), ou o token do Shunt como unica credencial (T4). Esta
-suíte cobre o sucesso (200) no destino nativo da credencial, onde o
+suite cobre o sucesso (200) no destino nativo da credencial, onde o
 transparente e elegivel: passthrough cru, ja que o protocolo dos dois lados
 e o mesmo.
 
@@ -19,7 +19,6 @@ from app.core.dispatcher import dispatch_stream
 from app.core.upstream import UpstreamPool
 from app.routers.v1 import ShuntRequest
 from tests.core.test_dispatcher import NO_ANTHROPIC_DECLARED
-
 
 # --- Helpers de stream ------------------------------------------------------
 
