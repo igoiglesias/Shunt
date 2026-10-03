@@ -1037,14 +1037,15 @@ def _drain(
             return
 
 
-def _absorb(tally: _Tally, translator: object, candidate: Candidate) -> None:
+def _absorb(tally: _Tally, translator: object) -> None:
     """Passa para a linha de log o que so o tradutor viu.
 
     Um repasse cru nao tem tradutor, entao ferramenta e raciocinio ficam
     vazios: o proxy nao leu aqueles bytes e inventar contagem seria pior do
-    que nao ter.
+    que nao ter. O `provider` nao vem aqui: ele e setado no topo de
+    `_stream_candidate`, antes mesmo da primeira tentativa, justamente para
+    chegar a linha de log nos caminhos que nunca chegam ao commit.
     """
-    tally.provider = candidate.provider
     tools = getattr(translator, "tools_called", None)
     thinking = getattr(translator, "thinking_blocks", None)
     text = getattr(translator, "answer_text", None)
@@ -1237,6 +1238,16 @@ async def _stream_candidate(
     enquanto este gerador vive."""
     label = candidate.model
     trace = tally.trace
+    # O destino deste candidato e conhecido ANTES de qualquer tentativa, e a
+    # linha de log vive num `finally` la em `dispatch_stream` que roda em todo
+    # caminho de saida -- inclusive o 499 de um cliente que foi embora no
+    # meio. Setar aqui, e nao so depois do commit, e o que faz a falha chegar
+    # ao painel com destino: antes deste fix 2238 de 2320 erros (96,5%) do
+    # stats.db de producao eram gravados sem `provider`. Sobrescrever a cada
+    # candidato tambem e o que da o ULTIMO tentado quando a cadeia esgota, que
+    # e a quem o 502 cabe. A guarda do 400 (cadeia pulada inteira, nenhum
+    # upstream chamado) nunca chega aqui, e por isso continua com None.
+    tally.provider = candidate.provider
     # Retry belongs here and only here: no byte of this candidate has been
     # emitted, so a transient connect error is exactly the buffered case
     # `classify` already answers RETRY for. Past this point the response
@@ -1288,7 +1299,6 @@ async def _stream_candidate(
     if candidate.protocol == req.protocol:
         passthrough.happened = True
         tally.candidate = candidate.model
-        tally.provider = candidate.provider
         try:
             async for raw in response.aiter_bytes():
                 yield raw
@@ -1359,7 +1369,7 @@ async def _stream_candidate(
             tally.status = 502
             tally.error_type = "api_error"
         tally.usage = translator.usage()
-        _absorb(tally, translator, candidate)
+        _absorb(tally, translator)
         leg.done = True
         return
     if state.failed is None and not state.started:
@@ -1373,7 +1383,7 @@ async def _stream_candidate(
     for chunk_bytes in _finish(req, translator):
         yield chunk_bytes
     tally.usage = translator.usage()
-    _absorb(tally, translator, candidate)
+    _absorb(tally, translator)
     leg.done = True
 
 
