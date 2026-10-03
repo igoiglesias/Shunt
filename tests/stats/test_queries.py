@@ -766,6 +766,35 @@ def test_duracao_zero_nao_divide_por_zero(make_engine):
     assert linha["tokens_per_second"] == 100.0
 
 
+def test_provedor_mudo_em_input_tokens_fica_fora_da_taxa(make_engine):
+    """Silencio nao e medicao: `input_tokens` NULL exclui so a linha muda.
+
+    O filtro do `_usage_reported` (queries.py) e o coracao da Task 2: sem ele,
+    uma requisicao em que o provedor nao disse nada entra na taxa com a
+    output_tokens que registramos e puxa a soma para baixo. A linha mutuamente
+    exclusiva (provedor que fala) fica para provar que o NULL derruba a LINHA e
+    nao o grupo.
+    """
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                # Mudo: informou saida, mas nunca disse quanto entrou.
+                row(request_id="mudo", provider="mudo", stream=False, duration_ms=400,
+                    input_tokens=None, output_tokens=1200),
+                # Fala: mesma janela e mesmo provedor, para o grupo existir.
+                row(request_id="falante", provider="mudo", stream=False, duration_ms=400,
+                    input_tokens=100, output_tokens=1200),
+            ]
+        )
+        session.commit()
+
+    linha = {r["provider"]: r for r in queries.by_provider(engine)}["mudo"]
+
+    assert linha["rated_requests"] == 1
+    assert linha["tokens_per_second"] == 3000.0
+
+
 def test_a_janela_inteira_tem_a_propria_taxa(seeded):
     totais = queries.totals(seeded, hours=1)
 

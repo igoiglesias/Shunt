@@ -473,6 +473,29 @@ def test_log_request_stores_the_event_with_kind_model():
     assert spy.stored == []
 
 
+def test_a_request_that_measured_nothing_stores_null_not_zero():
+    """Quem nao passou tokens grava NULL (silencio), nunca 0 (medicao).
+
+    O default da coluna e a semantica da Task 2: os produtores passam None
+    quando o provedor nao disse nada, e uma rota que esquecer de setar cai no
+    DEFAULT do dataclass. Se ele for 0, a linha vira "provedor mediu zero" e
+    entra na taxa de geracao -- o oposto do que o painel quer dizer. O 0 so
+    existe de verdade na linha de relay, que escreve explicito.
+    """
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    observability.set_recorder(spy)
+    try:
+        log_request(RequestLog(request_id="sem-medida", requested_model="m", rule="exact",
+                               matched=None, candidate=None, duration_ms=250))
+    finally:
+        observability.set_recorder(original)
+
+    event = spy.records[0]
+    assert event["input_tokens"] is None
+    assert event["output_tokens"] is None
+
+
 def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
     """`log_relay`: linha JSON sem credencial, e `store` em vez de `record`.
 
