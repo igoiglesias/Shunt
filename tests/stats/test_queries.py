@@ -1086,3 +1086,93 @@ def test_lines_without_kind_are_counted_as_model_lines(seeded):
     o NULL. O `or_` com `is_(None)` e o que mantem essa conta em 4.
     """
     assert queries.totals(seeded, hours=1)["requests"] == 4
+
+
+# --- B3: a linha parcialmente muda nao pode sumir da soma -------------------
+#
+# `input_tokens + output_tokens` no SQL e NULL quando qualquer lado e NULL, e
+# `sum` de NULL ignora a linha inteira. O caminho e real: `sse_to_openai.py` e
+# `sse_to_anthropic.py` gravam so o campo que o provedor enviou, e o outro
+# chega NULL. A soma tem que ser POR COLUNA, cada uma com o seu coalesce.
+
+
+def test_a_partially_muted_line_still_counts_its_reported_side(make_engine):
+    """Linha com input NULL e output informado entra com o output na soma.
+
+    Antes do fix, `sum(input_tokens + output_tokens)` devolvia NULL para essa
+    linha e ela desaparecia do todo; o total ficaria 150 em vez de 1350.
+    """
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="cheia", input_tokens=100, output_tokens=100),
+                row(request_id="semi", input_tokens=None, output_tokens=1200),
+                row(request_id="calada", input_tokens=None, output_tokens=None),
+            ]
+        )
+        session.commit()
+
+    totais = queries.totals(engine)
+    assert totais["input_tokens"] == 100
+    assert totais["output_tokens"] == 1300
+
+    for funcao in (queries.by_model, queries.by_provider, queries.by_requested_model):
+        linha = funcao(engine)[0]
+        assert linha["tokens"] == 1400, f"{funcao.__name__} perdeu a linha muda"
+        assert linha["requests"] == 3, f"{funcao.__name__} perdeu a linha muda"
+
+
+def test_a_partially_muted_line_still_counts_in_pairs(make_engine):
+    """`pairs` tambem soma as duas colunas; a linha muda entra com o que informou."""
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(
+                    request_id="semi",
+                    requested_model="claude-opus-5",
+                    candidate_model="qwen3.8-27b",
+                    input_tokens=None,
+                    output_tokens=1200,
+                ),
+                row(
+                    request_id="cheia",
+                    requested_model="claude-opus-5",
+                    candidate_model="qwen3.8-27b",
+                    input_tokens=100,
+                    output_tokens=100,
+                ),
+            ]
+        )
+        session.commit()
+
+    par = queries.pairs(engine)[0]
+    assert par["requests"] == 2
+    assert par["tokens"] == 1400
+
+
+def test_min_tokens_ignores_a_linha_sem_tokens_informados(make_engine):
+    """`min_tokens` so faz sentido sobre o que foi MEDIDO.
+
+    A linha em silencio total (input NULL e output NULL) nao tem como satisfazer
+    "mostrar so quem passou de N tokens": nao e que ela tenha poucos tokens, e
+    que ela nao informou nenhum. A linha parcial (input NULL, output 1200) entra
+    -- o lado informado e a soma do que ela de fato mediu.
+    """
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="calada", input_tokens=None, output_tokens=None),
+                row(request_id="semi", input_tokens=None, output_tokens=1200),
+                row(request_id="cheia", input_tokens=50, output_tokens=50),
+            ]
+        )
+        session.commit()
+
+    pagina = queries.search_events(engine, min_tokens=101)
+    ids = {linha["request_id"] for linha in pagina["events"]}
+
+    assert pagina["total"] == 1, f"min_tokens selecionou errado: total={pagina['total']}"
+    assert ids == {"semi"}, f"min_tokens selecionou errado: {ids}"
