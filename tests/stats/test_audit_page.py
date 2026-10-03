@@ -178,3 +178,28 @@ def test_a_linha_de_modelo_continua_como_antes():
     assert "15 total" in resultado["detail_html"], "Tokens da linha de modelo somado"
     assert "family → haiku" in resultado["detail_html"]
     assert "respondeu em 100ms" in resultado["detail_html"], "a cadeia de modelo segue no detalhe"
+
+
+@node
+def test_a_linha_de_modelo_sem_tokens_nao_finge_que_mediu_zero():
+    """M1: a linha muda de MODELO mostra "—", nunca "0".
+
+    Diferente do relay, esta linha nao tem `kind` para guarda-la: e um modelo
+    cujo provedor nao informou usage. `null + null === 0` em JS faria a tela
+    afirmar uma medicao de zero tokens que nunca existiu. A parcial (so a
+    saida) entra com o lado informado.
+    """
+    resultado = _run(["muted_model_row"])["muted_model_row"]
+
+    # Linha em silencio total: o traco, e nunca o zero.
+    assert 'data-label="Tokens">—<' in resultado["calada"], (
+        "a linha sem tokens informados mostra traco, nao zero"
+    )
+    # Linha parcial: entra com o lado que veio.
+    assert 'data-label="Tokens">1.2k<' in resultado["parcial"], (
+        "a linha parcial mostra o lado informado"
+    )
+    # O detalhe tambem distingue: entrada em silencio, saida informada.
+    assert "— entrada · 1.2k saída" in resultado["detalho_parcial"], (
+        "o detalhe mostra traco no lado que o provedor nao informou"
+    )

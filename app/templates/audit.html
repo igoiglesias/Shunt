@@ -406,7 +406,9 @@ const esc = (value) => String(value ?? "").replace(/[&<>"]/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const ms = (v) => (v === null || v === undefined ? "—" : v < 1000 ? `${v}ms` : `${(v / 1000).toFixed(1)}s`);
 const compact = (n) => {
-  if (!n) return "0";
+  // Nulo e silencio (provedor nao informou), e nao medicao. `!n` devolvia "0"
+  // para os dois, e a linha muda de MODELO afirmava ter medido zero tokens.
+  if (n === null || n === undefined) return "—";
   if (n < 1000) return String(n);
   if (n < 1000000) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
   return `${(n / 1000000).toFixed(1)}M`;
@@ -621,6 +623,15 @@ function relayRowOf(event) {
   </tr>`;
 }
 
+// A soma dos dois lados, tratando silencio. `null + null === 0` em JS, e a
+// linha muda de MODELO (que e o caso real: o provedor so informou a saida)
+// diria ter medido zero. Soma so o informado; se nenhum lado veio, e silencio.
+const tokensOf = (event) => {
+  const entrada = event.input_tokens ?? 0;
+  const saida = event.output_tokens ?? 0;
+  return entrada + saida || null;
+};
+
 function rowOf(event) {
   // O relay e rastro de rede, e nao uma chamada de modelo: nenhuma das
   // medidas abaixo foi medido por ninguem. Em JS `null + null === 0`, e
@@ -629,7 +640,7 @@ function rowOf(event) {
   // tokens do relay em `None`, e nao em zero, justamente por isso).
   if (event.kind === "relay") return relayRowOf(event);
   const bad = event.status >= 400 || event.status === 499;
-  const tokens = event.input_tokens + event.output_tokens;
+  const tokens = tokensOf(event);
   const tools = event.tools_called || [];
   const marks = [
     event.stream ? '<span class="mark">stream</span>' : "",
@@ -903,7 +914,7 @@ function relayDetailOf(event) {
 function detailOf(event) {
   // O relay nao e uma chamada de modelo e tem o seu proprio detalhe.
   if (event.kind === "relay") return relayDetailOf(event);
-  const tokens = event.input_tokens + event.output_tokens;
+  const tokens = tokensOf(event);
   // A cadeia como aconteceu: cada tentativa que falhou, e no fim quem
   // respondeu. É a pergunta que traz alguém a esta tela.
   const attempts = (event.attempts || []).map((line) => {

@@ -463,6 +463,26 @@ const SCENARIOS = {
       rows_html: page.registry.rows.innerHTML,
     };
   },
+
+  // M1: a linha muda de MODELO nao finge que mediu zero tokens. Diferente do
+  // relay (que tem `kind` e a sua propria guarda), esta e uma linha de modelo
+  // comum cujo provedor so informou a saida -- `null + 1200 === 1200` em JS, e
+  // `compact(null)` diria "0" sozinho.
+  async muted_model_row() {
+    const page = buildPage();
+    const parcial = { ...MODEL_EVENT, request_id: "semi", input_tokens: null, output_tokens: 1200 };
+    const calada = { ...MODEL_EVENT, request_id: "calada", input_tokens: null, output_tokens: null };
+    page.render([parcial, calada], 2);
+    return {
+      rows_html: page.registry.rows.innerHTML,
+      // O total da linha parcial tem que ser o lado informado, e nunca zero.
+      parcial: page.probe(`rowOf(${JSON.stringify(parcial)})`),
+      // A linha em silencio total nao pode afirmar "0 tokens".
+      calada: page.probe(`rowOf(${JSON.stringify(calada)})`),
+      // O detalhe mostra a quebra por lado, e a linha muda nao.
+      detalho_parcial: page.probe(`detailOf(${JSON.stringify(parcial)})`),
+    };
+  },
 };
 
 async function main() {
