@@ -42,7 +42,7 @@ from app.core.dispatcher import _exception_text, error_body
 from app.core.observability import RelayLog, log_relay
 from app.core.official_hosts import OFFICIAL_HOSTS
 from app.core.relay import RESPONSE_DROP, relay_headers, relay_params, relay_target
-from app.core.token_auth import require_shunt_token
+from app.core.token_auth import require_shunt_token_or_transparent
 
 # Reaproveitado do router de /v1: a resposta em stream que SEMPRE fecha o
 # gerador do corpo (libera a resposta upstream mesmo com o cliente
@@ -168,9 +168,9 @@ async def relay_endpoint(request: Request) -> Response:
     # Nenhum path e bloqueado a partir daqui: o catch-all repassa
     # tudo que nao e reservado, inclusive /api/oauth/usage.
 
-    # Token obrigatorio. O TokenRejected (nao e httpx.HTTPError) sobe ao
-    # handler de app/main.py.
-    await require_shunt_token(request)
+    # Token Shunt OU credencial do caller (bypass transparente). O
+    # TokenRejected sobe ao handler de app/main.py.
+    await require_shunt_token_or_transparent(request)
 
     # Determina o protocolo do host oficial a partir dos headers
     # (nao do path, que e do cliente).

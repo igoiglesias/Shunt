@@ -148,7 +148,7 @@ def test_relay_without_shunt_token_401_anthropic(without_shunt_token):
     with client() as c:
         response = c.post(
             "/v1/messages/batches",
-            headers={"x-api-key": "sk-ant-1"},
+            headers={},
         )
     assert response.status_code == 401
     assert response.json()["type"] == "error"
