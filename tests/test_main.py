@@ -252,3 +252,39 @@ def test_lifespan_closes_the_config_watcher_before_the_pool(monkeypatch, tmp_pat
         for attr in ("settings", "pool"):
             if hasattr(app.state, attr):
                 delattr(app.state, attr)
+
+
+def test_shutdown_still_closes_the_pool_when_the_recorder_aclose_raises(monkeypatch, tmp_path):
+    """O espelho do M-1 no nivel de baixo: o `try/finally` do lifespan protege
+    recorder e pool do watcher, mas o proprio `finally` encadeia
+    `recorder.aclose()` e `pool.aclose()` sem protecao. Uma excecao inesperada
+    no recorder (o `_drain` roda `to_thread` e so engole `TimeoutError`) faz o
+    `pool.aclose()` pular e os `httpx.AsyncClient` vivos vazarem."""
+    from app.core.upstream import UpstreamPool
+    from app.stats.recorder import Recorder
+
+    monkeypatch.setenv("TURSO_DATABASE_URL", f"sqlite:///{tmp_path / 'stats.db'}")
+    calls: list[str] = []
+    original_pool_aclose = UpstreamPool.aclose
+
+    async def exploding_recorder_aclose(self):
+        calls.append("recorder")
+        raise RuntimeError("dreno quebrou no desligamento")
+
+    async def spy_pool_aclose(self):
+        calls.append("pool")
+        await original_pool_aclose(self)
+
+    monkeypatch.setattr(Recorder, "aclose", exploding_recorder_aclose)
+    monkeypatch.setattr(UpstreamPool, "aclose", spy_pool_aclose)
+    try:
+        with TestClient(app):
+            pass
+        raise AssertionError("o RuntimeError do recorder deveria ter propagado do lifespan")
+    except RuntimeError as err:
+        assert "dreno quebrou" in str(err)
+    finally:
+        assert calls == ["recorder", "pool"], calls
+        for attr in ("settings", "pool"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)

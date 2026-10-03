@@ -134,6 +134,66 @@ def test_relay_token_never_leaves():
 
 
 # ---------------------------------------------------------------------------
+# RED 13: /api/oauth/usage sem token Shunt, so Authorization -> 200, upstream chamado
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_relay_oauth_usage_bearer_only_200(without_shunt_token):
+    """GET /api/oauth/usage sem x-shunt-token, so Authorization Bearer sk-ant-...
+    -> 200 (bypass transparente), upstream chamado.
+
+    Reproduz o 401 medido em producao (logs de 2026-10-03: 3 ocorrencias).
+    O fixture `without_shunt_token` restaura o TestClient original (sem
+    x-shunt-token automatico) mas mantem o token_cache semeado — isso e OK
+    pois o `explicit` sera None e o `Authorization` cai no `strict=False`."""
+    route = respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        return_value=httpx.Response(200, json={"object": "oauth_usage", "used": 42})
+    )
+
+    # App limpo: sem token_cache, sem recorder -> simula Shunt em producao
+    # sem banco acessivel no momento (o pool ainda roda, so a validacao de
+    # token falha e devolve None).
+    from app.core.upstream import UpstreamPool
+    from app.config.settings import Settings, ProviderConfig
+    from app.main import app
+    from app.stats.recorder import Recorder
+    from app.core.observability import set_recorder
+
+    clean_settings = Settings(
+        providers={"local": ProviderConfig(base_url="http://localhost:8080/v1", protocol="openai", api_key=None)},
+        models={}, routes=[], default_model=None
+    )
+    app.state.settings = clean_settings
+    app.state.pool = UpstreamPool(clean_settings)
+    if hasattr(app.state, "token_cache"):
+        delattr(app.state, "token_cache")
+    if hasattr(app.state, "recorder"):
+        delattr(app.state, "recorder")
+
+    try:
+        set_recorder(Recorder(None))  # recorder no-op sem engine
+        with TestClient(app) as c:
+            response = c.get(
+                "/api/oauth/usage",
+                headers={
+                    "anthropic-version": "2023-06-01",
+                    "authorization": "Bearer sk-ant-oat01-xyz",
+                },
+            )
+        assert response.status_code == 200, f"esperado 200, veio {response.status_code}: {response.text}"
+        assert response.json() == {"object": "oauth_usage", "used": 42}
+        assert route.call_count == 1, "upstream nao foi chamado"
+        # Host oficial detectado corretamente
+        assert "api.anthropic.com" in str(route.calls[0].request.url)
+    finally:
+        # Limpa estado para nao afetar outros testes
+        for attr in ("settings", "pool", "token_cache", "recorder", "config_watcher", "admin_session_secret"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+
+
+# ---------------------------------------------------------------------------
 # RED 5 (two stages): without_shunt_token -> 401
 # ---------------------------------------------------------------------------
 

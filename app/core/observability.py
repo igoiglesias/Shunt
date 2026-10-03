@@ -51,8 +51,8 @@ class RequestLog:
     matched: str | None
     candidate: str | None
     attempts: list[str] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    input_tokens: int | None = 0
+    output_tokens: int | None = 0
     ttft_ms: int | None = None
     duration_ms: int = 0
     translated: bool = False

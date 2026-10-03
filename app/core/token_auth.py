@@ -192,17 +192,22 @@ async def require_shunt_token(request: Request) -> int:
     return token_id
 
 
-async def require_shunt_token_or_transparent(request: Request) -> int:
+async def require_shunt_token_or_transparent(request: Request) -> int | None:
     """Dependencia do relay (T5 catch-all): permite bypass transparente.
 
     - Token Shunt explicito (x-shunt-token, /t/<token>/, ?token=): valida igual
       ao v1 (strict=True).
     - Credencial do caller (x-api-key ou Authorization que NAO e token Shunt):
       permite bypass transparente (credential_is_token=False, shunt_token_id=None).
+      Sem banco para conferir, `strict=False` devolve None, e None aqui significa
+      "nao e token do Shunt", nao "falta de credencial" -- sem esta distincao um
+      Shunt sem banco derrubaria todo pedido do harness que so leva a propria
+      chave (e foi o 401 em /api/oauth/usage medido em producao).
     - Nenhuma credencial: 401.
     """
     request.state.credential_is_token = False
     matched: set[str] = set()
+    presented = False
     if request.url.path in EXEMPT_PATHS:
         request.state.shunt_token_id = None
         request.state.token_headers = frozenset()
@@ -219,24 +224,23 @@ async def require_shunt_token_or_transparent(request: Request) -> int:
         token_id = await _lookup(request, token_hash(explicit), strict=True)
         if token_id is None:
             raise TokenRejected(401, "unknown or expired shunt token")
+        presented = True
     # x-api-key e Authorization: se sao token Shunt, valida; se sao credencial
     # do caller, permite bypass transparente (o header segue para o upstream).
     for name in ("x-api-key", "authorization"):
         raw = request.headers.get(name)
         if not raw:
             continue
+        presented = True
         value = raw.removeprefix("Bearer ").strip() if name == "authorization" else raw.strip()
         found = token_id if (explicit and value == explicit) else await _lookup(request, token_hash(value), strict=False)
         if found is not None:
             request.state.credential_is_token = True
             token_id = token_id or found
             matched.add(name)
-        else:
-            # Credencial do caller -> bypass transparente.
-            # NAO adiciona a matched, para que relay_headers NAO drop o header.
-            request.state.credential_is_token = False
-    # Sem token_id e sem matched: nenhuma credencial
-    if token_id is None and not matched:
+        # else: credencial do caller. NAO entra em matched, para que
+        # relay_headers nao drop o header (ele precisa chegar ao upstream).
+    if not presented:
         raise TokenRejected(401, "missing shunt token or caller credentials: send x-shunt-token, /t/<token>/, ?token=, or provide x-api-key/Authorization")
     request.state.token_headers = frozenset(matched)
     request.state.shunt_token_id = token_id
