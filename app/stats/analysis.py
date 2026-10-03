@@ -248,7 +248,7 @@ async def analyse(
         "requested_model": requested,
         "candidate_model": result.real_model,
         "provider": result.real_provider,
-        "input_tokens": int(usage.get("input_tokens") or 0),
-        "output_tokens": int(usage.get("output_tokens") or 0),
+        "input_tokens": usage.get("input_tokens"),
+        "output_tokens": usage.get("output_tokens"),
         "duration_ms": duration_ms,
     }
