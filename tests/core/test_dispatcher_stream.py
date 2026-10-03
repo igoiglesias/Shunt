@@ -115,6 +115,31 @@ SOLO_SETTINGS = Settings(
     default_model=None,
 )
 
+# Dois providers distintos para os testes de telemetria: a unica coisa que
+# diferencia a linha do banco de uma falha e QUAL deles estava sendo tentado,
+# entao a cadeia precisa de dois nomes para a assercao ser sobre a escolha e
+# nao sobre uma constante.
+TWO_PROVIDER_SETTINGS = Settings(
+    providers={
+        "openrouter": ProviderConfig(
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+        ),
+        "groq": ProviderConfig(
+            base_url="https://api.groq.test/v1", protocol="openai", api_key="sk-groq"
+        ),
+    },
+    models={
+        "free": ModelConfig(
+            provider="openrouter", model="vendor/free", context_window=64000, max_output_tokens=8192
+        ),
+        "fast": ModelConfig(
+            provider="groq", model="vendor/fast", context_window=64000, max_output_tokens=8192
+        ),
+    },
+    routes=[("opus", ["free", "fast"])],
+    default_model=None,
+)
+
 
 def sse(*payloads):
     return "".join(f"data: {p}\n\n" for p in payloads) + "data: [DONE]\n\n"
@@ -2047,3 +2072,165 @@ async def test_a_read_timeout_on_send_falls_back_without_retrying_the_same_candi
     sent = [json.loads(call.request.content)["model"] for call in route.calls]
     assert sent == ["vendor/free", "vendor/cheap"]
     assert '"text": "ok"' in body
+
+
+# ---------------------------------------------------------------------------
+# Telemetria do provider na falha (task 1 do plano de bugs do bypass)
+#
+# Medido no stats.db de producao: 2238 de 2320 erros (96,5%) foram gravados sem
+# `provider`. O bug e que `tally.provider` so e setado depois do commit, e o
+# `finally` de `dispatch_stream` grava o que ele tem -- None em toda falha.
+# Os testes abaixo partem do PRIMEIRO candidato de uma cadeia de dois providers
+# nomeados, e cada um assegura sobre a linha que o banco recebe. `provider` e
+# a coluna que o painel agrupa (queries.by_provider), e sem ela a falha fica
+# sem destino na hora de perguntar "quem derrubou o stream".
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_stream_exhausted_chain_names_the_last_provider_tried(caplog):
+    """502 de cadeia esgotada: a linha do banco tem que dizer qual provider
+    ficou. Sem isso, a falha mais comum do painel nao tem destino."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem saldo"}})
+    )
+    respx.post("https://api.groq.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem saldo"}})
+    )
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", BODY, {}), TWO_PROVIDER_SETTINGS, UpstreamPool(TWO_PROVIDER_SETTINGS)
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    linha = [json.loads(r.message) for r in caplog.records if r.name == "shunt"][-1]
+    assert linha["status"] == 502
+    # O ultimo tentado foi o "fast" do groq -- e o que a linha deve registrar,
+    # porque e a ele que o 502 cabe.
+    assert linha["provider"] == "groq"
+
+
+@respx.mock
+async def test_a_transport_error_names_the_provider_it_died_on(caplog):
+    """A falha de conexao nunca chega a `_absorb` (ela encerra o candidato
+    antes do commit), o que e justamente o motivo de o provider sumir."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("recusou")
+    )
+    respx.post("https://api.groq.test/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("recusou")
+    )
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", BODY, {}), TWO_PROVIDER_SETTINGS, UpstreamPool(TWO_PROVIDER_SETTINGS)
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    linha = [json.loads(r.message) for r in caplog.records if r.name == "shunt"][-1]
+    assert linha["status"] == 502
+    assert linha["provider"] == "groq"
+
+
+@respx.mock
+async def test_a_stream_dead_before_the_first_event_names_the_last_provider(caplog):
+    """O stream morre no silencio do FIRST_EVENT_DEADLINE ou antes do primeiro
+    evento valido: a cadeia toda e esgotada, e nenhum byte chegou ao cliente.
+    Esse e o 502 mais opaco de diagnosticar sem destino."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, text=": so keep-alive\n\n")
+    )
+    respx.post("https://api.groq.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, text=": so keep-alive\n\n")
+    )
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", BODY, {}), TWO_PROVIDER_SETTINGS, UpstreamPool(TWO_PROVIDER_SETTINGS)
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    linha = [json.loads(r.message) for r in caplog.records if r.name == "shunt"][-1]
+    assert linha["status"] == 502
+    assert linha["provider"] == "groq"
+
+
+@respx.mock
+async def test_a_stream_that_dies_before_the_first_event_names_the_last_provider(caplog):
+    """O stream do provedor cai (ReadTimeout) antes de qualquer evento valido:
+    a decisao segue aberta, a cadeia tenta o proximo e a linha final e um 502.
+    O caminho encerra o candidato antes do commit, ou seja, e um dos que
+    `_absorb` nunca alcancava -- sem o fix o destino ficava None."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            stream=Failing(error=httpx.ReadTimeout("tempo esgotado")),
+        )
+    )
+    respx.post("https://api.groq.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            stream=Failing(error=httpx.ReadTimeout("tempo esgotado")),
+        )
+    )
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", BODY, {}), TWO_PROVIDER_SETTINGS, UpstreamPool(TWO_PROVIDER_SETTINGS)
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    linha = [json.loads(r.message) for r in caplog.records if r.name == "shunt"][-1]
+    assert linha["status"] == 502
+    assert linha["provider"] == "groq"
+
+
+@respx.mock
+async def test_a_client_that_walks_away_names_the_provider_that_was_streaming(caplog):
+    """499: o provedor continuou gerando tokens que ninguem leu, e a linha de
+    log e a unica janela para ele -- e exatamente a requisicao que mais
+    importa na hora de perguntar por que a cadeia parou no meio."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            content=b'data: {"choices": [{"delta": {"content": "um"}}]}\n\n',
+        )
+    )
+    pool = UpstreamPool(TWO_PROVIDER_SETTINGS)
+    stream = dispatch_stream(ShuntRequest("anthropic", BODY, {}), TWO_PROVIDER_SETTINGS, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await anext(stream)  # le um pedaco
+        await stream.aclose()  # e desiste
+    linha = [json.loads(r.message) for r in caplog.records if r.name == "shunt"][-1]
+    assert linha["status"] == 499
+    assert linha["error_type"] == "client_disconnected"
+    assert linha["provider"] == "openrouter"
+    await pool.aclose()
+
+
+@respx.mock
+async def test_a_chain_skipped_whole_keeps_provider_none(caplog):
+    """A restricao do fix: a guarda 400 so dispara quando a cadeia inteira foi
+    pulada por elegibilidade e NENHUM upstream foi chamado. Nesse caso o erro
+    nao e de provedor nenhum, e inventar um destino na linha do banco seria
+    uma mentira pior do que a ausencia. Regressao do fix de telemetria: o
+    provider so pode vir de um candidato que foi tentado de fato."""
+    route = respx.post("https://api.openai.com/v1/chat/completions")
+    body = {
+        "model": "gpt-5",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "oi"}],
+    }
+    req = ShuntRequest("anthropic", body, {"x-api-key": "sk-do-cliente"}, endpoint="messages")
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    chunks: list[bytes] = []
+    with caplog.at_level("INFO", logger="shunt"):
+        try:
+            stream = dispatch_stream(req, NO_ANTHROPIC_DECLARED, pool)
+            async for chunk in stream:
+                chunks.append(chunk)
+        finally:
+            await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "o stream pulado inteiro nao foi registrado"
+    assert route.call_count == 0
+    assert linhas[-1]["status"] == 400
+    # Nenhum upstream foi chamado: nao ha provider para nomear.
+    assert linhas[-1]["provider"] is None
