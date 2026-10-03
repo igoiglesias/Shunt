@@ -55,13 +55,13 @@ def test_provedor_que_nao_fala_de_cache_nao_ganha_campo():
 def test_detalhe_torto_nao_estoura():
     assert openai_usage_to_anthropic({"prompt_tokens": 1, "prompt_tokens_details": None}) == {
         "input_tokens": 1,
-        "output_tokens": 0,
+        "output_tokens": None,
     }
     assert openai_usage_to_anthropic({"prompt_tokens_details": "lixo"}) == {
-        "input_tokens": 0,
-        "output_tokens": 0,
+        "input_tokens": None,
+        "output_tokens": None,
     }
-    assert openai_usage_to_anthropic(None) == {"input_tokens": 0, "output_tokens": 0}
+    assert openai_usage_to_anthropic(None) == {"input_tokens": None, "output_tokens": None}
 
 
 def test_o_caminho_de_volta_leva_o_cache_para_o_dialeto_openai():

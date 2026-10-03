@@ -68,8 +68,11 @@ class RequestEvent(Base):
     status: Mapped[int] = mapped_column(Integer)
     error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # NULO quando o provedor nao enviou usage -- diferente de zero.
+    # Zero e medicao (provedor disse que gastou 0); nulo e silencio.
+    # O painel usa _usage_reported (input_tokens IS NOT NULL) para distinguir.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # `ttft_ms` so existe em streaming, onde ha um primeiro evento a cronometrar.
     ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -170,8 +173,11 @@ class Analysis(Base):
     provider: Mapped[str | None] = mapped_column(String(100), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=200)
     text: Mapped[str] = mapped_column(Text, default="")
-    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # NULO quando o provedor nao enviou usage -- diferente de zero.
+    # Zero e medicao (provedor disse que gastou 0); nulo e silencio.
+    # O painel usa _usage_reported (input_tokens IS NOT NULL) para distinguir.
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
 
 

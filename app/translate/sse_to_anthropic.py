@@ -63,7 +63,7 @@ class OpenAIStreamToAnthropic:
         self._open_kind: str | None = None
         self._open_tool_index: int | None = None
         self._stop_reason = "end_turn"
-        self._usage = {"input_tokens": 0, "output_tokens": 0}
+        self._usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
         self._finished = False
         # So para o painel: nao muda um byte do que sai para o cliente.
         self._tools_called: list[str] = []
@@ -86,12 +86,12 @@ class OpenAIStreamToAnthropic:
     def thinking_blocks(self) -> int:
         return self._thinking_blocks
 
-    def usage(self) -> dict[str, int]:
+    def usage(self) -> dict[str, int | None]:
         """Os tokens que este stream consumiu, para a linha de log.
 
         Quem observa a requisicao nao ve os chunks: o `usage` chega num deles,
         muitas vezes no ultimo, de `choices` vazio, e este objeto e o unico
-        que passou por todos.
+        que passou por todos. None significa que o provedor nao enviou usage.
         """
         return dict(self._usage)
 
@@ -192,6 +192,8 @@ class OpenAIStreamToAnthropic:
         events: list[Event] = self._start()
 
         if chunk.get("usage"):
+            # openai_usage_to_anthropic devolve None nos campos que o provedor
+            # nao enviou; None significa ausente, e e o que chega ao painel.
             self._usage = openai_usage_to_anthropic(chunk["usage"])
 
         choices = chunk.get("choices") or []

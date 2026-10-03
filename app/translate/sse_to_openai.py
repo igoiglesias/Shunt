@@ -67,7 +67,7 @@ class AnthropicStreamToOpenAI:
         self._tool_index_of_block: dict[int, int] = {}
         self._next_tool_index = 0
         self._finished = False
-        self._usage = {"input_tokens": 0, "output_tokens": 0}
+        self._usage: dict[str, int | None] = {"input_tokens": None, "output_tokens": None}
         # So para o painel: nao muda um byte do que sai para o cliente.
         self._tools_called: list[str] = []
         self._thinking_blocks = 0
@@ -165,9 +165,9 @@ class AnthropicStreamToOpenAI:
             ]
         return []
 
-    def usage(self) -> dict[str, int]:
+    def usage(self) -> dict[str, int | None]:
         """Os tokens que este stream consumiu, para a linha de log. Mesma razao
-        da contraparte em `sse_to_anthropic.py`."""
+        da contraparte em `sse_to_anthropic.py`. None significa ausente."""
         return dict(self._usage)
 
     def _message_delta(self, data: dict) -> list[dict]:

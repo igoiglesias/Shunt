@@ -450,8 +450,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             matched=resolution.matched,
             candidate=result.real_model,
             attempts=result.trace,
-            input_tokens=usage.get("input_tokens") or usage.get("prompt_tokens") or 0,
-            output_tokens=usage.get("output_tokens") or usage.get("completion_tokens") or 0,
+            input_tokens=usage.get("input_tokens") if usage.get("input_tokens") is not None else usage.get("prompt_tokens"),
+            output_tokens=usage.get("output_tokens") if usage.get("output_tokens") is not None else usage.get("completion_tokens"),
             ttft_ms=None,  # so existe onde ha um primeiro evento a cronometrar
             duration_ms=int((time.monotonic() - started) * 1000),
             translated=result.real_model is not None,
@@ -943,7 +943,7 @@ class _Tally:
     candidate: str | None = None
     trace: list[str] = field(default_factory=list)
     first_byte_at: float | None = None
-    usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+    usage: dict[str, int | None] = field(default_factory=lambda: {"input_tokens": None, "output_tokens": None})
     provider: str | None = None
     answer_text: str = ""
     tools_called: list[str] = field(default_factory=list)

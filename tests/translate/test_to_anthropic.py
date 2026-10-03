@@ -206,7 +206,7 @@ def test_missing_usage_defaults_to_zero_tokens():
         },
         "m",
     )
-    assert out["usage"] == {"input_tokens": 0, "output_tokens": 0}
+    assert out["usage"] == {"input_tokens": None, "output_tokens": None}
 
 
 def test_every_known_finish_reason_maps_to_its_own_stop_reason():

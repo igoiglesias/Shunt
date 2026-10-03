@@ -299,7 +299,7 @@ def _rated():
     saida, que puxaria a taxa para baixo sem nada a ver com velocidade.
     """
     generation = _generation_ms()
-    return and_(RequestEvent.output_tokens > 0, generation.is_not(None), generation > 0)
+    return and_(_usage_reported(), generation.is_not(None), generation > 0)
 
 
 # Cache: so entra na conta a requisicao em que o provedor DISSE alguma coisa.
@@ -309,6 +309,14 @@ def _rated():
 # ligar um cache que ja estava ligado.
 def _cache_reported():
     return RequestEvent.cached_input_tokens.is_not(None)
+
+
+# Usage: so entra na conta a requisicao em que o provedor DISSE alguma coisa.
+# Zero e medicao (provedor disse que gastou 0); nulo e silencio (nao disse nada).
+# Sem isso, um 502 com output_tokens=0 por silencio vira "taxa infinita" ou puxa
+# a media para baixo sem razao.
+def _usage_reported():
+    return RequestEvent.input_tokens.is_not(None)
 
 
 def _hit_rate(cached: int, informed_input: int) -> float | None:

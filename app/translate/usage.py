@@ -23,8 +23,8 @@ READ = ("cache_read_input_tokens", "cached_tokens")
 WRITE = ("cache_creation_input_tokens", "cache_write_tokens")
 
 
-def _int(value) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+def _int(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def openai_usage_to_anthropic(usage) -> dict:

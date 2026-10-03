@@ -61,8 +61,8 @@ def row(**over):
         "candidate_model": "gpt-oss-120b",
         "status": 200,
         "error_type": None,
-        "input_tokens": 10,
-        "output_tokens": 5,
+        "input_tokens": None,
+        "output_tokens": None,
         "ttft_ms": None,
         "duration_ms": 100,
         "attempts": [],
@@ -105,6 +105,8 @@ def _base_rows():
         row(
             request_id="c",
             duration_ms=300,
+            input_tokens=10,
+            output_tokens=5,
             status=429,
             error_type="rate_limit_error",
             provider="openrouter",
@@ -115,6 +117,8 @@ def _base_rows():
             stream=True,
             ttft_ms=50,
             duration_ms=400,
+            input_tokens=10,
+            output_tokens=5,
             attempts=["free: 400 (attempt 1)"],
             fell_back=True,
             tools_offered=["read", "write"],
@@ -489,10 +493,10 @@ def test_the_pair_says_which_request_landed_on_which_model(make_engine):
     with Session(engine) as session:
         session.add_all(
             [
-                row(request_id="a", requested_model="claude-opus-5", candidate_model="qwen3.8-27b"),
-                row(request_id="b", requested_model="claude-opus-5", candidate_model="qwen3.8-27b"),
-                row(request_id="c", requested_model="claude-opus-5", candidate_model="gpt-oss-120b"),
-                row(request_id="d", requested_model="claude-haiku-4-5", candidate_model="gpt-oss-120b"),
+                row(request_id="a", requested_model="claude-opus-5", candidate_model="qwen3.8-27b", input_tokens=10, output_tokens=5),
+                row(request_id="b", requested_model="claude-opus-5", candidate_model="qwen3.8-27b", input_tokens=10, output_tokens=5),
+                row(request_id="c", requested_model="claude-opus-5", candidate_model="gpt-oss-120b", input_tokens=15, output_tokens=5),
+                row(request_id="d", requested_model="claude-haiku-4-5", candidate_model="gpt-oss-120b", input_tokens=15, output_tokens=5),
                 # Recusada: sem candidato, nao e um par.
                 row(request_id="e", requested_model="claude-opus-5", candidate_model=None),
                 # Listagem: sem modelo pedido, tambem nao.
@@ -693,10 +697,10 @@ def test_a_taxa_soma_tokens_sobre_tempo_de_geracao(make_engine):
             [
                 # Streaming: o tempo ate o primeiro token e espera, nao geracao.
                 row(request_id="s", stream=True, ttft_ms=900, duration_ms=30000,
-                    output_tokens=1200, provider="local"),
+                    input_tokens=100, output_tokens=1200, provider="local"),
                 # Sem streaming nao da para separar: a duracao inteira conta.
-                row(request_id="n", stream=False, duration_ms=300, output_tokens=50,
-                    provider="local"),
+                row(request_id="n", stream=False, duration_ms=300, input_tokens=50,
+                    output_tokens=50, provider="local"),
                 # Sem saida nao entra na conta -- nem em cima nem embaixo.
                 row(request_id="erro", status=500, duration_ms=80, output_tokens=0,
                     provider="local"),
@@ -719,9 +723,9 @@ def test_stream_sem_primeiro_token_fica_fora_da_taxa(make_engine):
         session.add_all(
             [
                 row(request_id="s", stream=True, ttft_ms=None, duration_ms=1000,
-                    output_tokens=500, provider="local"),
-                row(request_id="n", stream=False, duration_ms=1000, output_tokens=100,
-                    provider="local"),
+                    input_tokens=100, output_tokens=500, provider="local"),
+                row(request_id="n", stream=False, duration_ms=1000, input_tokens=50,
+                    output_tokens=100, provider="local"),
             ]
         )
         session.commit()
@@ -750,8 +754,8 @@ def test_duracao_zero_nao_divide_por_zero(make_engine):
     with Session(engine) as session:
         session.add_all(
             [
-                row(request_id="instantanea", duration_ms=0, output_tokens=40),
-                row(request_id="normal", duration_ms=500, output_tokens=50),
+                row(request_id="instantanea", duration_ms=0, input_tokens=10, output_tokens=40),
+                row(request_id="normal", duration_ms=500, input_tokens=10, output_tokens=50),
             ]
         )
         session.commit()
