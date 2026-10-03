@@ -533,3 +533,50 @@ def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
     assert event["requested_model"] == ""
     assert event["input_tokens"] == 0
     assert event["candidate_model"] is None
+
+
+# --------------------------------------------------------------------------
+# M2: a expressao do dispatcher distingue silencio de medicao
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_silent_usage_logs_null_and_never_zero(caplog):
+    """Provedor que nao enviou usage gera input_tokens/output_tokens NULOS.
+
+    O `dispatch` monta esses campos com `usage.get(...) if ... is not None else
+    usage.get(...)`. A tentacao anterior era `usage.get("input_tokens") or
+    usage.get("prompt_tokens") or 0`: com ela, um provedor em silencio total
+    (nenhuma das duas chaves) caia no `0` final, e a linha passava a dizer que
+    o provedor mediu zero tokens -- o que a entrada da taxa de geracao e
+    denuncia como "o modelo e infinitamente lento". Nulo e silencio.
+    """
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-sem-usage",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            },
+        )
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-sem-usage",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            },
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        with caplog.at_level(logging.INFO, logger="shunt"):
+            await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+
+    entry = lines(caplog)[-1]
+    assert entry["candidate"] is not None
+    assert entry["input_tokens"] is None
+    assert entry["output_tokens"] is None
