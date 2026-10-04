@@ -31,6 +31,7 @@ speaking Anthropic through the same proxy.
 - [Generation rate and project](#generation-rate-and-project)
 - [Analysing a period](#analysing-a-period)
 - [Development](#development)
+- [Upgrading](#upgrading)
 - [Contributing](#contributing)
 - [What Shunt does not do](#what-shunt-does-not-do)
 
@@ -782,6 +783,27 @@ For a transparent one it forwards the caller's own header, unless the request
 carries a valid `x-shunt-token`. The keys reach the database from `.env` only
 once, when the catalogue is seeded; after that they change on the
 configuration screen.
+
+---
+
+## Upgrading
+
+Stable releases are tagged on GitHub (e.g. `v0.1.0`). To upgrade:
+
+```bash
+git checkout vX.Y.Z
+uv sync --locked
+# restart the process (systemd, supervisor, or your process manager)
+```
+
+What happens on upgrade:
+
+- **Schema is additive only** — new columns are `ADD COLUMN` nullable, applied automatically at boot by `add_missing_columns` (`app/stats/engine.py:151`). No migration command needed.
+- **Your catalogue is yours** — providers, models, routes, and API tokens live in the database and are never overwritten by the seed (`seed_catalog_if_empty` only runs on an empty DB). Rollback is available in the admin UI under "Config Versions" (`README.md:243-244`).
+- **Environment variables** in `.env` are read only at first seed; after that, keys change on the configuration screen.
+- **Configuration hot-reload** — workers pick up catalogue changes within `SHUNT_CONFIG_POLL_SECONDS` (default 60s, `app/config/config.py:81`) without restart.
+
+Downgrade: `git checkout vX.Y.Z-1 && uv sync --locked && restart`. The additive schema means no `DROP COLUMN` risk; if a column added in the newer version causes issues, ignore it or drop it manually.
 
 ---
 
