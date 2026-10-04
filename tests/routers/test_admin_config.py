@@ -1378,3 +1378,43 @@ def test_clearing_the_default_model_unsets_it_without_deleting_any_model(monkeyp
             # O modelo em si continua existindo
             assert s.execute(select(Model).where(Model.alias == "a")).scalar_one() is not None
         assert app.state.settings.default_model is None
+
+
+def test_routes_fragment_balances_its_own_anchor_div():
+    """O fragmento _routes.html abre `<div id="routes-list">` e tem de fecha-lo.
+
+    O alvo dos botoes Editar/Excluir/Reordenar e esse div com hx-swap
+    "outerHTML". Sem o fechamento, o navegador aninha tudo o que vem depois
+    (o #route-form e as secoes Modelos, Padrao e Historico) DENTRO do alvo,
+    e o primeiro swap os engole junto -- os botoes de toda a tela param de
+    responder ate um refresh manual.
+    """
+    source = Path("app/templates/_routes.html").read_text()
+    depth = 0
+    for line in source.splitlines():
+        depth += line.count("<div") - line.count("</div")
+    assert depth == 0, f"_routes.html nao fecha todas as divs (depth {depth})"
+
+
+def test_the_routes_list_anchor_does_not_swallow_the_edit_form(monkeypatch, tmp_path):
+    """O ponto onde a div da ancora fecha e o que mantem a tela viva.
+
+    O botao Editar carrega o formulario em #route-form; Salvar faz
+    outerHTML em #routes-list. Se a ancora engolir #route-form, o swap o
+    apaga, e o botao Nova Rota (e todo Editar da tabela) fica sem alvo.
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            seed_db(s)
+        page = c.get("/admin/config", cookies=COOKIE).text
+
+    # O div da ancora abre antes da tabela e fecha ANTES do #route-form.
+    ancora = page.index('id="routes-list"')
+    formulario = page.index('id="route-form"')
+    assert ancora < formulario
+    # Conta as divs do ponto em que a ancora abre ate o formulario: o
+    # balanceamento tem que voltar a zero, provando que a ancora fechou.
+    fatia = page[ancora:formulario]
+    depth = fatia.count("<div") - fatia.count("</div")
+    assert depth == 0, f"a ancora de #routes-list engole #route-form (depth {depth})"
