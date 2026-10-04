@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-04
+
+### Added
+- **`/v1/models` lista as rotas do Shunt** (`47e3d1c`): a rota responde o padrão e a cadeia de candidatos (`owned_by: "shunt"`), não os modelos dos provedores. O caller descobre o fallback que a requisição vai seguir.
+- **`make change_pass`** (`7fcf691`): troca a senha de um administrador direto no banco (`scripts/change_pass.py`), para o caso em que a tela de login exige a senha atual e o operador a perdeu. Imprime o hash anterior para auditoria.
+- **Poda e exclusão do histórico de versões** (`5757359`): `history/prune` mantém as últimas N versões, e cada versão pode ser apagada individualmente; limpar o modelo padrão o desliga sem apagar o modelo. Seção "Histórico de Versões" da configuração.
+- **Testar conexão do provedor** (`9088d4d`): botão Testar Conexão no formulário do provedor (`POST /admin/config/providers/test`); o formulário é reiniciado via `HX-Trigger`. Marca temporal completa (data e hora) na auditoria e no painel.
+
+### Changed
+- **Uso (usage) ausente vira NULL, nunca zero** (`27a2334`, `ebb9f43`, `d622b0a`): silêncio do provedor é `None` na linha de log e no painel. Zero é uma medição; ausente é silêncio. `RequestLog` deixa de tratar `0` e NULL como a mesma coisa.
+- **Modelo padrão explicito na cadeia** (`95049c3`): o provider do candidato é setado no início do stream, não só no commit, então a linha de log de uma falha de stream já mostra quem tentou responder.
+- **`SHUNT_LOG_LEVEL`** (`cdcd883`): nível do log estruturado configurável por env.
+
+### Fixed
+- **Âncora `#routes-list` engolia o formulário** (`179e5f2`): `_routes.html` não fechava a div da âncora, o navegador aninhava `#route-form` dentro dela, e o swap `outerHTML` de Salvar/Excluir/Reordenar o apagava — todos os botões da tela de configuração paravam de responder até um refresh. Sem erro de JS ou no servidor.
+- **Fragmentos de usuários e tokens auto-ancoram** (`cc8156a`): mesmo defeito que `#routes-list`, em `_user_list`/`_token_list`/`_user_form`/`_token_form`; Novo/Editar/Cancelar param de quebrar a tela.
+- **Token Shunt não vaza sem engine** (`61782bc`): sem banco, a credencial do caller vira bypass transparente em vez de 401 (`fd1937a`, `e6f3ca8`, `5bc129c`); a análise propaga NULL, não zero (`8efc91b`).
+- **Soma de tokens por coluna** (`9f94ce0`): linha que muda de modelo no meio do período parcial não somava; agora soma.
+- **Análise devolve os mesmos tokens que gravou** (`7dbc195`): `float` vira número; a auditoria não mostra divergência com o painel.
+- **Linha que viola constraint derruba só ela** (`6b2e643`): um registro inválido não derrubava o lote inteiro do `Recorder`.
+- **NOT NULL legado dos tokens no boot** (`e04bd7c`): boot em banco da versão anterior afrouxa a constraint antiga.
+- **Linha que muda de modelo mostra traço** (`3c411a1`): a auditoria mostra `—` e nunca `0` tokens.
+
 ## [0.1.0] - 2026-10-02
 
 ### Added
