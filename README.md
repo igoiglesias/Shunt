@@ -31,6 +31,7 @@ speaking Anthropic through the same proxy.
 - [Generation rate and project](#generation-rate-and-project)
 - [Analysing a period](#analysing-a-period)
 - [Development](#development)
+- [Contributing](#contributing)
 - [What Shunt does not do](#what-shunt-does-not-do)
 
 ---
@@ -92,7 +93,7 @@ curl http://127.0.0.1:8000/health
 # {"status":"ok"}
 
 curl -H 'anthropic-version: 2023-06-01' http://127.0.0.1:8000/v1/models
-# {"data":[{"type":"model","id":"qwen-local", ...}],"has_more":false,"first_id":"qwen-local"}
+# {"data":[{"type":"model","id":"local","display_name":"local -> qwen-local","created_at":"2026-01-01T00:00:00Z"}],"has_more":false,"first_id":"local"}
 ```
 
 The health check deliberately touches neither your configuration nor your
@@ -240,10 +241,14 @@ of providers, models or routes is empty, Shunt inserts the parts of that
 catalogue that are missing. It never overwrites a provider or a model you
 already have, so editing `seed.py` does not change a running installation.
 
-Every change on the screen records a version. **Histórico de Versões** lists them,
-and a rollback restores providers, models and routes from that version. The
-history never stores a key: after a rollback each provider keeps its current
-key.
+Every change on the screen records a version. **Histórico de Versões** lists the
+last hundred of them, and a rollback restores providers, models and routes from
+that version. The history never stores a key: after a rollback each provider
+keeps its current key.
+
+**Manter últimas** trims that history to the last N versions, dropping the
+oldest, and each version can also be deleted on its own. `keep` is floored at 1,
+so there is always a version left to roll back to.
 
 Without a database there is no catalogue: Shunt starts with no providers, no
 models and no routes, and every request that needs one is answered with a 400.
@@ -395,6 +400,7 @@ Every number above is an environment variable with that default:
 | `SHUNT_TOTAL_DEADLINE` | 120 | seconds for the whole chain of a request that does not stream |
 | `SHUNT_TIMEOUT_CONNECT` / `_READ` / `_WRITE` / `_POOL` | 10 / 60 / 30 / 10 | the HTTP client, in seconds |
 | `SHUNT_CONFIG_POLL_SECONDS` | 10 | seconds between checks of `config_versions`; an admin edit reaches every worker within one interval |
+| `SHUNT_LOG_LEVEL` | `INFO` | level of the `shunt` logger; any name Python's `logging` does not know falls back to `INFO` rather than refuse to boot |
 
 The remaining `SHUNT_*` knobs (queue sizes, panel limits, cookie lifetime) are
 listed with their defaults in `app/config/config.py`.
@@ -412,8 +418,8 @@ listed with their defaults in `app/config/config.py`.
 | `POST` | `/v1/chat/completions` | OpenAI chat. Streaming supported. |
 | `POST` | `/v1/completions` | OpenAI legacy completions. No streaming. |
 | `POST` | `/v1/embeddings` | OpenAI embeddings. No streaming. |
-| `GET` | `/v1/models` | Your catalogue, in the dialect the caller speaks. |
-| `GET` | `/v1/models/{model_id}` | One model of the catalogue. |
+| `GET` | `/v1/models` | Your routes, in the dialect the caller speaks. |
+| `GET` | `/v1/models/{model_id}` | One route, looked up by its pattern. |
 | `GET` | `/admin/login` | Login; while there is no user, sign-up of the first admin. |
 | `POST` | `/admin/logout` | Ends the session. |
 | `GET` | `/admin/painel` | The usage panel. |
@@ -441,10 +447,20 @@ The login redirect carries the requested page in `?next=`, and a successful
 login returns there. Only same-origin paths under `/admin` are honoured;
 anything else, `/admin/login` included, lands on `/admin/painel`.
 
-`/v1/models` answers Anthropic shape to a caller sending `anthropic-version`,
-`x-api-key` or a Claude user agent; OpenAI shape to one sending only
+`/v1/models` lists your **routes**, not the models of the providers behind them:
+one entry per pattern, whose `id` is the pattern itself (`haiku`, `opus`) and
+whose `display_name` carries the chain (`haiku -> groq-free, open-free,
+open-nemotron-ultra`). A client that lists models learns what it can ask for and
+what will answer, which is what the catalogue of a proxy exists to say; the
+upstream names the providers hold stay where they belong, one hop further in.
+
+The shape follows the caller: Anthropic shape (`type`, `id`, `display_name`,
+`created_at`) to one sending `anthropic-version`, `x-api-key` or a Claude user
+agent; OpenAI shape (`id`, `object`, `created`, `owned_by`) to one sending only
 `Authorization: Bearer`; and a superset carrying both sets of keys when there is
 no signal either way, so whichever parser reads it finds its own fields.
+`owned_by` is `shunt`, and `created` is a fixed constant rather than a clock,
+so a client that caches a catalogue does not see it change on every call.
 
 Errors follow the same rule: the envelope matches the protocol of whoever asked,
 never the protocol of whatever failed.
@@ -726,6 +742,38 @@ make browser # the panel in a headless browser, two workers (-n 2)
 make prod    # no reload, one worker per core, access log off, shutdown capped at 5 s
 ```
 
+`make change_pass USER=<name> PASS='<password>'` resets an admin's password
+straight in the database, bypassing the login screen — which asks for the current
+password, and is useless when that one is lost. It writes a new Argon2id hash to
+`users.password_hash` and prints the hash it replaced, so a reset is auditable.
+The URL comes from `TURSO_DATABASE_URL`, and `SHUNT_NEW_PASS=... make change_pass
+USER=...` reads the password from the environment instead, so it never lands in
+the shell history.
+
+```bash
+make change_pass USER=iglesias PASS='nova-senha'
+# senha trocada: id=1 user=iglesias
+# hash anterior: $argon2id$v=19$m=65536,t=3,p=4$tbBppj75LM5Tq0N0SG46Aw$20y1kwSAzou9iLBEvkVJYObMc/4SmJSwxQTF+cixtwk
+```
+
+The id and the hash come from the row it changed; the salt is random, so that
+hash is not the one your own call will print.
+
+Every request ends in one line of structured JSON, so what the proxy decided is
+answerable with `grep` and `jq` — which route pattern matched, which candidate
+actually answered, and how many attempts that cost:
+
+```bash
+{"request_id": "a1b2c3", "requested_model": "claude-sonnet-4-5", "rule": "family", "matched": "sonnet", "candidate": "open-free", "attempts": ["groq-free"], "input_tokens": 1234, "output_tokens": 200, "ttft_ms": 182, "duration_ms": 940, "translated": false, "route": "/v1/messages", "dialect": "anthropic", "stream": true, "status": 200, "error_type": null, "provider": "openrouter", "tools_offered": [], "tools_called": [], "thinking_blocks": 0, "project": null, "session_id": null, "cached_input_tokens": null, "cache_write_tokens": null}
+```
+
+One line, one object, no indentation, because a JSON broken across lines breaks
+both tools. `SHUNT_LOG_LEVEL` sets the level; a name Python's `logging` does not
+recognise falls back to `INFO` rather than stop the service. Neither bodies nor
+credentials appear in it: `authorization`, `x-api-key`, `api-key`,
+`proxy-authorization` and `x-shunt-token` are redacted with the header name left
+in, and the conversation text is stored only when `SHUNT_STORE_BODIES=1`.
+
 The test targets run on `pytest-xdist` with `--dist loadfile`, so each test
 file stays in one worker. `uv run pytest -q <file>` still runs one file serially.
 
@@ -734,6 +782,60 @@ For a transparent one it forwards the caller's own header, unless the request
 carries a valid `x-shunt-token`. The keys reach the database from `.env` only
 once, when the catalogue is seeded; after that they change on the
 configuration screen.
+
+---
+
+## Contributing
+
+Changes land on `master` through a pull request, and CI runs both jobs on it:
+`unit` (the suite without the browser, in parallel) and `browser` (the panel in
+headless Chromium). Both have to be green before a merge.
+
+The project is small enough that the conventions fit in one list:
+
+- **Python 3.14**, `uv` for the environment, `pytest` with `asyncio_mode=auto`
+  and `respx` for the HTTP to providers. `uv sync` gets you running.
+- **Docstrings and comments are in Portuguese**, and code comments carry no
+  accents. The docstring of a module usually records *why* a decision was made
+  and often what was measured. Read it before changing the behaviour next to
+  it. Match the surrounding style when you edit.
+- **Never pin a dependency.** Fix an upgrade that breaks in the code.
+- **A test for every new or changed behaviour, red before green.** The suites
+  mirror `app/` (`core/`, `config/`, `routers/`, `stats/`, `translate/`), E2E
+  lives in `tests/e2e/` against a scripted fake provider, and browser tests in
+  `tests/browser/`, headless only — never run the browser suite headed.
+
+Before opening a PR, the fastest signal is one file:
+
+```bash
+uv run pytest -q tests/routers/test_messages.py        # a focused suite is ~1 s
+```
+
+Then the gate:
+
+```bash
+make check     # lint + type + suite with coverage, no browser (~80 s)
+make e2e       # the whole app against the scripted provider
+make browser   # the panel, headless
+```
+
+A change to a screen, a layout or a download also gets a headless check of the
+rendered page, not only of the HTML it produced.
+
+Two rules the codebase has paid for, worth knowing before you touch the
+dispatcher or the panel numbers:
+
+- **Zero is a measurement, absent is silence.** A provider that reports zero
+  cache hits and one that reports nothing are different facts, and the panel
+  keeps them apart rather than averaging over silence. Where a number can be
+  unknown, the column is nullable and the screen shows a dash, never a 0 that
+  reads as measured.
+- **The catalogue lives in the database, not in `seed.py`.** The seed only
+  populates an empty installation. Editing it does not change a running one.
+
+If a behaviour surprises you, the structured line is the first thing to read:
+it names the rule that matched, the candidate that actually answered, and every
+attempt it cost. Open an issue with that line attached.
 
 ---
 
