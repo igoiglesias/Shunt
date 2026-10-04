@@ -24,3 +24,15 @@ type:
 
 check: lint type
 	uv run pytest -q -n auto --dist loadfile --cov=app --cov-report=term-missing --ignore=tests/browser
+
+# Troca a senha de um administrador do painel direto no banco (operacional: a
+# tela de login exige a senha atual, inutil se o operador a perdeu). Imprime o
+# hash anterior para auditoria. Ex.: make change_pass USER=iglesias PASS='nova'
+change_pass:
+	@if [ -z "$(USER)" ]; then echo "uso: make change_pass USER=<nome> [PASS=<senha>]"; exit 2; fi
+	@if [ -z "$(PASS)" ]; then \
+		echo "uso: make change_pass USER=$(USER) PASS=<senha>"; \
+		echo "  (ou SHUNT_NEW_PASS=... para nao deixar a senha no historico do shell)"; \
+		exit 2; \
+	fi
+	uv run python -m scripts.change_pass "$(USER)" "$(PASS)"
