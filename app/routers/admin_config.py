@@ -157,6 +157,15 @@ def create_config_version(session: Session) -> ConfigVersion:
     session.add(cv)
     session.commit()
     session.refresh(cv)
+    # Reciclar historico: manter apenas as ultimas 5 versoes
+    old = session.execute(
+        select(ConfigVersion.id)
+        .order_by(ConfigVersion.created_at.desc())
+        .offset(5)
+    ).scalars().all()
+    for v_id in old:
+        session.delete(session.get(ConfigVersion, v_id))
+    session.commit()
     return cv
 
 
@@ -770,11 +779,21 @@ async def get_default_model(request: Request, _: None = Depends(require_admin)):
 @router.post("/default-model", response_class=HTMLResponse, include_in_schema=False)
 async def set_default_model(
     request: Request,
-    alias: Annotated[str, Form()],
+    alias: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
+        # String vazia = limpar o padrão
+        if not alias:
+            for other in session.execute(select(Model).where(Model.is_default == True)).scalars():
+                other.is_default = False
+            session.commit()
+            create_config_version(session)
+            settings = load_settings_from_db(session)
+            await apply_settings(request.app, settings)
+            return await get_default_model(request)
+
         m = session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none()
         if not m:
             raise HTTPException(status_code=404, detail="Model nao encontrado")
@@ -897,6 +916,51 @@ async def rollback_config(
 async def config_history(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
+        versions = session.execute(
+            select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
+        ).scalars().all()
+    return render("_history.html", request=request, versions=versions)
+
+
+@router.post("/history/prune", response_class=HTMLResponse, include_in_schema=False)
+async def config_history_prune(
+    request: Request,
+    keep: Annotated[int, Form()] = 5,
+    _: None = Depends(require_admin),
+):
+    """Mantém apenas as últimas N versões de configuração, apagando as mais antigas."""
+    keep = max(keep, 1)
+    engine = request_engine(request)
+    with Session(engine) as session:
+        versions = session.execute(
+            select(ConfigVersion.id)
+            .order_by(ConfigVersion.created_at.desc())
+            .offset(keep)
+        ).scalars().all()
+        for v_id in versions:
+            session.delete(session.get(ConfigVersion, v_id))
+        session.commit()
+        # Devolve a lista atualizada
+        updated_versions = session.execute(
+            select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
+        ).scalars().all()
+    return render("_history.html", request=request, versions=updated_versions)
+
+
+@router.delete("/history/{version_id}", response_class=HTMLResponse, include_in_schema=False)
+async def config_history_delete(
+    request: Request,
+    version_id: int,
+    _: None = Depends(require_admin),
+):
+    """Exclui uma versão específica do histórico de configuração."""
+    engine = request_engine(request)
+    with Session(engine) as session:
+        cv = session.get(ConfigVersion, version_id)
+        if not cv:
+            raise HTTPException(status_code=404, detail="Versao nao encontrada")
+        session.delete(cv)
+        session.commit()
         versions = session.execute(
             select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
         ).scalars().all()

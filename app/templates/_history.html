@@ -1,3 +1,7 @@
+<!-- Ancora auto-reinserida no swap outerHTML dos botoes (ver _providers.html):
+     sem ela, a primeira acao (Restaurar/Excluir/Atualizar) consome
+     #history-content e as seguintes dao htmx:targetError ate reload. -->
+<div id="history-content">
 {% if versions %}
 <div class="table-container">
 <table class="history-table">
@@ -19,6 +23,9 @@
       <form class="inline-form" hx-post="/admin/config/rollback/{{ v.id }}" hx-target="#history-content" hx-swap="outerHTML" hx-confirm="Restaurar versão {{ v.id }}? Isso substituirá toda a configuração atual.">
         <button type="submit" class="btn btn-sm btn-primary">Restaurar</button>
       </form>
+      <form class="inline-form" hx-delete="/admin/config/history/{{ v.id }}" hx-target="#history-content" hx-swap="outerHTML" hx-confirm="Excluir versão {{ v.id }}?">
+        <button type="submit" class="btn btn-sm btn-danger">Excluir</button>
+      </form>
     </div>
   </td>
 </tr>
@@ -29,3 +36,4 @@
 {% else %}
 <p class="empty-state">Nenhuma versão de configuração salva.</p>
 {% endif %}
+</div>

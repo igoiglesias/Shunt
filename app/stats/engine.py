@@ -158,11 +158,14 @@ def relax_strict_columns(engine: Engine) -> list[str]:
             for table in Base.metadata.sorted_tables:
                 if table.name not in inspector.get_table_names():
                     continue
-                info = {column["name"]: column for column in inspector.get_columns(table.name)}
+                info = {
+                    column["name"]: column for column in inspector.get_columns(table.name)
+                }
                 strict = [
                     column.name
                     for column in table.columns
-                    if column.nullable and info.get(column.name, {}).get("nullable") is False
+                    if column.nullable
+                    and info.get(column.name, {"nullable": True}).get("nullable") is False
                 ]
                 if not strict:
                     continue

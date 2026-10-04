@@ -5,13 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Shunt — Configuração</title>
 <link rel="stylesheet" href="/shunt.css">
+{% include "_admin_styles.html" %}
 <style>
-  /* Admin-specific styles */
-  .admin-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
-  .admin-nav a { color: var(--muted); text-decoration: none; padding: 6px 12px; border: 1px solid var(--edge); border-radius: 2px; font-size: 13px; }
-  .admin-nav a:hover { color: var(--ink); border-color: var(--edge-strong); }
-  .admin-nav a[aria-current="page"] { color: var(--ground); background: var(--ink); font-weight: 600; }
-
   .form-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
   /* min-width:0 nos itens: sem isso o min-content do select (o option mais
      longo) estoura a track e cria scroll horizontal no mobile. */
@@ -24,8 +19,34 @@
   .form-row .form-group { flex: 1; min-width: 150px; }
 
   .table-container { overflow-x: auto; scrollbar-gutter: stable; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
   th, td { padding: 8px 12px 8px 0; text-align: left; border-bottom: 1px solid var(--edge); }
+
+  /* providers table: 6 cols (Nome, Base URL, Protocolo, API Key, Simultâneas, Ações) */
+  .providers-table th:nth-child(1), .providers-table td:nth-child(1) { width: 18%; }
+  .providers-table th:nth-child(2), .providers-table td:nth-child(2) { width: 28%; }
+  .providers-table th:nth-child(3), .providers-table td:nth-child(3) { width: 12%; }
+  .providers-table th:nth-child(4), .providers-table td:nth-child(4) { width: 18%; }
+  .providers-table th:nth-child(5), .providers-table td:nth-child(5) { width: 12%; }
+  .providers-table th:nth-child(6), .providers-table td:nth-child(6) { width: 12%; }
+
+  /* models table: 10 cols (Alias, Provedor, Upstream Model, Context, Max Out, Tools, Stream, Vision, Default, Ações) */
+  .models-table th:nth-child(1), .models-table td:nth-child(1) { width: 15%; }
+  .models-table th:nth-child(2), .models-table td:nth-child(2) { width: 12%; }
+  .models-table th:nth-child(3), .models-table td:nth-child(3) { width: 20%; }
+  .models-table th:nth-child(4), .models-table td:nth-child(4) { width: 8%; }
+  .models-table th:nth-child(5), .models-table td:nth-child(5) { width: 8%; }
+  .models-table th:nth-child(6), .models-table td:nth-child(6) { width: 6%; }
+  .models-table th:nth-child(7), .models-table td:nth-child(7) { width: 6%; }
+  .models-table th:nth-child(8), .models-table td:nth-child(8) { width: 6%; }
+  .models-table th:nth-child(9), .models-table td:nth-child(9) { width: 6%; }
+  .models-table th:nth-child(10), .models-table td:nth-child(10) { width: 11%; }
+
+  /* routes table: 4 cols (Pattern, Ordem, Candidatos, Ações) */
+  .routes-table th:nth-child(1), .routes-table td:nth-child(1) { width: 18%; }
+  .routes-table th:nth-child(2), .routes-table td:nth-child(2) { width: 8%; }
+  .routes-table th:nth-child(3), .routes-table td:nth-child(3) { width: 54%; }
+  .routes-table th:nth-child(4), .routes-table td:nth-child(4) { width: 20%; }
   th { color: var(--dim); font-weight: 600; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
   td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
   tbody tr:last-child td { border-bottom: 0; }
@@ -149,8 +170,12 @@
     <div class="section-header">
       <h2>Histórico de Versões</h2>
       <button class="btn" hx-get="/admin/config/history" hx-target="#history-content" hx-swap="innerHTML">Atualizar</button>
+      <form class="inline-form" hx-post="/admin/config/history/prune" hx-target="#history-content" hx-swap="innerHTML" style="margin-left: 8px;">
+        <input type="number" name="keep" value="5" min="1" max="100" style="width: 5ch; padding: 2px 6px; font-size: 12px; border: 1px solid var(--edge); border-radius: 2px; background: var(--panel-2); color: var(--ink);" title="Quantas versões manter">
+        <button type="submit" class="btn btn-sm" hx-confirm="Apagar versões mais antigas que as últimas 5?">Manter últimas</button>
+      </form>
     </div>
-    <div id="history-content">{% include "_history.html" %}</div>
+    {% include "_history.html" %}
   </section>
 
   <!-- Reload Button -->
@@ -158,6 +183,13 @@
     <div class="section-header">
       <h2>Recarregar Configuração</h2>
     </div>
+    <p class="notice" style="margin-bottom: 12px; font-size: 12px;">
+      Força a recarga das configurações do banco para este worker.
+      Útil se o watcher automático falhou, se houve edição direta no banco,
+      ou em deployments single-worker (sem watcher).
+      As mudanças feitas nesta tela já recarregam automaticamente —
+      este botão é para situações excepcionais.
+    </p>
     <button class="btn btn-primary" hx-post="/admin/config/reload" hx-target="#reload-result" hx-swap="innerHTML">Recarregar do Banco</button>
     <div id="reload-result" style="margin-top: 12px;"></div>
     <script>
