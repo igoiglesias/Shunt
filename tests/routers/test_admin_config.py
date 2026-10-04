@@ -1418,3 +1418,37 @@ def test_the_routes_list_anchor_does_not_swallow_the_edit_form(monkeypatch, tmp_
     fatia = page[ancora:formulario]
     depth = fatia.count("<div") - fatia.count("</div")
     assert depth == 0, f"a ancora de #routes-list engole #route-form (depth {depth})"
+
+
+# ---- Effort por modelo ------------------------------------------------------
+
+
+def test_model_config_defaults_to_no_effort():
+    config = ModelConfig(provider="p", model="m", context_window=1, max_output_tokens=1)
+    assert config.effort is None
+
+
+def test_load_settings_from_db_carries_the_effort(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path):
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai")
+            s.add(p)
+            s.flush()
+            s.add(
+                Model(
+                    alias="com", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="high",
+                )
+            )
+            s.add(
+                Model(
+                    alias="sem", provider_id=p.id, upstream_model="y",
+                    context_window=1024, max_output_tokens=128,
+                )
+            )
+            s.commit()
+        with Session(app.state.recorder.engine) as s:
+            settings = load_settings_from_db(s)
+    assert settings.models["com"].effort == "high"
+    assert settings.models["sem"].effort is None

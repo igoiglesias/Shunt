@@ -28,6 +28,8 @@ class ModelConfig(BaseModel):
     supports: ModelCaps = ModelCaps()
     context_window: int
     max_output_tokens: int
+    # Effort configurado pelo operador; None = o do harness passa adiante.
+    effort: str | None = None
 
 
 class Settings(BaseModel):
@@ -92,6 +94,7 @@ def load_settings_from_db(session: Session) -> Settings:
             ),
             context_window=m.context_window,
             max_output_tokens=m.max_output_tokens,
+            effort=m.effort,
         )
         if m.is_default:
             default_model = m.alias

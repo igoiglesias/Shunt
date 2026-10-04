@@ -352,3 +352,43 @@ def test_um_banco_legado_afrouxa_a_constraint_dos_tokens(tmp_path):
             )
     finally:
         engine.dispose()
+
+
+def test_uma_tabela_de_modelos_antiga_ganha_a_coluna_effort(tmp_path):
+    """Banco criado antes do effort por modelo: `models` sem `effort`. O boot
+    acrescenta a coluna e a linha antiga fica com NULL, que e "usar o do
+    harness" -- o comportamento de antes."""
+    import sqlite3
+
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql
+
+    from app.stats.engine import add_missing_columns
+
+    caminho = tmp_path / "modelos-antigos.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE models (id INTEGER PRIMARY KEY, alias VARCHAR(128),"
+        " provider_id INTEGER, upstream_model VARCHAR(256), supports_tools BOOLEAN,"
+        " supports_streaming BOOLEAN, supports_vision BOOLEAN, context_window INTEGER,"
+        " max_output_tokens INTEGER, is_default BOOLEAN, created_at DATETIME,"
+        " updated_at DATETIME)"
+    )
+    antigo.execute(
+        "INSERT INTO models (alias, provider_id, upstream_model, context_window,"
+        " max_output_tokens, is_default) VALUES ('velho', 1, 'x', 1024, 128, 0)"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        colunas = {c["name"] for c in inspect(engine).get_columns("models")}
+        assert "effort" in colunas
+        assert add_missing_columns(engine) == []
+        with engine.connect() as conexao:
+            linha = conexao.execute(sql("SELECT alias, effort FROM models")).one()
+        assert linha == ("velho", None)
+    finally:
+        engine.dispose()
