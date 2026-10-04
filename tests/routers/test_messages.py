@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -205,6 +206,24 @@ def test_count_tokens_answers_locally_when_the_target_is_not_anthropic():
 
 
 @respx.mock
+def test_count_tokens_forwarded_to_the_provider_also_omits_the_model_header():
+    """Ponto (c): mesmo quando a contagem VEIO do provedor, a rota nao
+    despachou um candidato pelo dispatcher e nao ha `real_model`. O cabecalho
+    precisa ficar de fora neste caminho tambem, e nao so na estimativa local."""
+    respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
+        return_value=httpx.Response(200, json={"input_tokens": 4321})
+    )
+    with client(ANTHROPIC_SETTINGS) as c:
+        response = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]},
+        )
+    assert response.status_code == 200
+    assert response.json() == {"input_tokens": 4321}
+    assert "x-shunt-model" not in response.headers
+
+
+@respx.mock
 def test_count_tokens_asks_the_candidate_that_would_actually_serve():
     """A pergunta vale para o PRIMEIRO candidato da cadeia -- o que serviria o
     pedido. Um candidato Anthropic mais atras na cadeia nao torna a contagem
@@ -282,6 +301,37 @@ def test_count_tokens_falls_back_locally_when_the_anthropic_upstream_refuses():
         )
     assert response.status_code == 200
     assert 0 < response.json()["input_tokens"] < 4321
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("conexao recusada"),
+        httpx.ReadTimeout("o provedor demorou"),
+        httpx.ConnectTimeout("sem conectar"),
+    ],
+)
+@respx.mock
+def test_count_tokens_falls_back_locally_when_the_upstream_network_fails(error):
+    """A mesma guarda do status != 200 para o erro de rede (`v1.py:558`): sem
+    ele a excecao sobe pela pilha do ASGI e o cliente recebe um 500 `text/plain`
+    que nem o envelope do protocolo respeita. A estimativa local e a resposta
+    util."""
+    respx.post("https://api.anthropic.test/v1/messages/count_tokens").mock(
+        side_effect=error
+    )
+    with client(ANTHROPIC_SETTINGS) as c:
+        response = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]},
+        )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "input_tokens": estimate_input_tokens(
+            {"messages": [{"role": "user", "content": "oi"}]}
+        )
+    }
 
 
 @respx.mock

@@ -97,6 +97,53 @@ def test_every_openai_route_names_the_model_that_actually_ran():
 
 
 @respx.mock
+def test_an_openai_route_omits_the_model_header_when_no_candidate_answered():
+    """Ponto (c) da auditoria do lado OpenAI: a regra de `test_messages.py`
+    ("sem candidato, sem cabecalho") vale tambem para as tres rotas desta
+    familia. O `x-shunt-model` so e honesto quando ha um modelo que respondeu;
+    numa resposta de erro ele seria mentira e seria diferente da outra rota."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem sorte"}})
+    )
+    respx.post("https://api.test/v1/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem sorte"}})
+    )
+    respx.post("https://api.test/v1/embeddings").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem sorte"}})
+    )
+    # O `last_resort` tenta o transparente no host oficial quando a rota
+    # esgota: sem mock dele a chamada saida para a internet.
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "sem sorte"}})
+    )
+    # "my-opus" casa na rota "opus" sem derivar provedor: com `claude-*`, o
+    # degrau transparente oficial entraria na cadeia e encobriria a medicao.
+    for path, payload in (
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "oi"}]}),
+        ("/v1/completions", {"prompt": "oi"}),
+        ("/v1/embeddings", {"input": "oi"}),
+    ):
+        with client() as c:
+            response = c.post(path, json={"model": "my-opus", **payload})
+        assert response.status_code == 400, path
+        assert "x-shunt-model" not in response.headers, path
+
+
+@respx.mock
+def test_count_tokens_omits_the_model_header_when_it_answers_itself():
+    """Ponto (c): `/v1/messages/count_tokens` nao despacha nem um candidato --
+    a resposta e a estimativa local ou a contagem do provedor, e em nenhuma das
+    duas existe `real_model`. O cabecalho nao pode aparecer aqui."""
+    with client() as c:
+        response = c.post(
+            "/v1/messages/count_tokens",
+            json={"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]},
+        )
+    assert response.status_code == 200
+    assert "x-shunt-model" not in response.headers
+
+
+@respx.mock
 def test_an_openai_client_gets_an_openai_shaped_error_not_an_anthropic_one():
     """The envelope follows the CALLER's protocol. Until this task every error
     was Anthropic-shaped, because `/v1/messages` was the only route; an OpenAI

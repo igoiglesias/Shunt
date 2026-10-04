@@ -133,6 +133,35 @@ def test_count_tokens_and_models_require_the_token(without_shunt_token):
         assert c.get("/health").status_code == 200
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/models", "/v1/models/opus"],
+)
+@pytest.mark.parametrize(
+    "headers,dialect",
+    [
+        ({"anthropic-version": "2023-06-01"}, "anthropic"),
+        ({"x-api-key": "sk"}, "anthropic"),
+        ({"authorization": "Bearer sk"}, "openai"),
+        ({}, "openai"),
+    ],
+)
+def test_a_refused_request_on_the_models_route_uses_that_callers_dialect(
+    without_shunt_token, path, headers, dialect
+):
+    """Ponto (a) no GET: o 401 das rotas de modelo segue o dialeto de quem
+    perguntou (as duas rotas de familia sao OpenAI por padrao). Sem isso um
+    SDK Anthropic recebendo `{"error": ...}` sem o `type` do topo nao
+    classifica a falha -- a mesma exigencia das POST."""
+    with client() as c:
+        response = c.get(path, headers=headers)
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert ("type" in body) is (dialect == "anthropic")
+    assert body["error"]["type"] == "authentication_error"
+
+
 @respx.mock
 def test_an_explicit_token_with_no_other_credential_injects_the_configured_key():
     """Token explicito e a unica credencial apresentada: a chave que sai ao

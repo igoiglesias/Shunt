@@ -282,6 +282,46 @@ def test_relay_admin_nao_existe_404():
     assert response.status_code == 404
 
 
+def test_relay_an_unprintable_path_is_refused_locally_as_json():
+    """`relay.py:160`: um path decodificado com caractere nao imprimivel (o
+    `%00` de um cliente doente) nunca vira URL upstream -- o httpx levantaria
+    `InvalidURL` la na frente. A guarda responde 404 local, em JSON, e o pool
+    nem e tocado."""
+    with client() as c:
+        response = c.get("/v1/files%00")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Not Found"}
+    assert respx.calls == []
+
+
+@respx.mock
+def test_relay_put_and_patch_forward_the_body_verbatim():
+    """PUT e PATCH estao na lista de metodos do catch-all e carregam corpo
+    (mesmo `content=b""` no HEAD): nenhuma traducao, os bytes do cliente sao os
+    bytes do upstream."""
+    put = respx.put("https://api.anthropic.com/v1/files/f").mock(
+        return_value=httpx.Response(200, json={"objeto": "arquivo"})
+    )
+    patch = respx.patch("https://api.anthropic.com/v1/files/f").mock(
+        return_value=httpx.Response(200, json={"objeto": "arquivo"})
+    )
+    with client() as c:
+        put_resp = c.put(
+            "/v1/files/f", content=b'{"id": 1}', headers={"anthropic-version": "2023-06-01"}
+        )
+        patch_resp = c.patch(
+            "/v1/files/f", content=b'{"id": 2}', headers={"anthropic-version": "2023-06-01"}
+        )
+    for response in (put_resp, patch_resp):
+        assert response.status_code == 200
+        assert response.json() == {"objeto": "arquivo"}
+    assert put.calls[0].request.content == b'{"id": 1}'
+    assert patch.calls[0].request.content == b'{"id": 2}'
+    assert put.calls[0].request.method == "PUT"
+    assert patch.calls[0].request.method == "PATCH"
+
+
 @respx.mock
 def test_relay_docs_200():
     """GET /docs -> 200 HTML (o OpenAPI continua servido)."""
