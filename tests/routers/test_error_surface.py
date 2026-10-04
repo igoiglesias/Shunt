@@ -170,6 +170,41 @@ def test_a_streaming_response_does_not_promise_x_shunt_model():
     assert "x-shunt-model" not in response.headers
 
 
+@respx.mock
+def test_a_failed_upstream_answer_on_an_openai_route_is_json_in_the_callers_envelope():
+    """A audit point (a) on the OpenAI surface: a provider 400 on these routes
+    has to reach the caller as JSON in the OpenAI envelope, not as the text
+    body of a framework 500. The 200-only tests above do not touch this path,
+    and a broken `error_body` would show up here as plain text."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
+    )
+    respx.post("https://api.test/v1/completions").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
+    )
+    respx.post("https://api.test/v1/embeddings").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
+    )
+    # O `last_resort` de `828591e` tenta o transparente no host oficial quando
+    # a rota esgota: sem mock dele a chamada saida para a internet.
+    respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(400, json={"error": {"message": "contexto estourado"}})
+    )
+    for path, payload in (
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "oi"}]}),
+        ("/v1/completions", {"prompt": "oi"}),
+        ("/v1/embeddings", {"input": "oi"}),
+    ):
+        with client() as c:
+            response = c.post(path, json={"model": "claude-opus-4-5", **payload})
+        assert response.status_code == 400, path
+        assert response.headers["content-type"].startswith("application/json"), path
+        body = response.json()
+        assert set(body) == {"error"}, path
+        assert set(body["error"]) == {"message", "type", "param", "code"}, path
+        assert body["error"]["type"] == "invalid_request_error", path
+
+
 def test_the_model_listing_answers_json_in_both_dialects():
     with client() as c:
         anthropic = c.get("/v1/models", headers={"anthropic-version": "2023-06-01"})
@@ -177,6 +212,24 @@ def test_the_model_listing_answers_json_in_both_dialects():
     for response in (anthropic, openai):
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
+
+
+def test_an_unknown_model_on_the_listing_route_is_json_in_the_callers_dialect():
+    """Ponto (a)+(b) no GET: o 404 de `/v1/models/{id}` e a unica falha das
+    rotas de modelo, e sobe como JSON no dialeto de quem perguntou -- nunca
+    como a pagina HTML ou o `detail` cru do framework."""
+    with client() as c:
+        anthropic = c.get("/v1/models/nao-existe", headers={"anthropic-version": "2023-06-01"})
+        openai = c.get("/v1/models/nao-existe", headers={"authorization": "Bearer sk"})
+        unknown = c.get("/v1/models/nao-existe")
+    for response in (anthropic, openai, unknown):
+        assert response.status_code == 404
+        assert response.headers["content-type"].startswith("application/json")
+    assert anthropic.json()["error"]["type"] == "not_found_error"
+    assert openai.json()["error"]["type"] == "not_found_error"
+    # Sem sinal de dialeto o envelope e o da OpenAI (e nao o superset da
+    # listagem): so existe uma chave no topo do erro.
+    assert set(unknown.json()) == {"error"}
 
 
 def test_count_tokens_answers_json_when_it_estimates_locally():

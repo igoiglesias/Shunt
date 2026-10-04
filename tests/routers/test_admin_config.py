@@ -1279,3 +1279,142 @@ async def test_apply_settings_without_a_prior_pool_creates_one_instead_of_updati
     await apply_settings(fake_app, settings)
     assert fake_app.state.settings is settings
     assert isinstance(fake_app.state.pool, UpstreamPool)
+
+
+# ---------------------------------------------------------------------------
+# Historico: prune, exclusao e limpeza do modelo padrao
+# ---------------------------------------------------------------------------
+
+
+def test_history_fragment_self_anchors_so_outerHTML_keeps_the_target_alive(monkeypatch, tmp_path):
+    """O fragmento _history.html precisa carregar a propria ancora
+    #history-content: Restaurar/Excluir/Atualizar usam hx-swap="outerHTML",
+    e sem a ancora no fragmento o alvo some apos o primeiro swap."""
+    from pathlib import Path as _Path
+
+    frag = _Path("app/templates/_history.html").read_text()
+    assert 'id="history-content"' in frag
+
+
+def _seed_versions(session: Session, n: int) -> None:
+    for _ in range(n):
+        session.add(ConfigVersion(snapshot_json="{}"))
+    session.commit()
+
+
+def test_prune_history_keeps_the_last_n_and_deletes_older_ones(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _seed_versions(s, 7)
+        r = c.post("/admin/config/history/prune", data={"keep": "3"}, cookies=COOKIE)
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            restantes = s.execute(select(ConfigVersion).order_by(ConfigVersion.id)).scalars().all()
+        assert len(restantes) == 3
+        # Mantem as mais recentes (ids maiores), nao as mais antigas
+        assert [v.id for v in restantes] == [5, 6, 7]
+
+
+def test_prune_history_never_deletes_everything(monkeypatch, tmp_path):
+    """keep=0 ou negativo nao esvazia o historico; floor e 1 versao."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _seed_versions(s, 3)
+        r = c.post("/admin/config/history/prune", data={"keep": "0"}, cookies=COOKIE)
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            assert len(s.execute(select(ConfigVersion)).scalars().all()) == 1
+
+
+def test_delete_one_history_version_removes_only_it(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _seed_versions(s, 3)
+        r = c.delete("/admin/config/history/2", cookies=COOKIE)
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            ids = [v.id for v in s.execute(select(ConfigVersion).order_by(ConfigVersion.id)).scalars().all()]
+        assert ids == [1, 3]
+
+
+def test_delete_unknown_history_version_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.delete("/admin/config/history/999", cookies=COOKIE)
+        assert r.status_code == 404
+
+
+def test_clearing_the_default_model_unsets_it_without_deleting_any_model(monkeypatch, tmp_path):
+    """alias vazio = limpar o padrao, nao 404. Nenhum modelo e apagado e a
+    config ao vivo passa a nao ter default_model."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p", base_url="http://u", protocol="openai"))
+            s.commit()
+            prov = s.execute(select(Provider)).scalar_one()
+            s.add(
+                Model(
+                    alias="a",
+                    provider_id=prov.id,
+                    upstream_model="m",
+                    context_window=128000,
+                    max_output_tokens=8192,
+                    is_default=True,
+                )
+            )
+            s.commit()
+        assert c.post("/admin/config/reload", cookies=COOKIE).status_code == 200
+        assert app.state.settings.default_model == "a"
+
+        r = c.post("/admin/config/default-model", data={"alias": ""}, cookies=COOKIE)
+
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            assert s.execute(select(Model).where(Model.is_default == True)).scalars().all() == []
+            # O modelo em si continua existindo
+            assert s.execute(select(Model).where(Model.alias == "a")).scalar_one() is not None
+        assert app.state.settings.default_model is None
+
+
+def test_routes_fragment_balances_its_own_anchor_div():
+    """O fragmento _routes.html abre `<div id="routes-list">` e tem de fecha-lo.
+
+    O alvo dos botoes Editar/Excluir/Reordenar e esse div com hx-swap
+    "outerHTML". Sem o fechamento, o navegador aninha tudo o que vem depois
+    (o #route-form e as secoes Modelos, Padrao e Historico) DENTRO do alvo,
+    e o primeiro swap os engole junto -- os botoes de toda a tela param de
+    responder ate um refresh manual.
+    """
+    source = Path("app/templates/_routes.html").read_text()
+    depth = 0
+    for line in source.splitlines():
+        depth += line.count("<div") - line.count("</div")
+    assert depth == 0, f"_routes.html nao fecha todas as divs (depth {depth})"
+
+
+def test_the_routes_list_anchor_does_not_swallow_the_edit_form(monkeypatch, tmp_path):
+    """O ponto onde a div da ancora fecha e o que mantem a tela viva.
+
+    O botao Editar carrega o formulario em #route-form; Salvar faz
+    outerHTML em #routes-list. Se a ancora engolir #route-form, o swap o
+    apaga, e o botao Nova Rota (e todo Editar da tabela) fica sem alvo.
+    """
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            seed_db(s)
+        page = c.get("/admin/config", cookies=COOKIE).text
+
+    # O div da ancora abre antes da tabela e fecha ANTES do #route-form.
+    ancora = page.index('id="routes-list"')
+    formulario = page.index('id="route-form"')
+    assert ancora < formulario
+    # Conta as divs do ponto em que a ancora abre ate o formulario: o
+    # balanceamento tem que voltar a zero, provando que a ancora fechou.
+    fatia = page[ancora:formulario]
+    depth = fatia.count("<div") - fatia.count("</div")
+    assert depth == 0, f"a ancora de #routes-list engole #route-form (depth {depth})"

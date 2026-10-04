@@ -132,6 +132,102 @@ def add_missing_columns(engine: Engine) -> list[str]:
     return added
 
 
+def relax_strict_columns(engine: Engine) -> list[str]:
+    """Afrouxa a constraint NOT NULL de colunas que a metadata diz NULLABLE.
+
+    Cenario real: bancos criados antes de `input_tokens`/`output_tokens` virarem
+    nullable (Task 2) continuam com `notnull=1`, e rejeitam o NULL que os
+    produtores passam para significar silencio -- um `IntegrityError` que o
+    `recorder` tratava descartando o LOTE inteiro. `add_missing_columns` nao
+    toca em coluna que ja existe, entao a constraint antiga sobrevivia ao boot.
+
+    O SQLite NAO tem `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` (medido:
+    syntax error). O caminho e reescrever o `CREATE TABLE` registrado em
+    `sqlite_master` com `PRAGMA writable_schema`, preservando dados, indices e
+    as DEMAIS constraints: a unica direcao e notnull -> nullable, e so para
+    colunas que a metadata atual diz nullable e o banco diz notnull.
+
+    Turso/libsql remoto pode recusar qualquer um destes passos. A recusa nao e
+    falha: o `recorder` isola a linha que viola (B2), e o operador ve o
+    contador de descarte subir no painel em vez de estatistica sumir.
+    """
+    relaxed: list[str] = []
+    inspector = inspect(engine)
+    try:
+        with engine.connect() as connection:
+            for table in Base.metadata.sorted_tables:
+                if table.name not in inspector.get_table_names():
+                    continue
+                info = {
+                    column["name"]: column for column in inspector.get_columns(table.name)
+                }
+                strict = [
+                    column.name
+                    for column in table.columns
+                    if column.nullable
+                    and info.get(column.name, {"nullable": True}).get("nullable") is False
+                ]
+                if not strict:
+                    continue
+                relaxed.extend(_relax_table(connection, table.name, strict))
+            connection.commit()
+    except Exception as err:  # noqa: BLE001 - o destino e outro banco, e a
+        # recusa e esperada; afrouxar e conveniencia, nao requisito de boot.
+        logger.warning(
+            "stats: nao deu para afrouxar constraints legadas (%s: %s)",
+            type(err).__name__,
+            err,
+        )
+        return []
+    if relaxed:
+        logger.info(
+            "stats: constraints NOT NULL afrouxadas no banco existente: %s",
+            ", ".join(relaxed),
+        )
+    return relaxed
+
+
+def _relax_table(connection, table_name: str, columns: list[str]) -> list[str]:
+    """Reescreve o `CREATE TABLE` de uma tabela removendo NOT NULL das colunas.
+
+    Devolve as colunas que efetivamente afrouxou. O novo DDL e construido por
+    COLUNA a partir do `PRAGMA table_info` (a fonte estruturada do SQLite), e
+    nao por replace no texto do CREATE: replace casaria so com a sintaxe exata
+    e deixaria escapar formatacao diferente de aspas ou espacos.
+    """
+    info = connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+    if not info:
+        return []
+    strict_set = set(columns)
+    # Ordem do PRAGMA: cid, name, type, notnull, dflt_value, pk.
+    afrouxadas = [
+        name for _cid, name, _kind, notnull, _default, _pk in info
+        if name in strict_set and notnull
+    ]
+    if not afrouxadas:
+        return []
+    partes = []
+    for _cid, name, kind, notnull, default, pk in info:
+        if name in afrouxadas:
+            # So a direcao notnull -> nullable: o tipo e o default seguem intactos.
+            partes.append(f'"{name}" {kind}{" PRIMARY KEY" if pk else ""}')
+        else:
+            partes.append(
+                f'"{name}" {kind}'
+                f'{" NOT NULL" if notnull else ""}'
+                f'{" PRIMARY KEY" if pk else ""}'
+                f'{f" DEFAULT {default}" if default is not None else ""}'
+            )
+    novo = f"CREATE TABLE {table_name} ({', '.join(partes)})"
+    connection.execute(text("PRAGMA writable_schema=ON"))
+    connection.execute(
+        text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = :name"),
+        {"sql": novo, "name": table_name},
+    )
+    connection.execute(text("PRAGMA writable_schema=OFF"))
+    return [f"{table_name}.{name}" for name in afrouxadas]
+
+
 def build_engine(url: str | None = None) -> Engine | None:
     """A engine pronta e com a tabela criada, ou None quando nao ha URL.
 
@@ -149,6 +245,12 @@ def build_engine(url: str | None = None) -> Engine | None:
         _tune_for_many_writers(engine)
         Base.metadata.create_all(engine)
         add_missing_columns(engine)
+        if relax_strict_columns(engine):
+            # `PRAGMA writable_schema` so entra em vigor numa conexao NOVA: o
+            # schema de quem abriu antes continua com a constraint antiga
+            # (medido: mesmo INSERT falha na conexao antiga e passa na nova).
+            # O pool e descartado para as proximas conexoes lerem o schema novo.
+            engine.dispose()
     except Exception as err:  # noqa: BLE001 - qualquer falha de banco no boot e
         # a mesma decisao: seguir sem persistencia em vez de nao subir.
         logger.warning("stats: banco indisponivel no boot (%s: %s)", type(err).__name__, err)

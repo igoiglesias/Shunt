@@ -101,8 +101,14 @@ async def lifespan(app: FastAPI):
         if app.state.config_watcher is not None:
             await app.state.config_watcher.aclose()
     finally:
-        await app.state.recorder.aclose()
-        await app.state.pool.aclose()
+        # `finally` aninhado: o proprio `recorder.aclose()` pode levantar uma
+        # excecao inesperada (o `_drain` roda `to_thread` e so engole
+        # `TimeoutError`). Sem aninhar, `pool.aclose()` pula e os
+        # `httpx.AsyncClient` vivos vazam.
+        try:
+            await app.state.recorder.aclose()
+        finally:
+            await app.state.pool.aclose()
 
 
 def _settings_for(recorder: Recorder) -> Settings:

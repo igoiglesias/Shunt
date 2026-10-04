@@ -17,7 +17,7 @@ def test_first_text_chunk_opens_message_and_block():
     assert message["content"] == []
     assert message["stop_reason"] is None
     assert message["stop_sequence"] is None
-    assert message["usage"] == {"input_tokens": 0, "output_tokens": 0}
+    assert message["usage"] == {"input_tokens": None, "output_tokens": None}
     assert events[1][1]["content_block"] == {"type": "text", "text": ""}
     assert events[2][1]["delta"] == {"type": "text_delta", "text": "Oi"}
 
@@ -387,17 +387,15 @@ def test_a_choice_with_no_delta_key_at_all_produces_no_content_block():
     assert names(events) == ["message_start"]
 
 
-def test_usage_missing_completion_tokens_defaults_to_zero():
-    """`usage` present and truthy (has `prompt_tokens`), but missing
-    `completion_tokens` -- the only key of `_usage` that is ever surfaced
-    (in `finish()`'s message_delta), so its default must be exercised with
-    a non-empty `usage` dict, not an empty one (`{}` is falsy and would
-    skip the update entirely)."""
+def test_usage_missing_completion_tokens_is_none():
+    """`usage` present (has `prompt_tokens`), but missing `completion_tokens`:
+    None significa que o provedor nao disse nada sobre output_tokens.
+    Zero seria uma medicao; None e silencio."""
     tr = OpenAIStreamToAnthropic("m", "msg_1")
     tr.feed({"choices": [{"delta": {"content": "oi"}}], "usage": {"prompt_tokens": 5}})
     events = tr.finish()
     delta = next(d for n, d in events if n == "message_delta")
-    assert delta["usage"]["output_tokens"] == 0
+    assert delta["usage"]["output_tokens"] is None
 
 
 def test_a_stream_with_no_choices_key_at_all_still_opens_the_message():
@@ -537,7 +535,7 @@ def test_the_translator_reports_the_usage_it_saw():
     os viu e este objeto: `usage` chega em um chunk qualquer, muitas vezes no
     ultimo, de `choices` vazio."""
     t = OpenAIStreamToAnthropic("m", "msg_1")
-    assert t.usage() == {"input_tokens": 0, "output_tokens": 0}
+    assert t.usage() == {"input_tokens": None, "output_tokens": None}
     t.feed({"choices": [{"delta": {"content": "oi"}}]})
     t.feed({"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 5}})
     assert t.usage() == {"input_tokens": 12, "output_tokens": 5}

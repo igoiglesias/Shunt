@@ -4,6 +4,7 @@
   <div class="form-group">
     <label for="default-alias">Modelo Padrão</label>
     <select id="default-alias" name="alias" hx-post="/admin/config/default-model" hx-target="#default-content" hx-swap="outerHTML">
+      <option value="">-- Limpar padrão --</option>
       {% for m in models %}
         <option value="{{ m.alias }}" {% if default and m.alias == default.alias %}selected{% endif %}>{{ m.alias }} ({{ m.provider.name }}/{{ m.upstream_model }})</option>
       {% endfor %}

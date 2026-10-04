@@ -134,6 +134,66 @@ def test_relay_token_never_leaves():
 
 
 # ---------------------------------------------------------------------------
+# RED 13: /api/oauth/usage sem token Shunt, so Authorization -> 200, upstream chamado
+# ---------------------------------------------------------------------------
+
+
+@respx.mock
+def test_relay_oauth_usage_bearer_only_200(without_shunt_token):
+    """GET /api/oauth/usage sem x-shunt-token, so Authorization Bearer sk-ant-...
+    -> 200 (bypass transparente), upstream chamado.
+
+    Reproduz o 401 medido em producao (logs de 2026-10-03: 3 ocorrencias).
+    O fixture `without_shunt_token` restaura o TestClient original (sem
+    x-shunt-token automatico) mas mantem o token_cache semeado — isso e OK
+    pois o `explicit` sera None e o `Authorization` cai no `strict=False`."""
+    route = respx.get("https://api.anthropic.com/api/oauth/usage").mock(
+        return_value=httpx.Response(200, json={"object": "oauth_usage", "used": 42})
+    )
+
+    # App limpo: sem token_cache, sem recorder -> simula Shunt em producao
+    # sem banco acessivel no momento (o pool ainda roda, so a validacao de
+    # token falha e devolve None).
+    from app.config.settings import ProviderConfig, Settings
+    from app.core.observability import set_recorder
+    from app.core.upstream import UpstreamPool
+    from app.main import app
+    from app.stats.recorder import Recorder
+
+    clean_settings = Settings(
+        providers={"local": ProviderConfig(base_url="http://localhost:8080/v1", protocol="openai", api_key=None)},
+        models={}, routes=[], default_model=None
+    )
+    app.state.settings = clean_settings
+    app.state.pool = UpstreamPool(clean_settings)
+    if hasattr(app.state, "token_cache"):
+        delattr(app.state, "token_cache")
+    if hasattr(app.state, "recorder"):
+        delattr(app.state, "recorder")
+
+    try:
+        set_recorder(Recorder(None))  # recorder no-op sem engine
+        with TestClient(app) as c:
+            response = c.get(
+                "/api/oauth/usage",
+                headers={
+                    "anthropic-version": "2023-06-01",
+                    "authorization": "Bearer sk-ant-oat01-xyz",
+                },
+            )
+        assert response.status_code == 200, f"esperado 200, veio {response.status_code}: {response.text}"
+        assert response.json() == {"object": "oauth_usage", "used": 42}
+        assert route.call_count == 1, "upstream nao foi chamado"
+        # Host oficial detectado corretamente
+        assert "api.anthropic.com" in str(route.calls[0].request.url)
+    finally:
+        # Limpa estado para nao afetar outros testes
+        for attr in ("settings", "pool", "token_cache", "recorder", "config_watcher", "admin_session_secret"):
+            if hasattr(app.state, attr):
+                delattr(app.state, attr)
+
+
+# ---------------------------------------------------------------------------
 # RED 5 (two stages): without_shunt_token -> 401
 # ---------------------------------------------------------------------------
 
@@ -148,7 +208,7 @@ def test_relay_without_shunt_token_401_anthropic(without_shunt_token):
     with client() as c:
         response = c.post(
             "/v1/messages/batches",
-            headers={"x-api-key": "sk-ant-1"},
+            headers={},
         )
     assert response.status_code == 401
     assert response.json()["type"] == "error"
@@ -220,6 +280,46 @@ def test_relay_admin_nao_existe_404():
     with client() as c:
         response = c.get("/admin/nao-existe")
     assert response.status_code == 404
+
+
+def test_relay_an_unprintable_path_is_refused_locally_as_json():
+    """`relay.py:160`: um path decodificado com caractere nao imprimivel (o
+    `%00` de um cliente doente) nunca vira URL upstream -- o httpx levantaria
+    `InvalidURL` la na frente. A guarda responde 404 local, em JSON, e o pool
+    nem e tocado."""
+    with client() as c:
+        response = c.get("/v1/files%00")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "Not Found"}
+    assert respx.calls == []
+
+
+@respx.mock
+def test_relay_put_and_patch_forward_the_body_verbatim():
+    """PUT e PATCH estao na lista de metodos do catch-all e carregam corpo
+    (mesmo `content=b""` no HEAD): nenhuma traducao, os bytes do cliente sao os
+    bytes do upstream."""
+    put = respx.put("https://api.anthropic.com/v1/files/f").mock(
+        return_value=httpx.Response(200, json={"objeto": "arquivo"})
+    )
+    patch = respx.patch("https://api.anthropic.com/v1/files/f").mock(
+        return_value=httpx.Response(200, json={"objeto": "arquivo"})
+    )
+    with client() as c:
+        put_resp = c.put(
+            "/v1/files/f", content=b'{"id": 1}', headers={"anthropic-version": "2023-06-01"}
+        )
+        patch_resp = c.patch(
+            "/v1/files/f", content=b'{"id": 2}', headers={"anthropic-version": "2023-06-01"}
+        )
+    for response in (put_resp, patch_resp):
+        assert response.status_code == 200
+        assert response.json() == {"objeto": "arquivo"}
+    assert put.calls[0].request.content == b'{"id": 1}'
+    assert patch.calls[0].request.content == b'{"id": 2}'
+    assert put.calls[0].request.method == "PUT"
+    assert patch.calls[0].request.method == "PATCH"
 
 
 @respx.mock

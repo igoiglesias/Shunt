@@ -300,3 +300,55 @@ def test_uma_tabela_de_provedores_antiga_ganha_o_limite_de_concorrencia(tmp_path
         assert linha == ("local", None)
     finally:
         engine.dispose()
+
+
+def test_um_banco_legado_afrouxa_a_constraint_dos_tokens(tmp_path):
+    """B1: banco criado antes de `input_tokens` virar NULLABLE continua NOT NULL.
+
+    `add_missing_columns` so roda ALTER para coluna AUSENTE: quem ja tem a
+    coluna com `notnull=1` continua rejeitando NULL, e o `IntegrityError`
+    derrubava o lote inteiro no `recorder`. A metadata diz nullable; o banco
+    diz notnull; o boot afrouxa so esta direcao.
+    """
+    import sqlite3
+
+    from sqlalchemy import inspect
+
+    caminho = tmp_path / "legado-tokens.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE request_events ("
+        " id INTEGER PRIMARY KEY, request_id VARCHAR(64), started_at DATETIME,"
+        " input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL)"
+    )
+    antigo.execute(
+        "INSERT INTO request_events (request_id, started_at, input_tokens, output_tokens)"
+        " VALUES ('antiga', '2026-09-01 10:00:00', 100, 100)"
+    )
+    antigo.commit()
+    antigo.close()
+
+    engine = build_engine(f"sqlite+pysqlite:///{caminho}")
+    assert engine is not None
+    try:
+        info = {c["name"]: c for c in inspect(engine).get_columns("request_events")}
+        assert info["input_tokens"]["nullable"] is True
+        assert info["output_tokens"]["nullable"] is True
+        # A linha antiga sobreviveu a reescrita da tabela.
+        with engine.connect() as conexao:
+            from sqlalchemy import text as sql
+
+            linha = conexao.execute(
+                sql("SELECT request_id, input_tokens, output_tokens FROM request_events")
+            ).one()
+        assert linha == ("antiga", 100, 100)
+        # E o NULL, que o legado rejeitava, agora entra.
+        with engine.begin() as conexao:
+            conexao.execute(
+                sql(
+                    "INSERT INTO request_events (request_id, started_at, input_tokens)"
+                    " VALUES ('muda', '2026-09-01 10:00:00', NULL)"
+                )
+            )
+    finally:
+        engine.dispose()

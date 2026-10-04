@@ -1,3 +1,6 @@
+<!-- A ancora #token-form via junto no fragmento: o botao Novo faz swap
+     outerHTML nela, e precisa reencontra-la apos cada troca. -->
+<div id="token-form">
 <form method="post" action="/admin/tokens">
   <h3>Novo token</h3>
   <div class="form-grid">
@@ -15,3 +18,4 @@
     <button type="button" class="btn" onclick="this.closest('#token-form').innerHTML=''">Cancelar</button>
   </div>
 </form>
+</div>

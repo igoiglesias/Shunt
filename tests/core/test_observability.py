@@ -473,6 +473,29 @@ def test_log_request_stores_the_event_with_kind_model():
     assert spy.stored == []
 
 
+def test_a_request_that_measured_nothing_stores_null_not_zero():
+    """Quem nao passou tokens grava NULL (silencio), nunca 0 (medicao).
+
+    O default da coluna e a semantica da Task 2: os produtores passam None
+    quando o provedor nao disse nada, e uma rota que esquecer de setar cai no
+    DEFAULT do dataclass. Se ele for 0, a linha vira "provedor mediu zero" e
+    entra na taxa de geracao -- o oposto do que o painel quer dizer. O 0 so
+    existe de verdade na linha de relay, que escreve explicito.
+    """
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    observability.set_recorder(spy)
+    try:
+        log_request(RequestLog(request_id="sem-medida", requested_model="m", rule="exact",
+                               matched=None, candidate=None, duration_ms=250))
+    finally:
+        observability.set_recorder(original)
+
+    event = spy.records[0]
+    assert event["input_tokens"] is None
+    assert event["output_tokens"] is None
+
+
 def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
     """`log_relay`: linha JSON sem credencial, e `store` em vez de `record`.
 
@@ -510,3 +533,87 @@ def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
     assert event["requested_model"] == ""
     assert event["input_tokens"] == 0
     assert event["candidate_model"] is None
+
+
+# --------------------------------------------------------------------------
+# M2: a expressao do dispatcher distingue silencio de medicao
+# --------------------------------------------------------------------------
+
+
+@respx.mock
+async def test_a_silent_usage_logs_null_and_never_zero(caplog):
+    """Provedor que nao enviou usage gera input_tokens/output_tokens NULOS.
+
+    O `dispatch` monta esses campos com `usage.get(...) if ... is not None else
+    usage.get(...)`. A tentacao anterior era `usage.get("input_tokens") or
+    usage.get("prompt_tokens") or 0`: com ela, um provedor em silencio total
+    (nenhuma das duas chaves) caia no `0` final, e a linha passava a dizer que
+    o provedor mediu zero tokens -- o que a entrada da taxa de geracao e
+    denuncia como "o modelo e infinitamente lento". Nulo e silencio.
+    """
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-sem-usage",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            },
+        )
+    )
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-sem-usage",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            },
+        )
+    )
+    pool = UpstreamPool(SETTINGS)
+    try:
+        with caplog.at_level(logging.INFO, logger="shunt"):
+            await dispatch(ShuntRequest("anthropic", BODY, {}), SETTINGS, pool)
+    finally:
+        await pool.aclose()
+
+    entry = lines(caplog)[-1]
+    assert entry["candidate"] is not None
+    assert entry["input_tokens"] is None
+    assert entry["output_tokens"] is None
+
+
+@respx.mock
+async def test_um_usage_em_chaves_openai_sem_traducao_vai_para_a_linha(caplog):
+    """O ramo `else` da expressao do `dispatch` (dispatcher.py) nunca foi lido.
+
+    Com o mesmo protocolo nos dois lados nao ha traducao de resposta: o corpo
+    que chega ao log fala `prompt_tokens`/`completion_tokens`, e so o `else`
+    (`.get("prompt_tokens")` / `.get("completion_tokens")`) faz esses numeros
+    aparecerem na linha. O teste anterior cobria o ramo direto porque pedia um
+    provedor OpenAI a um caller Anthropic -- e o corpo chega TRADUZIDO de
+    volta para `input_tokens`/`output_tokens`.
+    """
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-cru",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 31, "completion_tokens": 17},
+            },
+        )
+    )
+    openai_body = {"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(SETTINGS)
+    try:
+        with caplog.at_level(logging.INFO, logger="shunt"):
+            await dispatch(
+                ShuntRequest("openai", openai_body, {}, endpoint="chat"), SETTINGS, pool
+            )
+    finally:
+        await pool.aclose()
+
+    entry = lines(caplog)[-1]
+    assert entry["candidate"] is not None
+    assert entry["input_tokens"] == 31
+    assert entry["output_tokens"] == 17

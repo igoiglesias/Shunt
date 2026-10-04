@@ -143,6 +143,73 @@ def test_revoke_unknown_404(tmp_path):
     assert "Token nao encontrado" in r.text
 
 
+def test_token_list_fragment_contains_its_own_anchor(tmp_path):
+    """GET /admin/tokens/list -> o fragmento ja nasce com
+    `<div id="token-list">`: sem isso, o primeiro swap outerHTML do
+    botao Revogar consumia o alvo e as seguintes davam htmx:targetError
+    ate recarregar a pagina (mesmo bug dos usuarios, mesmo padrao da
+    tela de config)."""
+    with client(tmp_path) as c:
+        c.post("/admin/tokens", data={"name": "t-alvo"}, cookies=_cookie(), follow_redirects=False)
+        r = c.get("/admin/tokens/list", cookies=_cookie())
+    assert r.status_code == 200
+    assert r.text.count('<div id="token-list">') == 1
+
+
+def test_tokens_page_renders_each_anchor_exactly_once(tmp_path):
+    """GET /admin/tokens -> `id="token-list"` e `id="token-form"` uma
+    vez cada na pagina inteira (ancora duplicada faz o htmx mirar no
+    primeiro elemento)."""
+    with client(tmp_path) as c:
+        c.post("/admin/tokens", data={"name": "t-pagina"}, cookies=_cookie(), follow_redirects=False)
+        r = c.get("/admin/tokens", cookies=_cookie())
+    assert r.status_code == 200
+    assert r.text.count('id="token-list"') == 1
+    assert r.text.count('id="token-form"') == 1
+
+
+def test_new_token_form_fragment_carry_the_form_anchor(tmp_path):
+    """GET /admin/tokens/new -> o fragmento carrega
+    `<div id="token-form">`: o botao Novo faz swap outerHTML nela."""
+    with client(tmp_path) as c:
+        r = c.get("/admin/tokens/new", cookies=_cookie())
+    assert r.status_code == 200
+    assert r.text.count('<div id="token-form">') == 1
+
+
+def test_tokens_crud_sequence_without_reload_keeps_anchors_alive(tmp_path):
+    """Sequencia real do HTMX sem recarregar: cada resposta ainda contem
+    a ancora que o proximo botao mira. POST /admin/tokens devolve a
+    pagina inteira (com destaque do token em claro), entao a assercao
+    central de regressao e no DELETE: a lista re-renderizada apos a
+    revogacao precisa trazer `#token-list` de volta."""
+    with client(tmp_path) as c:
+        r = c.get("/admin/tokens/new", cookies=_cookie())
+        assert r.status_code == 200
+        assert '<div id="token-form">' in r.text, "botao Novo nao reencontra #token-form"
+
+        r = c.post(
+            "/admin/tokens",
+            data={"name": "regresso"},
+            cookies=_cookie(),
+            follow_redirects=False,
+        )
+        assert r.status_code == 200
+        assert 'id="token-list"' in r.text, "pagina apos criar nao traz #token-list"
+
+        engine = app.state.recorder.engine
+        with Session(engine) as s:
+            token = s.execute(select(ApiToken).where(ApiToken.name == "regresso")).scalar_one()
+
+        r = c.delete(f"/admin/tokens/{token.id}", cookies=_cookie(), follow_redirects=False)
+    assert r.status_code == 200
+    assert r.text.count('<div id="token-list">') == 1, (
+        "apos revogar, a lista re-renderizada nao reencontra #token-list"
+    )
+    with Session(engine) as s:
+        assert s.get(ApiToken, token.id) is None
+
+
 def test_require_admin(tmp_path):
     """Sem cookie em rotas de tokens -> 303/401."""
     with client(tmp_path) as c:

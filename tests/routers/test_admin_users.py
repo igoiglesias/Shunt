@@ -174,6 +174,95 @@ def test_delete_last_admin_blocked(tmp_path):
     assert "Exclusao do unico admin bloqueada" in r.text
 
 
+# ---- Ancoras HTMX: o fragmento carrega a propria ancora (regressao) ----
+
+
+def test_user_list_fragment_contains_its_own_anchor(tmp_path):
+    """GET /admin/users/list -> o fragmento ja nasce com `<div id="user-list">`.
+
+    Regressao: sem a ancora no fragmento, o primeiro swap outerHTML dos
+    botoes Editar/Excluir consumia o alvo e as acoes seguintes davam
+    htmx:targetError ate recarregar a pagina."""
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _create_user(s, "alice")
+        r = c.get("/admin/users/list", cookies=_cookie())
+    assert r.status_code == 200
+    assert r.text.count('<div id="user-list">') == 1
+
+
+def test_users_page_renders_each_anchor_exactly_once(tmp_path):
+    """GET /admin/users -> a pagina inteira tem `id="user-list"` e
+    `id="user-form"` uma vez cada (nada de ancora duplicada, que faz o
+    htmx mirar no primeiro elemento)."""
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _create_user(s, "alice")
+        r = c.get("/admin/users", cookies=_cookie())
+    assert r.status_code == 200
+    assert r.text.count('id="user-list"') == 1
+    assert r.text.count('id="user-form"') == 1
+
+
+def test_user_form_fragments_carry_the_form_anchor(tmp_path):
+    """GET /admin/users/new e /{username}/edit -> o fragmento do form
+    carrega `<div id="user-form">`: o botao Novo/Editar faz swap
+    outerHTML nela e precisa reencontra-la a cada troca."""
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            _create_user(s, "alice")
+        r_new = c.get("/admin/users/new", cookies=_cookie())
+        r_edit = c.get("/admin/users/alice/edit", cookies=_cookie())
+    for r in (r_new, r_edit):
+        assert r.status_code == 200
+        assert r.text.count('<div id="user-form">') == 1
+
+
+def test_users_crud_sequence_without_reload_keeps_anchors_alive(tmp_path):
+    """Sequencia completa sem recarregar a pagina (o fluxo real do HTMX):
+    cada resposta de fragmento ainda contem a ancora que o proximo botao
+    mira -- e isso que mantinha as acoes seguintes vivas apos o bug do
+    swap outerHTML."""
+    with client(tmp_path) as c:
+        # O `guarda` (id=1, mesmo do cookie) impede o bloqueio de
+        # "exclusao do unico admin" quando o usuario da sequencia sair.
+        with Session(app.state.recorder.engine) as s:
+            _create_user(s, "guarda")
+
+        r = c.get("/admin/users/new", cookies=_cookie())
+        assert r.status_code == 200
+        assert '<div id="user-form">' in r.text, "botao Novo nao reencontra #user-form"
+
+        r = c.post(
+            "/admin/users",
+            data={"username": "regresso", "password": "senha123"},
+            cookies=_cookie(),
+            follow_redirects=False,
+        )
+        assert r.status_code == 200
+        assert "regresso" in r.text
+        assert '<div id="user-list">' in r.text, "apos criar, Excluir/Editar nao reencontram #user-list"
+
+        r = c.get("/admin/users/regresso/edit", cookies=_cookie())
+        assert r.status_code == 200
+        assert '<div id="user-form">' in r.text, "botao Editar nao reencontra #user-form"
+
+        r = c.patch(
+            "/admin/users/regresso",
+            data={"new_username": "renomeado"},
+            cookies=_cookie(),
+            follow_redirects=False,
+        )
+        assert r.status_code == 200
+        assert "renomeado" in r.text
+        assert '<div id="user-list">' in r.text, "apos editar, Excluir nao reencontra #user-list"
+
+        r = c.delete("/admin/users/renomeado", cookies=_cookie(), follow_redirects=False)
+    assert r.status_code == 200
+    assert "renomeado" not in r.text
+    assert '<div id="user-list">' in r.text, "apos excluir, o proximo botao nao reencontra #user-list"
+
+
 def test_require_admin_on_all_routes(tmp_path):
     """Sem cookie em qualquer rota admin -> 303 redirect para /admin/login."""
     with client(tmp_path) as c:

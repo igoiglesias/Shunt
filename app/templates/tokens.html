@@ -28,7 +28,7 @@
       <h2>Tokens da API v1</h2>
       <button class="btn btn-primary" hx-get="/admin/tokens/new" hx-target="#token-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="token-list">{% include "_token_list.html" %}</div>
+    {% include "_token_list.html" %}
     <div id="token-form"></div>
   </section>
 </main>

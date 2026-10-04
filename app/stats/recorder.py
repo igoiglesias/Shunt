@@ -24,6 +24,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import Engine, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config.config import (
@@ -199,35 +200,100 @@ class Recorder:
                 batch.append(self._queue.get_nowait())
             await asyncio.to_thread(self._write, batch)
 
+    def _store_one(self, session: Session, event: dict) -> None:
+        """Uma linha de evento (e o seu corpo, se vier junto).
+
+        Nao muta `event`: o `body` pode ser necessario de novo se este lote for
+        refeito pedaco a pedaco depois de uma `IntegrityError`.
+        """
+        if event.get("kind") == "token_used":
+            # Evento interno: atualiza o ultimo uso do token sem passar pela
+            # tabela de eventos -- o painel de uso da API nao precisa ver cada
+            # toque, e um UPDATE nao custa linha nova.
+            session.execute(
+                update(ApiToken)
+                .where(ApiToken.id == event["token_id"])
+                .values(last_used_at=event["at"])
+            )
+            return
+        # O texto da conversa viaja junto do evento e vai para a OUTRA tabela:
+        # a busca da auditoria le centenas de linhas por vez e nao pode
+        # arrastar megabytes atras.
+        body = event.get("body")
+        fields = {key: value for key, value in event.items() if key != "body"}
+        session.add(RequestEvent(**fields))
+        if body:
+            session.add(RequestBody(request_id=event["request_id"], **body))
+
+    def _commit(self, batch: list[dict]) -> None:
+        with Session(self._engine) as session:
+            for event in batch:
+                self._store_one(session, event)
+            session.commit()
+
+    def _salvage(self, chunk: list[dict], discarded: list[str]) -> int:
+        """Reescre `chunk` em pedacos ate isolar so a linha que violou a constraint.
+
+        Devolve quantas linhas do pedaco entraram no banco. A divisao e pela
+        metade, entao sao ~log2(lote) commits a mais -- e so no caminho de
+        falha, que e raro. O caminho feliz segue sendo um unico commit por
+        lote; transformar o cotidiano em N commits por requisicao seria
+        devolver ao banco a latencia que a fila existe para esconder.
+        """
+        try:
+            self._commit(chunk)
+        except IntegrityError:
+            pass
+        except Exception as err:  # noqa: BLE001 - uma falha que nao e de
+            # constraint nao tem o que isolar: o pedaco inteiro e perdido.
+            self.failures += 1
+            logger.warning(
+                "stats: pedaco de %d eventos perdido (%s: %s)",
+                len(chunk), type(err).__name__, err,
+            )
+            return 0
+        else:
+            self.commits += 1
+            return len(chunk)
+
+        if len(chunk) == 1:
+            discarded.append(str(chunk[0].get("request_id", "?")))
+            return 0
+        meio = len(chunk) // 2
+        return self._salvage(chunk[:meio], discarded) + self._salvage(
+            chunk[meio:], discarded
+        )
+
     def _write(self, batch: list[dict]) -> None:
-        """Um `commit` por lote. Falha nao sobe: ela e contada e o worker segue."""
+        """Um `commit` por lote. Falha nao sobe: ela e contada e o worker segue.
+
+        Uma unica linha que viole uma constraint aborta o lote inteiro --
+        medido em sqlite3 puro, um `executemany` com uma linha invalida nao
+        insere nenhuma. O migrador (`engine.add_missing_columns`) elimina o
+        caso mais comum (o NOT NULL legado dos tokens), mas qualquer outra
+        constraint volta a derrubar a vizinhanca. Por isso a primeira
+        `IntegrityError` nao e definitiva: o lote e refeito em pedacos e so a
+        linha que violou e descartada.
+        """
         if self._engine is None:
             return
         try:
-            with Session(self._engine) as session:
-                for event in batch:
-                    # Evento interno: atualiza o ultimo uso do token sem passar
-                    # pela tabela de eventos -- o painel de uso da API nao precisa
-                    # ver cada toque, e um UPDATE nao custa linha nova.
-                    if event.get("kind") == "token_used":
-                        session.execute(
-                            update(ApiToken)
-                            .where(ApiToken.id == event["token_id"])
-                            .values(last_used_at=event["at"])
-                        )
-                        continue
-                    # O texto da conversa viaja junto do evento e vai para a
-                    # OUTRA tabela: a busca da auditoria le centenas de linhas
-                    # por vez e nao pode arrastar megabytes atras.
-                    body = event.pop("body", None)
-                    session.add(RequestEvent(**event))
-                    if body:
-                        session.add(RequestBody(request_id=event["request_id"], **body))
-                session.commit()
-            self.commits += 1
+            self._commit(batch)
+        except IntegrityError:
+            discarded: list[str] = []
+            self._salvage(batch, discarded)
+            if discarded:
+                self.failures += len(discarded)
+                logger.warning(
+                    "stats: %d linha(s) descartada(s) por violar uma "
+                    "constraint: %s",
+                    len(discarded), ", ".join(discarded)[:200],
+                )
         except Exception as err:  # noqa: BLE001 - um lote perdido nao pode
             # derrubar a gravacao dos proximos, nem escapar para a aplicacao.
             self.failures += 1
             logger.warning(
                 "stats: lote de %d eventos perdido (%s: %s)", len(batch), type(err).__name__, err
             )
+        else:
+            self.commits += 1

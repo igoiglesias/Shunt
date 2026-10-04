@@ -299,7 +299,7 @@ def _rated():
     saida, que puxaria a taxa para baixo sem nada a ver com velocidade.
     """
     generation = _generation_ms()
-    return and_(RequestEvent.output_tokens > 0, generation.is_not(None), generation > 0)
+    return and_(_usage_reported(), generation.is_not(None), generation > 0)
 
 
 # Cache: so entra na conta a requisicao em que o provedor DISSE alguma coisa.
@@ -309,6 +309,14 @@ def _rated():
 # ligar um cache que ja estava ligado.
 def _cache_reported():
     return RequestEvent.cached_input_tokens.is_not(None)
+
+
+# Usage: so entra na conta a requisicao em que o provedor DISSE alguma coisa.
+# Zero e medicao (provedor disse que gastou 0); nulo e silencio (nao disse nada).
+# Sem isso, um 502 com output_tokens=0 por silencio vira "taxa infinita" ou puxa
+# a media para baixo sem razao.
+def _usage_reported():
+    return RequestEvent.input_tokens.is_not(None)
 
 
 def _hit_rate(cached: int, informed_input: int) -> float | None:
@@ -323,6 +331,21 @@ def _rate(tokens: int, generation_ms: int) -> float | None:
     return round(tokens * 1000 / generation_ms, 1)
 
 
+def _total_tokens():
+    """A soma de tokens da linha, contando SO o que o provedor informou.
+
+    `input_tokens + output_tokens` no SQL e NULL quando qualquer lado e NULL, e
+    o `sum` descarta a linha inteira -- medido em SQLite: uma janela com 100
+    tokens de entrada e 1200 de saida, mas entrada NULL, somava 200 em vez de
+    1300. E caminho de producao: `sse_to_openai.py` e `sse_to_anthropic.py`
+    gravam so o campo que veio, e o outro chega NULL. Somar cada coluna com o
+    proprio coalesce e a unica forma de a linha parcial entrar com o que mediu.
+    """
+    return func.coalesce(func.sum(RequestEvent.input_tokens), 0) + func.coalesce(
+        func.sum(RequestEvent.output_tokens), 0
+    )
+
+
 def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> list[dict]:
     since = _since(hours)
     with Session(engine) as session:
@@ -330,7 +353,7 @@ def _grouped(engine: Engine, column, hours: float, limit: int, label: str) -> li
             select(
                 column,
                 func.count(RequestEvent.id),
-                func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
+                _total_tokens(),
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
                 func.coalesce(func.avg(RequestEvent.duration_ms), 0),
                 func.coalesce(
@@ -453,7 +476,7 @@ def by_project(
             select(
                 rotulo,
                 func.count(RequestEvent.id),
-                func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
+                _total_tokens(),
                 func.coalesce(func.sum(case((RequestEvent.status >= 400, 1), else_=0)), 0),
                 func.coalesce(func.avg(RequestEvent.duration_ms), 0),
                 func.coalesce(
@@ -513,7 +536,7 @@ def pairs(engine: Engine, hours: float = DEFAULT_HOURS, limit: int = 12) -> list
                 RequestEvent.requested_model,
                 RequestEvent.candidate_model,
                 func.count(RequestEvent.id),
-                func.coalesce(func.sum(RequestEvent.input_tokens + RequestEvent.output_tokens), 0),
+                _total_tokens(),
             )
             .where(
                 RequestEvent.started_at >= since,
@@ -741,11 +764,9 @@ def _parse_moment(raw: str | None) -> datetime:
 def _as_event(row: RequestEvent) -> dict:
     """Uma linha inteira, pronta para virar JSON. A tela de auditoria le tudo.
 
-    A linha de relay vem com medidas de token em None, e nao com os zeros que
-    estao no banco: as colunas `input_tokens` e `output_tokens` sao NOT NULL
-    (`app/stats/models.py`), entao o relay e gravado com 0, mas zero e uma
-    medicao -- e relay e passagem de rede, que nunca mediu token algum. A
-    distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
+    A linha de relay vem com medidas de token em None (nullable=True apos Task 2),
+    e nao com zeros: o relay e passagem de rede, que nunca mediu token algum.
+    A distincao e pelo `kind`, e nunca pelo valor: um modelo que somou zero
     tokens continua sendo um modelo, e `ttft_ms` de uma requisicao em streaming
     que nao cronometrou nada tambem e None.
     """
@@ -858,7 +879,18 @@ def _search_clauses(
     if min_duration_ms is not None:
         clauses.append(RequestEvent.duration_ms >= min_duration_ms)
     if min_tokens is not None:
-        clauses.append(RequestEvent.input_tokens + RequestEvent.output_tokens >= min_tokens)
+        # So compara com o que foi MEDIDO. `input_tokens + output_tokens` seria
+        # NULL em toda linha com um lado em silencio e a excluiria -- nao por
+        # ter poucos tokens, mas por nao ter informado nenhum. A linha em
+        # silencio TOTAL (os dois lados NULL) tambem fica de fora: "mostrar so
+        # quem passou de N tokens" e uma pergunta sobre gasto, e quem nao
+        # informou nenhum nao tem como satisfaze-la. Ja a linha PARCIAL entra
+        # com o lado que informou, pela mesma razao de `_total_tokens`: e o que
+        # ela de fato mediu.
+        tokens = func.coalesce(RequestEvent.input_tokens, 0) + func.coalesce(
+            RequestEvent.output_tokens, 0
+        )
+        clauses.append(tokens >= min_tokens)
     if kind is not None:
         # `kind` e o tipo de trafego, e nao um seletor da tela: NULL e modelo,
         # e por isso so os dois valores nominais sao aceitos. Outro nome seria

@@ -190,3 +190,84 @@ async def require_shunt_token(request: Request) -> int:
     if recorder is not None:
         recorder.touch_token(token_id)
     return token_id
+
+
+async def require_shunt_token_or_transparent(request: Request) -> int | None:
+    """Dependencia do relay (T5 catch-all): permite bypass transparente.
+
+    - Token Shunt explicito (x-shunt-token, /t/<token>/, ?token=): valida igual
+      ao v1 (strict=True).
+    - Credencial do caller (x-api-key ou Authorization que NAO e token Shunt):
+      permite bypass transparente (credential_is_token=False, shunt_token_id=None).
+      Sem banco para conferir, `strict=False` devolve None, e None aqui significa
+      "nao e token do Shunt", nao "falta de credencial" -- sem esta distincao um
+      Shunt sem banco derrubaria todo pedido do harness que so leva a propria
+      chave (e foi o 401 em /api/oauth/usage medido em producao). O lado negativo
+      e o inverso: com o banco fora, um token Shunt invalido em x-api-key tambem
+      vira credencial. Nao ha vazamento (ninguem autenticou), e a revogacao so
+      falha nessa janela; as formas explicitas continuam bloqueando.
+    - Nenhuma credencial: 401.
+    """
+    request.state.credential_is_token = False
+    matched: set[str] = set()
+    presented = False
+    if request.url.path in EXEMPT_PATHS:
+        request.state.shunt_token_id = None
+        request.state.token_headers = frozenset()
+        return 0
+    try:
+        explicit = read_token(
+            request.headers, request.query_params.get("token"),
+            getattr(request.state, "shunt_path_token", None)
+        )
+    except TokenConflict as err:
+        raise TokenRejected(400, str(err)) from err
+    token_id = None
+    if explicit:
+        token_id = await _lookup(request, token_hash(explicit), strict=True)
+        if token_id is None:
+            raise TokenRejected(401, "unknown or expired shunt token")
+        presented = True
+    # x-api-key e Authorization: se EXISTE engine (banco), checa se o valor e
+    # token Shunt; se nao e, e a credencial do caller (bypass transparente).
+    # Sem engine nao ha como conferir, e tudo vira credencial do caller --
+    # caso contrario um Shunt sem banco derrubaria todo pedido do harness
+    # que so leva a propria chave (foi o 401 em /api/oauth/usage medido em
+    # producao).
+    #
+    # O custo dessa escolha: com o banco fora, um token Shunt invalido em
+    # x-api-key tambem vira credencial e segue ao provedor. Nao e vazamento
+    # do segredo (ninguem autenticou), e o operador so perde a revogacao
+    # enquanto o DB esta fora. As formas EXPLICITAS (x-shunt-token, /t/,
+    # ?token=) continuam strict=True e rejeitam.
+    recorder = getattr(request.app.state, "recorder", None)
+    has_engine = recorder is not None and recorder.engine is not None
+    for name in ("x-api-key", "authorization"):
+        raw = request.headers.get(name)
+        if not raw:
+            continue
+        presented = True
+        value = raw.removeprefix("Bearer ").strip() if name == "authorization" else raw.strip()
+        # Se o valor e identico ao token Shunt EXPLICITO ja validado, reusa o token_id.
+        if explicit and value == explicit:
+            matched.add(name)
+            continue
+        if has_engine:
+            found = await _lookup(request, token_hash(value), strict=False)
+            if found is not None:
+                # Valor E token Shunt (achou no banco). Validado -> matched.
+                request.state.credential_is_token = True
+                token_id = token_id or found
+                matched.add(name)
+            # else: valor NAO e token Shunt (nao achou no banco) -> credencial do caller.
+            # Bypass transparente: header nao entra em matched, segue para upstream.
+        # else: sem engine -> NAO checa, trata como credencial do caller.
+        # Header NAO entra em matched, segue para o upstream (bypass transparente).
+    if not presented:
+        raise TokenRejected(401, "missing shunt token or caller credentials: send x-shunt-token, /t/<token>/, ?token=, or provide x-api-key/Authorization")
+    request.state.token_headers = frozenset(matched)
+    request.state.shunt_token_id = token_id
+    recorder = getattr(request.app.state, "recorder", None)
+    if recorder is not None and token_id is not None:
+        recorder.touch_token(token_id)
+    return token_id

@@ -32,6 +32,7 @@ from app.config.settings import Settings
 from app.core.dispatcher import ShuntRequest, dispatch
 from app.stats import dossier as dossie_mod
 from app.stats.models import Analysis
+from app.translate.usage import tokens_of
 
 SYSTEM = """Você é um especialista em fluxo de desenvolvimento assistido por modelos.
 Recebe o dossiê de um período de uso de um proxy de LLM (o Shunt, que traduz
@@ -221,6 +222,7 @@ async def analyse(
         }
 
     usage = result.body.get("usage") or {}
+    in_tokens, out_tokens = tokens_of(usage)
     analysis_id = await asyncio.to_thread(
         _store,
         engine,
@@ -235,10 +237,14 @@ async def analyse(
         provider=result.real_provider,
         status=result.status,
         text=text,
-        input_tokens=int(usage.get("input_tokens") or 0),
-        output_tokens=int(usage.get("output_tokens") or 0),
+        input_tokens=in_tokens,
+        output_tokens=out_tokens,
         duration_ms=duration_ms,
     )
+    # Os mesmos tokens que acabaram de ser persistidos: o retorno da API e a
+    # linha do banco sao a mesma analise, e quem le um nao pode ver valor
+    # diferente de quem le o outro. Medido o bug que este `tokens_of` corrige:
+    # provedor em chaves OpenAI gravava 7 e devolvia None.
     return {
         "id": analysis_id,
         "status": result.status,
@@ -248,7 +254,7 @@ async def analyse(
         "requested_model": requested,
         "candidate_model": result.real_model,
         "provider": result.real_provider,
-        "input_tokens": int(usage.get("input_tokens") or 0),
-        "output_tokens": int(usage.get("output_tokens") or 0),
+        "input_tokens": in_tokens,
+        "output_tokens": out_tokens,
         "duration_ms": duration_ms,
     }

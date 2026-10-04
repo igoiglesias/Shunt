@@ -63,7 +63,7 @@ from app.translate.to_anthropic import (
 )
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai, anthropic_response_to_openai
-from app.translate.usage import cache_of
+from app.translate.usage import cache_of, tokens_of
 
 # (protocolo do provedor, endpoint pedido pelo cliente) -> path no provedor.
 # A Anthropic nao tem equivalente a /completions nem a /embeddings: o par
@@ -440,6 +440,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     project, session_id = project_and_session(req.body)
     result = await _dispatch(req, settings, pool, resolution)
     usage = result.body.get("usage") or {}
+    in_tokens, out_tokens = tokens_of(usage)
     cached, cache_written = cache_of(usage)
     called, thinking = _tools_called(result.body)
     log_request(
@@ -450,8 +451,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             matched=resolution.matched,
             candidate=result.real_model,
             attempts=result.trace,
-            input_tokens=usage.get("input_tokens") or usage.get("prompt_tokens") or 0,
-            output_tokens=usage.get("output_tokens") or usage.get("completion_tokens") or 0,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
             ttft_ms=None,  # so existe onde ha um primeiro evento a cronometrar
             duration_ms=int((time.monotonic() - started) * 1000),
             translated=result.real_model is not None,
@@ -943,7 +944,7 @@ class _Tally:
     candidate: str | None = None
     trace: list[str] = field(default_factory=list)
     first_byte_at: float | None = None
-    usage: dict[str, int] = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
+    usage: dict[str, int | None] = field(default_factory=lambda: {"input_tokens": None, "output_tokens": None})
     provider: str | None = None
     answer_text: str = ""
     tools_called: list[str] = field(default_factory=list)
@@ -1037,14 +1038,15 @@ def _drain(
             return
 
 
-def _absorb(tally: _Tally, translator: object, candidate: Candidate) -> None:
+def _absorb(tally: _Tally, translator: object) -> None:
     """Passa para a linha de log o que so o tradutor viu.
 
     Um repasse cru nao tem tradutor, entao ferramenta e raciocinio ficam
     vazios: o proxy nao leu aqueles bytes e inventar contagem seria pior do
-    que nao ter.
+    que nao ter. O `provider` nao vem aqui: ele e setado no topo de
+    `_stream_candidate`, antes mesmo da primeira tentativa, justamente para
+    chegar a linha de log nos caminhos que nunca chegam ao commit.
     """
-    tally.provider = candidate.provider
     tools = getattr(translator, "tools_called", None)
     thinking = getattr(translator, "thinking_blocks", None)
     text = getattr(translator, "answer_text", None)
@@ -1237,6 +1239,16 @@ async def _stream_candidate(
     enquanto este gerador vive."""
     label = candidate.model
     trace = tally.trace
+    # O destino deste candidato e conhecido ANTES de qualquer tentativa, e a
+    # linha de log vive num `finally` la em `dispatch_stream` que roda em todo
+    # caminho de saida -- inclusive o 499 de um cliente que foi embora no
+    # meio. Setar aqui, e nao so depois do commit, e o que faz a falha chegar
+    # ao painel com destino: antes deste fix 2238 de 2320 erros (96,5%) do
+    # stats.db de producao eram gravados sem `provider`. Sobrescrever a cada
+    # candidato tambem e o que da o ULTIMO tentado quando a cadeia esgota, que
+    # e a quem o 502 cabe. A guarda do 400 (cadeia pulada inteira, nenhum
+    # upstream chamado) nunca chega aqui, e por isso continua com None.
+    tally.provider = candidate.provider
     # Retry belongs here and only here: no byte of this candidate has been
     # emitted, so a transient connect error is exactly the buffered case
     # `classify` already answers RETRY for. Past this point the response
@@ -1288,7 +1300,6 @@ async def _stream_candidate(
     if candidate.protocol == req.protocol:
         passthrough.happened = True
         tally.candidate = candidate.model
-        tally.provider = candidate.provider
         try:
             async for raw in response.aiter_bytes():
                 yield raw
@@ -1359,7 +1370,7 @@ async def _stream_candidate(
             tally.status = 502
             tally.error_type = "api_error"
         tally.usage = translator.usage()
-        _absorb(tally, translator, candidate)
+        _absorb(tally, translator)
         leg.done = True
         return
     if state.failed is None and not state.started:
@@ -1373,7 +1384,7 @@ async def _stream_candidate(
     for chunk_bytes in _finish(req, translator):
         yield chunk_bytes
     tally.usage = translator.usage()
-    _absorb(tally, translator, candidate)
+    _absorb(tally, translator)
     leg.done = True
 
 

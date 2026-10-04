@@ -293,3 +293,38 @@ async def test_store_writes_the_row_without_touching_the_panel_bus(make_engine, 
         guardado = session.scalar(select(RequestEvent.kind).where(RequestEvent.request_id == "relay-1"))
     assert guardado == "relay"
     assert queue.empty(), "o relay nao pode aparecer no barramento do painel"
+
+
+# --------------------------------------------------------------------------
+# B2: uma linha que viola uma constraint nao derruba o lote inteiro
+# --------------------------------------------------------------------------
+
+
+async def test_one_invalid_line_does_not_lose_the_valid_ones(make_engine, tmp_path):
+    """Lote misto: so a linha que violou a constraint e descartada.
+
+    Hoje o lote inteiro e um `commit` so, e uma `IntegrityError` em qualquer
+    linha aborta TODAS -- medido em sqlite3 puro, `executemany` com duas linhas
+    sendo uma invalida nao insere nem a valida. E defeito em profundidade: o
+    migrador de B1 elimina o caso mais comum (NOT NULL legado), mas qualquer
+    outra constraint violada por uma linha volta a perder a vizinhanca.
+    """
+    engine = engine_for(make_engine, tmp_path)
+    recorder = Recorder(engine, max_queue=100, batch_size=100, interval=10.0)
+    await recorder.start()
+    recorder.record(event(request_id="boa-1"))
+    # `started_at` e NOT NULL: esta linha viola a constraint de proposito.
+    recorder.record(event(request_id="ruim", started_at=None))
+    recorder.record(event(request_id="boa-2"))
+
+    await recorder.aclose()
+
+    with Session(engine) as session:
+        ids = {
+            row.request_id
+            for row in session.scalars(select(RequestEvent))
+        }
+
+    assert ids == {"boa-1", "boa-2"}, f"linhas validas perdidas: {ids}"
+    assert recorder.failures >= 1, "a linha invalida tem que ser contada"
+    assert recorder.commits >= 1

@@ -51,8 +51,17 @@ class RequestLog:
     matched: str | None
     candidate: str | None
     attempts: list[str] = field(default_factory=list)
-    input_tokens: int = 0
-    output_tokens: int = 0
+    # O default e SILENCIO (None), e nunca 0. Zero seria uma MEDICAO ("provedor
+    # disse que gastou 0"), e `queries._usage_reported` le o NULL para separar
+    # as duas: uma rota que esquecer de setar cairia no default e gravaria uma
+    # medicao que nao aconteceu, entrando na taxa de geracao. Quem tem 0 de
+    # verdade e a linha de relay, que escreve explicito (`log_relay` abaixo);
+    # os produtores passam None pelo mesmo motivo. Decisao: nenhum caller
+    # depende do default 0 -- os produtores reais (dispatcher.py:453, 1446 e
+    # v1.py:372) sempre passaram o valor ou None, e os testes que criam
+    # RequestLog sem tokens nao somam tokens.
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     ttft_ms: int | None = None
     duration_ms: int = 0
     translated: bool = False

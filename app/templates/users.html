@@ -18,7 +18,7 @@
       <h2>Usuários</h2>
       <button class="btn btn-primary" hx-get="/admin/users/new" hx-target="#user-form" hx-swap="outerHTML">Novo</button>
     </div>
-    <div id="user-list">{% include "_user_list.html" %}</div>
+    {% include "_user_list.html" %}
     <div id="user-form"></div>
   </section>
 </main>

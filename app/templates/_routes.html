@@ -2,7 +2,7 @@
 <div id="routes-list">
 {% if routes %}
 <div class="table-container">
-<table>
+<table class="routes-table">
 <thead><tr>
   <th>Pattern</th>
   <th class="n">Ordem</th>
@@ -46,6 +46,7 @@
           hx-target="#routes-list" hx-swap="outerHTML">
     Aplicar ordem atual da tabela
   </button>
+</div>
 {% else %}
 <p class="empty-state">Nenhuma rota cadastrada.</p>
 {% endif %}

@@ -157,6 +157,15 @@ def create_config_version(session: Session) -> ConfigVersion:
     session.add(cv)
     session.commit()
     session.refresh(cv)
+    # Reciclar historico: manter apenas as ultimas 5 versoes
+    old = session.execute(
+        select(ConfigVersion.id)
+        .order_by(ConfigVersion.created_at.desc())
+        .offset(5)
+    ).scalars().all()
+    for v_id in old:
+        session.delete(session.get(ConfigVersion, v_id))
+    session.commit()
     return cv
 
 
@@ -239,7 +248,10 @@ async def create_provider(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_providers(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_providers(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.patch("/providers/{name}", response_class=HTMLResponse, include_in_schema=False)
@@ -280,7 +292,10 @@ async def update_provider(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_providers(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_providers(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.delete("/providers/{name}", response_class=HTMLResponse, include_in_schema=False)
@@ -303,6 +318,78 @@ async def delete_provider(
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
     return await list_providers(request)
+
+
+@router.post("/providers/test", response_class=HTMLResponse, include_in_schema=False)
+async def test_provider(
+    request: Request,
+    base_url: Annotated[str, Form()],
+    protocol: Annotated[str, Form()],
+    api_key: Annotated[str | None, Form()] = None,
+    _: None = Depends(require_admin),
+):
+    """Testa conexao com o provedor sem persistir. Devolve fragmento com resultado."""
+    import httpx
+
+    # Normaliza URL
+    url = base_url.rstrip("/")
+    if not url.endswith("/v1"):
+        url = f"{url}/v1"
+
+    headers = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    test_url = ""
+    method = "GET"
+    json_body = None
+
+    if protocol == "openai":
+        test_url = f"{url}/models"
+    elif protocol == "anthropic":
+        # Anthropic precisa de POST com body minimo
+        test_url = f"{url}/messages"
+        method = "POST"
+        json_body = {
+            "model": "ping",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+        headers["anthropic-version"] = "2023-06-01"
+        headers["content-type"] = "application/json"
+    else:
+        return HTMLResponse(
+            '<span class="notice">✗ Protocolo desconhecido</span>',
+            status_code=400,
+        )
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if method == "GET":
+                resp = await client.get(test_url, headers=headers)
+            else:
+                resp = await client.post(test_url, headers=headers, json=json_body)
+
+        if resp.is_success:
+            return HTMLResponse(
+                f'<span style="color: var(--good)">✓ Conectado ({resp.elapsed.total_seconds()*1000:.0f} ms)</span>'
+            )
+        else:
+            return HTMLResponse(
+                f'<span style="color: var(--error)">✗ {resp.status_code}: {resp.text[:200]}</span>',
+                status_code=400,
+            )
+    except httpx.TimeoutException:
+        return HTMLResponse(
+            '<span style="color: var(--error)">✗ Timeout (10s)</span>',
+            status_code=408,
+        )
+    except httpx.HTTPError as e:
+        msg = f"{type(e).__name__}: {str(e)[:200]}"
+        return HTMLResponse(
+            f'<span style="color: var(--error)">✗ {msg}</span>',
+            status_code=500,
+        )
 
 
 @router.get("/providers/new", response_class=HTMLResponse, include_in_schema=False)
@@ -401,7 +488,10 @@ async def create_model(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_models(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_models(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.patch("/models/{alias}", response_class=HTMLResponse, include_in_schema=False)
@@ -457,7 +547,10 @@ async def update_model(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_models(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_models(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.delete("/models/{alias}", response_class=HTMLResponse, include_in_schema=False)
@@ -556,7 +649,10 @@ async def create_route(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_routes(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_routes(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.patch("/routes/{route_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -615,7 +711,10 @@ async def reorder_routes(
         create_config_version(session)
         settings = load_settings_from_db(session)
     await apply_settings(request.app, settings)
-    return await list_routes(request)
+    # Reset form via HX-Trigger so the UI clears without manual refresh
+    resp = await list_routes(request)
+    resp.headers["HX-Trigger"] = "providerFormReset"
+    return resp
 
 
 @router.delete("/routes/{route_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -680,11 +779,21 @@ async def get_default_model(request: Request, _: None = Depends(require_admin)):
 @router.post("/default-model", response_class=HTMLResponse, include_in_schema=False)
 async def set_default_model(
     request: Request,
-    alias: Annotated[str, Form()],
+    alias: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
     engine = request_engine(request)
     with Session(engine) as session:
+        # String vazia = limpar o padrão
+        if not alias:
+            for other in session.execute(select(Model).where(Model.is_default == True)).scalars():
+                other.is_default = False
+            session.commit()
+            create_config_version(session)
+            settings = load_settings_from_db(session)
+            await apply_settings(request.app, settings)
+            return await get_default_model(request)
+
         m = session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none()
         if not m:
             raise HTTPException(status_code=404, detail="Model nao encontrado")
@@ -807,6 +916,51 @@ async def rollback_config(
 async def config_history(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
+        versions = session.execute(
+            select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
+        ).scalars().all()
+    return render("_history.html", request=request, versions=versions)
+
+
+@router.post("/history/prune", response_class=HTMLResponse, include_in_schema=False)
+async def config_history_prune(
+    request: Request,
+    keep: Annotated[int, Form()] = 5,
+    _: None = Depends(require_admin),
+):
+    """Mantém apenas as últimas N versões de configuração, apagando as mais antigas."""
+    keep = max(keep, 1)
+    engine = request_engine(request)
+    with Session(engine) as session:
+        versions = session.execute(
+            select(ConfigVersion.id)
+            .order_by(ConfigVersion.created_at.desc())
+            .offset(keep)
+        ).scalars().all()
+        for v_id in versions:
+            session.delete(session.get(ConfigVersion, v_id))
+        session.commit()
+        # Devolve a lista atualizada
+        updated_versions = session.execute(
+            select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
+        ).scalars().all()
+    return render("_history.html", request=request, versions=updated_versions)
+
+
+@router.delete("/history/{version_id}", response_class=HTMLResponse, include_in_schema=False)
+async def config_history_delete(
+    request: Request,
+    version_id: int,
+    _: None = Depends(require_admin),
+):
+    """Exclui uma versão específica do histórico de configuração."""
+    engine = request_engine(request)
+    with Session(engine) as session:
+        cv = session.get(ConfigVersion, version_id)
+        if not cv:
+            raise HTTPException(status_code=404, detail="Versao nao encontrada")
+        session.delete(cv)
+        session.commit()
         versions = session.execute(
             select(ConfigVersion).order_by(ConfigVersion.created_at.desc()).limit(100)
         ).scalars().all()

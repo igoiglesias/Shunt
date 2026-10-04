@@ -1,3 +1,6 @@
+<!-- A ancora #user-form via junto no fragmento: os botoes Novo/Editar fazem
+     swap outerHTML nela, e precisam reencontra-la apos cada troca. -->
+<div id="user-form">
 {% set editing = user is not none %}
 {% if editing %}
 <form hx-patch="/admin/users/{{ user.username }}" hx-target="#user-list" hx-swap="outerHTML">
@@ -23,3 +26,4 @@
   <button type="button" class="btn" onclick="this.closest('#user-form').innerHTML=''">Cancelar</button>
 </div>
 </form>
+</div>
