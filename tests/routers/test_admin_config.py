@@ -1452,3 +1452,290 @@ def test_load_settings_from_db_carries_the_effort(monkeypatch, tmp_path):
             settings = load_settings_from_db(s)
     assert settings.models["com"].effort == "high"
     assert settings.models["sem"].effort is None
+
+
+EFFORT_ERROR = "Effort deve ser vazio ou um de: low, medium, high, xhigh"
+
+
+@pytest.mark.parametrize("value", ["low", "medium", "high", "xhigh"])
+def test_create_model_with_each_canonical_effort(monkeypatch, tmp_path, value):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai"))
+            s.commit()
+        r = c.post(
+            "/admin/config/models",
+            data={"alias": "m1", "provider_id": "1", "upstream_model": "x", "effort": value},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        m = s.execute(select(Model).where(Model.alias == "m1")).scalar_one()
+    assert m.effort == value
+    assert app.state.settings.models["m1"].effort == value
+
+
+@pytest.mark.parametrize(
+    "extra", [{}, {"effort": ""}, {"effort": "   "}], ids=["ausente", "vazio", "espacos"]
+)
+def test_create_model_without_effort_stores_null(monkeypatch, tmp_path, extra):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai"))
+            s.commit()
+        r = c.post(
+            "/admin/config/models",
+            data={"alias": "m1", "provider_id": "1", "upstream_model": "x", **extra},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        m = s.execute(select(Model).where(Model.alias == "m1")).scalar_one()
+    assert m.effort is None
+    assert app.state.settings.models["m1"].effort is None
+
+
+def test_create_model_effort_accepts_surrounding_spaces(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai"))
+            s.commit()
+        r = c.post(
+            "/admin/config/models",
+            data={"alias": "m1", "provider_id": "1", "upstream_model": "x", "effort": " high "},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model)).scalar_one().effort == "high"
+
+
+@pytest.mark.parametrize("raw", ["max", "none", "minimal", "HIGH", "extreme", "0"])
+def test_create_model_with_an_invalid_effort_is_refused(monkeypatch, tmp_path, raw):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            s.add(Provider(name="p1", base_url="u", protocol="openai"))
+            s.commit()
+        r = c.post(
+            "/admin/config/models",
+            data={"alias": "m1", "provider_id": "1", "upstream_model": "x", "effort": raw},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"] == EFFORT_ERROR
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model).where(Model.alias == "m1")).scalar_one_or_none() is None
+        # Nada gravado: nem o modelo, nem uma versao de config.
+        assert s.execute(select(ConfigVersion)).scalars().all() == []
+
+
+def test_patch_model_changes_then_clears_the_effort(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="low",
+                )
+            )
+            s.commit()
+        r = c.patch(
+            "/admin/config/models/m1",
+            data={"provider_id": "1", "upstream_model": "x", "effort": "xhigh"},
+            cookies=COOKIE,
+        )
+        assert r.status_code == 200
+        with Session(app.state.recorder.engine) as s:
+            assert s.execute(select(Model)).scalar_one().effort == "xhigh"
+        assert app.state.settings.models["m1"].effort == "xhigh"
+        # Presente e vazio e o que o select "Usar o do harness" envia: limpa.
+        r = c.patch(
+            "/admin/config/models/m1",
+            data={"provider_id": "1", "upstream_model": "x", "effort": ""},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model)).scalar_one().effort is None
+    assert app.state.settings.models["m1"].effort is None
+
+
+def test_patch_model_that_omits_the_effort_keeps_it(monkeypatch, tmp_path):
+    """Cliente direto que nao manda o campo nao apaga o effort -- mesmo
+    contrato do limite de concorrencia do provedor."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="high",
+                )
+            )
+            s.commit()
+        r = c.patch(
+            "/admin/config/models/m1",
+            data={"provider_id": "1", "upstream_model": "y"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        m = s.execute(select(Model)).scalar_one()
+    assert (m.upstream_model, m.effort) == ("y", "high")
+
+
+def test_patch_model_with_an_invalid_effort_is_refused_and_changes_nothing(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="low",
+                )
+            )
+            s.commit()
+        r = c.patch(
+            "/admin/config/models/m1",
+            data={"provider_id": "1", "upstream_model": "y", "effort": "max"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert r.json()["detail"] == EFFORT_ERROR
+    with Session(app.state.recorder.engine) as s:
+        m = s.execute(select(Model)).scalar_one()
+    assert (m.upstream_model, m.effort) == ("x", "low")
+
+
+def test_patch_unknown_model_with_an_invalid_effort_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.patch(
+            "/admin/config/models/nao-existe",
+            data={"provider_id": "1", "upstream_model": "x", "effort": "max"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 404
+
+
+def test_the_model_form_offers_the_effort_select(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="medium",
+                )
+            )
+            s.commit()
+        new = c.get("/admin/config/models/new", cookies=COOKIE)
+        edit = c.get("/admin/config/models/m1/edit", cookies=COOKIE)
+    assert '<select id="effort" name="effort"' in new.text
+    assert '<option value="" selected>Usar o do harness</option>' in new.text
+    for value in ("low", "medium", "high", "xhigh"):
+        assert f'<option value="{value}">{value}</option>' in new.text
+    assert '<option value="medium" selected>medium</option>' in edit.text
+    assert '<option value="" selected>' not in edit.text
+
+
+def test_the_models_list_shows_the_effort_or_harness(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="com", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="high",
+                )
+            )
+            s.add(
+                Model(
+                    alias="sem", provider_id=p.id, upstream_model="y",
+                    context_window=1024, max_output_tokens=128,
+                )
+            )
+            s.commit()
+        r = c.get("/admin/config/models", cookies=COOKIE)
+    assert "<th>Effort</th>" in r.text
+    rows = {
+        m.group(1): m.group(0)
+        for m in re.finditer(r"<tr>\s*<td><b>(\w+)</b>.*?</tr>", r.text, re.DOTALL)
+    }
+    assert '<td class="mono">high</td>' in rows["com"]
+    assert '<td class="mono">harness</td>' in rows["sem"]
+
+
+def test_snapshot_and_rollback_carry_the_effort(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="high",
+                )
+            )
+            s.commit()
+            cv = create_config_version(s)
+            cv_id = cv.id
+            assert json.loads(cv.snapshot_json)["models"][0]["effort"] == "high"
+        r = c.patch(
+            "/admin/config/models/m1",
+            data={"provider_id": "1", "upstream_model": "x", "effort": "low"},
+            cookies=COOKIE,
+        )
+        assert r.status_code == 200
+        r = c.post(f"/admin/config/rollback/{cv_id}", cookies=COOKIE)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model)).scalar_one().effort == "high"
+    assert app.state.settings.models["m1"].effort == "high"
+
+
+def test_rollback_of_an_old_snapshot_without_the_effort_restores_null(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(
+                Model(
+                    alias="m1", provider_id=p.id, upstream_model="x",
+                    context_window=1024, max_output_tokens=128, effort="high",
+                )
+            )
+            old = {
+                "providers": [
+                    {"name": "p1", "base_url": "u", "protocol": "openai", "api_key": False}
+                ],
+                "models": [
+                    {
+                        "alias": "m1", "provider": "p1", "upstream_model": "x",
+                        "supports_tools": True, "supports_streaming": True,
+                        "supports_vision": False, "context_window": 1024,
+                        "max_output_tokens": 128, "is_default": False,
+                    }
+                ],
+                "routes": [],
+                "default_model": None,
+            }
+            cv = ConfigVersion(snapshot_json=json.dumps(old))
+            s.add(cv)
+            s.commit()
+            cv_id = cv.id
+        r = c.post(f"/admin/config/rollback/{cv_id}", cookies=COOKIE)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model)).scalar_one().effort is None
+    assert app.state.settings.models["m1"].effort is None

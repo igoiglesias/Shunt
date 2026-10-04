@@ -13,6 +13,7 @@
   <th>Stream</th>
   <th>Vision</th>
   <th>Default</th>
+  <th>Effort</th>
   <th class="n">Ações</th>
 </tr></thead>
 <tbody>
@@ -27,6 +28,7 @@
   <td><span class="chip {{ 'bad' if not m.supports_streaming else '' }}">{{ '✓' if m.supports_streaming else '✗' }}</span></td>
   <td><span class="chip {{ 'bad' if not m.supports_vision else '' }}">{{ '✓' if m.supports_vision else '✗' }}</span></td>
   <td>{% if m.is_default %}<span class="chip">default</span>{% endif %}</td>
+  <td class="mono">{{ m.effort or 'harness' }}</td>
   <td class="n">
     <div class="actions">
       <button class="btn btn-sm" hx-get="/admin/config/models/{{ m.alias }}/edit" hx-target="#model-form" hx-swap="outerHTML">Editar</button>
