@@ -63,7 +63,7 @@ from app.translate.to_anthropic import (
 )
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_request_to_openai, anthropic_response_to_openai
-from app.translate.usage import cache_of
+from app.translate.usage import cache_of, tokens_of
 
 # (protocolo do provedor, endpoint pedido pelo cliente) -> path no provedor.
 # A Anthropic nao tem equivalente a /completions nem a /embeddings: o par
@@ -440,6 +440,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
     project, session_id = project_and_session(req.body)
     result = await _dispatch(req, settings, pool, resolution)
     usage = result.body.get("usage") or {}
+    in_tokens, out_tokens = tokens_of(usage)
     cached, cache_written = cache_of(usage)
     called, thinking = _tools_called(result.body)
     log_request(
@@ -450,8 +451,8 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             matched=resolution.matched,
             candidate=result.real_model,
             attempts=result.trace,
-            input_tokens=usage.get("input_tokens") if usage.get("input_tokens") is not None else usage.get("prompt_tokens"),
-            output_tokens=usage.get("output_tokens") if usage.get("output_tokens") is not None else usage.get("completion_tokens"),
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
             ttft_ms=None,  # so existe onde ha um primeiro evento a cronometrar
             duration_ms=int((time.monotonic() - started) * 1000),
             translated=result.real_model is not None,

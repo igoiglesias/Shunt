@@ -795,6 +795,31 @@ def test_provedor_mudo_em_input_tokens_fica_fora_da_taxa(make_engine):
     assert linha["tokens_per_second"] == 3000.0
 
 
+def test_meia_medicao_somente_de_saida_fica_fora_da_taxa(make_engine):
+    """Documenta a lacuna da meia-medicao -- NAO o comportamento desejado.
+
+    `_usage_reported` (queries.py) olha apenas `input_tokens.is_not(None)`:
+    uma linha em que o provedor informou a saida e calou a entrada
+    (`input_tokens=NULL, output_tokens=1200`) fica FORA da taxa de geracao,
+    apesar de ter medido alguma coisa. Esse teste caracteriza a decisao atual;
+    se a funcao passar a considerar qualquer dos dois lados, esta linha entra
+    na conta e o teste falha -- a quebra e o sinal de que a lacuna foi
+    preenchida de proposito.
+    """
+    engine = make_engine()
+    with Session(engine) as session:
+        # Meia-medicao: o provedor disse a saida, calou a entrada.
+        session.add(row(request_id="meia", provider="meio", stream=False,
+                        duration_ms=400, input_tokens=None, output_tokens=1200))
+        session.commit()
+
+    linha = {r["provider"]: r for r in queries.by_provider(engine)}["meio"]
+
+    # Hoje: a linha e excluida da taxa, ainda que tenha medido 1200 tokens.
+    assert linha["rated_requests"] == 0
+    assert linha["tokens_per_second"] is None
+
+
 def test_a_janela_inteira_tem_a_propria_taxa(seeded):
     totais = queries.totals(seeded, hours=1)
 

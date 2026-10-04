@@ -183,6 +183,46 @@ def test_resposta_sem_texto_e_erro_e_nao_analise_vazia(store, monkeypatch):
     assert resultado["text"] == ""
 
 
+def test_o_dict_de_retorno_concorda_com_o_que_foi_persistido_em_chaves_openai(store, monkeypatch):
+    """Divergencia API vs banco quando o usage chega em chaves OpenAI.
+
+    O `_store` (analysis.py) grava `input_tokens` com o mesmo `if/else` do
+    dispatcher (`usage.get("input_tokens") if ... is not None else
+    usage.get("prompt_tokens")`), mas o dict de retorno da analise devolve
+    `usage.get("input_tokens")` puro. Com um provedor que envia so
+    `prompt_tokens`/`completion_tokens` (formato OpenAI, sem traducao de
+    usage), a tabela `analyses` fica com os numeros e a API devolve None --
+    quem le a auditoria via `_cached` ve uma coisa, quem le o banco outra.
+    """
+    import asyncio
+
+    async def resposta_em_chaves_openai(req, settings, pool):
+        return ShuntResult(
+            status=200,
+            body={
+                "id": "msg-1",
+                "content": [{"type": "text", "text": "1. Recomendacao."}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 42},
+            },
+            real_model="gpt-oss-120b",
+            real_provider="groq",
+        )
+
+    monkeypatch.setattr(analysis, "dispatch", resposta_em_chaves_openai)
+
+    resultado = asyncio.run(analysis.analyse(store, SETTINGS, None, filters={}, model="m"))
+
+    with Session(store) as session:
+        linha = session.get(Analysis, resultado["id"])
+
+    # O banco ja usa o if/else: os numeros chegam persistidos.
+    assert linha.input_tokens == 7
+    assert linha.output_tokens == 42
+    # A API tem de devolver o mesmo que o banco guardou -- nao None.
+    assert resultado["input_tokens"] == linha.input_tokens
+    assert resultado["output_tokens"] == linha.output_tokens
+
+
 def test_sem_modelo_declarado_nao_chama_ninguem(store, dublê):
     import asyncio
 

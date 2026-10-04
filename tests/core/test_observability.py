@@ -580,3 +580,40 @@ async def test_a_silent_usage_logs_null_and_never_zero(caplog):
     assert entry["candidate"] is not None
     assert entry["input_tokens"] is None
     assert entry["output_tokens"] is None
+
+
+@respx.mock
+async def test_um_usage_em_chaves_openai_sem_traducao_vai_para_a_linha(caplog):
+    """O ramo `else` da expressao do `dispatch` (dispatcher.py) nunca foi lido.
+
+    Com o mesmo protocolo nos dois lados nao ha traducao de resposta: o corpo
+    que chega ao log fala `prompt_tokens`/`completion_tokens`, e so o `else`
+    (`.get("prompt_tokens")` / `.get("completion_tokens")`) faz esses numeros
+    aparecerem na linha. O teste anterior cobria o ramo direto porque pedia um
+    provedor OpenAI a um caller Anthropic -- e o corpo chega TRADUZIDO de
+    volta para `input_tokens`/`output_tokens`.
+    """
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-cru",
+                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 31, "completion_tokens": 17},
+            },
+        )
+    )
+    openai_body = {"model": "claude-opus-4-5", "messages": [{"role": "user", "content": "oi"}]}
+    pool = UpstreamPool(SETTINGS)
+    try:
+        with caplog.at_level(logging.INFO, logger="shunt"):
+            await dispatch(
+                ShuntRequest("openai", openai_body, {}, endpoint="chat"), SETTINGS, pool
+            )
+    finally:
+        await pool.aclose()
+
+    entry = lines(caplog)[-1]
+    assert entry["candidate"] is not None
+    assert entry["input_tokens"] == 31
+    assert entry["output_tokens"] == 17

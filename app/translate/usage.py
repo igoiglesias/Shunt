@@ -24,7 +24,16 @@ WRITE = ("cache_creation_input_tokens", "cache_write_tokens")
 
 
 def _int(value) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+    # Alguns provedores enviam usage numerico nao-inteiro (medido no plano
+    # bypass-stream-bugs: `prompt_tokens: 5.0`); truncar para int e a leitura
+    # honesta, descartar como silencio faria o painel afirmar "nao informou".
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
 
 
 def openai_usage_to_anthropic(usage) -> dict:
@@ -42,6 +51,28 @@ def openai_usage_to_anthropic(usage) -> dict:
         if isinstance(value, int) and not isinstance(value, bool):
             out[anthropic_name] = value
     return out
+
+
+def tokens_of(usage) -> tuple[int | None, int | None]:
+    """Os tokens de entrada e saida de um `usage`, em qualquer dialeto.
+
+    Medido (bug da analise): quem fala Anthropic traz `input_tokens`, quem fala
+    OpenAI traz `prompt_tokens`. O relatorio do painel e da analise precisa do
+    numero de qualquer um dos dois, e a expressao que escolhe um caiu no outro.
+    O ponto unico evita que uma quarta copia apareca desatualizada.
+
+    Zero e medicao, nao silencio: `input_tokens: 0` tem prioridade sobre
+    `prompt_tokens`, porque e o provedor dizendo quanto gastou. Usar `or`
+    aqui trocaria um zero verdadeiro pelo valor do outro dialeto -- o mesmo
+    erro que o modulo inteiro evita no cache.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    entry, output = usage.get("input_tokens"), usage.get("output_tokens")
+    if entry is None:
+        entry = usage.get("prompt_tokens")
+    if output is None:
+        output = usage.get("completion_tokens")
+    return _int(entry), _int(output)
 
 
 def anthropic_usage_to_openai(usage) -> dict:
