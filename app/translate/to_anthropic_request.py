@@ -37,6 +37,7 @@ Deliberate omissions -- fields this translator does not add, and why:
 import json
 from typing import Any
 
+from app.translate.effort import normalize_effort
 from app.translate.ids import to_anthropic_id
 
 TOOL_CHOICE = {
@@ -172,4 +173,15 @@ def openai_request_to_anthropic(body: dict, target_model: str, max_output_tokens
     stop = body.get("stop")
     if stop:
         out["stop_sequences"] = [stop] if isinstance(stop, str) else list(stop)
+    # `reasoning_effort` e o campo oficial; `reasoning.effort` so vale quando ele
+    # esta ausente (ou nulo). Presente e invalido e descartado, sem fallback.
+    # O tradutor nunca cria `thinking` (spec R4).
+    raw_effort = body.get("reasoning_effort")
+    if raw_effort is None:
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict):
+            raw_effort = reasoning.get("effort")
+    effort = normalize_effort(raw_effort)
+    if effort is not None:
+        out["output_config"] = {"effort": effort}
     return out
