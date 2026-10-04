@@ -1,3 +1,6 @@
+<!-- A ancora #user-list via no proprio fragmento: o swap outerHTML dos
+     botoes de acao re-insere o div, mantendo o alvo vivo apos cada troca. -->
+<div id="user-list">
 {% if not users %}
 <div class="empty-state">Nenhum usuario ainda.</div>
 {% else %}
@@ -22,3 +25,4 @@
 </table>
 </div>
 {% endif %}
+</div>
