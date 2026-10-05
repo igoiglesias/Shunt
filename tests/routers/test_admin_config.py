@@ -1672,8 +1672,8 @@ def test_the_models_list_shows_the_effort_or_harness(monkeypatch, tmp_path):
         m.group(1): m.group(0)
         for m in re.finditer(r"<tr>\s*<td><b>(\w+)</b>.*?</tr>", r.text, re.DOTALL)
     }
-    assert '<td class="mono">high</td>' in rows["com"]
-    assert '<td class="mono">harness</td>' in rows["sem"]
+    assert '<td class="mono effort" title="high">high</td>' in rows["com"]
+    assert '<td class="mono effort" title="Usando o effort do harness">harness</td>' in rows["sem"]
 
 
 def test_snapshot_and_rollback_carry_the_effort(monkeypatch, tmp_path):

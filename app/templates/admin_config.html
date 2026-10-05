@@ -40,7 +40,7 @@
   .models-table th:nth-child(7), .models-table td:nth-child(7) { width: 6%; }
   .models-table th:nth-child(8), .models-table td:nth-child(8) { width: 6%; }
   .models-table th:nth-child(9), .models-table td:nth-child(9) { width: 6%; }
-  .models-table th:nth-child(10), .models-table td:nth-child(10) { width: 7%; }
+  .models-table th:nth-child(10), .models-table td:nth-child(10) { width: 9%; }
   .models-table th:nth-child(11), .models-table td:nth-child(11) { width: 10%; }
 
   /* routes table: 4 cols (Pattern, Ordem, Candidatos, Ações) */
@@ -50,6 +50,12 @@
   .routes-table th:nth-child(4), .routes-table td:nth-child(4) { width: 20%; }
   th { color: var(--dim); font-weight: 600; font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; }
   td.n, th.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  /* Coluna de effort: no mobile a sticky de Acoes cobre o que passa por baixo e
+     9% de um container de 299 px nao comportam nem o sentinel "harness". O
+     min-width abaixo faz a coluna caber e a tabela rolar; o ellipsis guarda o
+     caso de um alias mais longo. */
+  .models-table th:nth-child(10), .models-table td:nth-child(10) { min-width: 72px; width: 72px; }
+  .models-table td.effort { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   tbody tr:last-child td { border-bottom: 0; }
 
   td.actions { display: flex; gap: 6px; }
