@@ -13,10 +13,13 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from starlette.routing import Match
 
 from app.core.observability import set_recorder
 from app.core.upstream import UpstreamPool
 from app.main import app
+from app.routers import relay as relay_module
+from app.routers.relay import _partial_local_match, relay_endpoint
 from app.stats.recorder import Recorder
 from tests.conftest import TEST_SHUNT_TOKEN
 from tests.core.test_dispatcher import SETTINGS
@@ -912,3 +915,136 @@ async def test_t6_cancelling_the_task_mid_stream_closes_the_upstream():
 
     assert stream.closed is True
     assert response.is_closed
+
+
+# ---------------------------------------------------------------------------
+# Caminhos defensivos do catch-all que a suite normal nunca toca:
+# entrada sem `.matches` em `app.routes`, o proprio catch-all sendo pulado,
+# e o `except BaseException` que fecha o cliente proprio antes de re-levantar.
+# Nasce VERDE de proposito: o comportamento existe, so nao tinha cobertura.
+# ---------------------------------------------------------------------------
+
+
+class _RouteStub:
+    """Rota de brinquedo com `matches` fixo e `endpoint` nomeado -- o minimo
+    que `_partial_local_match` consome de cada entrada de `app.routes`."""
+
+    def __init__(self, endpoint, match: Match) -> None:
+        self.endpoint = endpoint
+        self._match = match
+
+    def matches(self, scope):
+        return self._match, {}
+
+
+def _request_on_app(routes, path: str, method: str):
+    from starlette.requests import Request
+
+    app_stub = type("_AppStub", (), {"routes": routes})()
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("test", 80),
+            "client": ("127.0.0.1", 1),
+            "headers": [],
+            "app": app_stub,
+            "state": {},
+        }
+    )
+
+
+def test_partial_local_match_skips_routes_without_matches_and_the_relay_catch_all():
+    """`app.routes` pode carregar entradas sem `.matches` (puladas, nunca um
+    `AttributeError`), e o catch-all PROPRIO do relay (reconhecido pelo
+    `endpoint`) nunca vira 405 local: ele casa qualquer path, e bloquear o
+    PARTIAL dele mataria todo repasse. O caso de controle (uma rota GET real
+    contra um POST) prova que o PARTIAL de verdade ainda detecta."""
+    relay_catch_all = _RouteStub(endpoint=relay_endpoint, match=Match.PARTIAL)
+    odd_entry = object()  # sem `.matches` de todo
+
+    # So o catch-all (com PARTIAL) + a entrada sem matches: NAO e 405 local.
+    request = _request_on_app([odd_entry, relay_catch_all], path="/api/hello", method="GET")
+    assert _partial_local_match(request) is False
+
+    # Controle: uma rota local GET fora de /v1 contra um POST -> PARTIAL -> 405.
+    from fastapi.routing import APIRoute
+
+    real_route = APIRoute("/api/stats", endpoint=lambda: None, methods=["GET"])
+    request = _request_on_app([real_route], path="/api/stats", method="POST")
+    assert _partial_local_match(request) is True
+
+
+async def test_close_on_error_closes_the_open_response_before_the_stack():
+    """`relay.py:124-126`: com a resposta upstream JAI aberta (ex.: um
+    `ReadTimeout` no meio do corpo), o `_close_on_error` a fecha ANTES do
+    stack que segura o cliente proprio -- a ordem nao importa para o estado
+    final, mas a resposta aberta e sempre liberada."""
+    closed: list[str] = []
+
+    class _Resp:
+        async def aclose(self) -> None:
+            closed.append("response")
+
+    class _Stack:
+        async def aclose(self) -> None:
+            closed.append("stack")
+
+    await relay_module._close_on_error(_Resp(), _Stack())
+    assert closed == ["response", "stack"]
+
+
+async def test_close_on_error_without_a_response_only_closes_the_stack():
+    """Sem resposta aberta (o erro veio antes do `send`), so o stack fecha --
+    o `None` nao e chamado de nada (sem `AttributeError`)."""
+    closed: list[str] = []
+
+    class _Stack:
+        async def aclose(self) -> None:
+            closed.append("stack")
+
+    await relay_module._close_on_error(None, _Stack())
+    assert closed == ["stack"]
+
+
+@respx.mock
+def test_relay_unexpected_error_closes_the_own_client_and_reraises(monkeypatch):
+    """`relay.py:318-325`: um erro que NAO e `httpx.HTTPError` DENTRO do
+    `try` (o `log_relay` do relay quebra logo apos os headers do upstream,
+    com a resposta ABRTO) nao vira 500 vazio com o cliente proprio do pool
+    vazando -- o `except BaseException` fecha o stack (o contexto fecha o
+    cliente) e re-levanta. O cliente proprio existe aqui porque o host
+    oficial nao esta no catalogo do pool."""
+    respx.get("https://api.anthropic.com/api/hello").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom-relay")
+
+    monkeypatch.setattr(relay_module, "log_relay", boom)
+
+    closed_clients: list[bool] = []
+    original_new_client = UpstreamPool._new_client
+
+    def spy_new_client(self, base_url):
+        client = original_new_client(self, base_url)
+        real_aclose = client.aclose
+
+        async def tracked_aclose() -> None:
+            closed_clients.append(True)
+            await real_aclose()
+
+        client.aclose = tracked_aclose
+        return client
+
+    monkeypatch.setattr(UpstreamPool, "_new_client", spy_new_client)
+
+    with pytest.raises(RuntimeError, match="boom-relay"), client() as c:
+        c.get("/api/hello", headers={"anthropic-version": "2023-06-01"})
+
+    assert closed_clients, "o cliente proprio do pool nao foi fechado"

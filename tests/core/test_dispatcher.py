@@ -1,4 +1,5 @@
 import json
+import re
 
 import httpx
 import pytest
@@ -408,6 +409,119 @@ def test_provider_config_helper_prefers_the_declared_entry():
     assert config.api_key == "sk-da-config"
 
 
+def test_provider_config_helper_raises_for_a_provider_outside_catalog_and_officials():
+    """Linha 315: transparente cujo provider NAO esta no catalogo NEM no mapa
+    de hosts oficiais embutido nao tem destino -- o helper levanta `KeyError`
+    com o nome do provedor, em vez de inventar uma URL. (O dispatcher so chega
+    aqui com um provedor declarado ou derivavel; este e o guard do ultimo
+    `raise`.)"""
+    from app.core.dispatcher import _provider_config
+
+    candidate = Candidate(
+        alias=None, provider="groq", model="vendor/x", protocol="openai", transparent=True
+    )
+    # "groq" nao esta em NO_ANTHROPIC_DECLARED.providers nem em OFFICIAL_HOSTS
+    with pytest.raises(KeyError) as exc:
+        _provider_config(candidate, NO_ANTHROPIC_DECLARED)
+    assert exc.value.args == ("groq",)
+
+
+def test_the_missing_credential_note_is_the_provider_without_a_key():
+    """Linha 384: candidato declarado (nao transparente) cujo provedor nao tem
+    chave configurada -- o rastro nomeia o provedor, em vez de uma mensagem
+    generica."""
+    from app.core.dispatcher import _missing_credential
+
+    settings = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            )
+        },
+        models={
+            "local-m": ModelConfig(
+                provider="local", model="local/m", context_window=64000, max_output_tokens=8192
+            )
+        },
+        routes=[],
+        default_model=None,
+    )
+    candidate = Candidate(alias="local-m", provider="local", model="local/m", protocol="openai")
+    note = _missing_credential(candidate, settings)
+    assert note == "provider local sem chave configurada"
+
+
+def test_tools_offered_skips_non_dict_and_unnamed_entries():
+    """A lista de ferramentas pode vir malformada: entrada nao-dict e nome ausente
+    sao ignorados, e os dois dialetos (top-level e `function.name`) leem o nome."""
+    from app.core.dispatcher import tools_offered
+
+    req = ShuntRequest(
+        "anthropic",
+        {
+            "model": "claude-opus-4-5",
+            "tools": [
+                "lixo-que-nao-e-dict",
+                None,
+                {"name": "grep", "input_schema": {}},
+                {"type": "function", "function": {"name": "bash", "parameters": {}}},
+                {"type": "function", "function": {}},
+                {},
+            ],
+        },
+        {},
+    )
+    assert tools_offered(req) == ["grep", "bash"]
+
+
+def test_tools_offered_is_empty_without_a_tools_key():
+    from app.core.dispatcher import tools_offered
+
+    req = ShuntRequest("anthropic", {**BODY}, {})
+    assert tools_offered(req) == []
+
+
+def test_the_tools_called_and_thinking_are_read_from_anthropic_bodies():
+    """Corpo Anthropic: blocos `tool_use` (nome str), `thinking` e entrada
+    malformada (nao-dict, nome ausente) no mesmo `content`."""
+    from app.core.dispatcher import _tools_called
+
+    body = {
+        "content": [
+            "lixo-que-nao-e-dict",
+            {"type": "text", "text": "ok"},
+            {"type": "tool_use", "name": "grep"},
+            {"type": "tool_use"},
+            {"type": "thinking", "thinking": "..."},
+        ]
+    }
+    assert _tools_called(body) == (["grep"], 1)
+
+
+def test_the_tools_called_and_thinking_are_read_from_openai_bodies():
+    """Corpo OpenAI: `tool_calls` e `reasoning_content` dentro de cada choice,
+    com choice sem message e `function` malformada ignorados."""
+    from app.core.dispatcher import _tools_called
+
+    body = {
+        "choices": [
+            {"message": "lixo-que-nao-e-dict"},
+            {
+                "message": {
+                    "reasoning_content": "...",
+                    "tool_calls": [
+                        {"function": {"name": "bash"}},
+                        {"function": None},
+                        {},
+                        {"function": {}},
+                    ],
+                }
+            },
+        ]
+    }
+    assert _tools_called(body) == (["bash"], 1)
+
+
 @respx.mock
 async def test_transparent_claude_request_reaches_the_official_anthropic_host():
     """E2E no nivel do dispatcher: settings SEM "anthropic", candidato
@@ -455,6 +569,32 @@ def test_transparent_skip_reason_is_the_shunt_token_when_it_was_the_only_credent
     reason = _transparent_skip_reason(candidate, req, NO_ANTHROPIC_DECLARED)
     assert reason is not None
     assert "shunt token" in reason
+
+
+def test_transparent_is_eligible_when_the_provider_is_declared_with_a_key():
+    """T4(c): a unica credencial era o token do Shunt, MAS o provedor e
+    declarado com chave proprio -- aquela substitui, a chamada segue e nao ha
+    pulo (o valor do token fica com o proxy)."""
+    from app.core.dispatcher import _transparent_skip_reason
+
+    settings = Settings(
+        providers={
+            "anthropic": ProviderConfig(
+                base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-do-provedor"
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    candidate = Candidate(
+        alias=None, provider="anthropic", model="claude-sonnet-5", protocol="anthropic",
+        transparent=True,
+    )
+    req = ShuntRequest(
+        "anthropic", BODY, {"x-api-key": "token-do-shunt"}, credential_is_token=True
+    )
+    assert _transparent_skip_reason(candidate, req, settings) is None
 
 
 def test_transparent_skip_reason_is_wrong_destination_for_a_foreign_protocol():
@@ -1964,6 +2104,242 @@ async def test_the_last_resort_note_names_the_model_not_the_alias():
     finally:
         await pool.aclose()
     assert result.trace[-1] == "qwen3.8-27b: taken anyway, nothing in the chain fits"
+
+
+def test_an_empty_resolution_closes_the_ladder_with_the_default_model():
+    """Defensiva de `_chain_for`: a cadeia chega vazia e a escada fecha no
+    `default_model`, com a linha "taken anyway" no rastro.
+
+    Nao e alcancavel pela API publica: `resolve` nunca devolve cadeia vazia
+    (uma rota sem candidato nao passa da validacao --
+    test_a_route_with_no_candidates_is_refused_by_the_configuration), e o
+    filtro nunca descarta transparente. Coberto com um `Resolution` direto.
+    """
+    from app.core.resolver import Resolution
+
+    settings = TINY.model_copy(update={"default_model": "grande"})
+    resolution = Resolution("family", "opus", [])
+    req = ShuntRequest("anthropic", BIG_BODY, {})
+    chain, trace = dispatcher._chain_for(req, settings, resolution, BIG_BODY)
+    assert [c.alias for c in chain] == ["grande"]
+    assert "taken anyway, nothing in the chain fits" in "; ".join(trace)
+
+
+@respx.mock
+async def test_nothing_fits_so_the_default_is_tried_and_the_upstream_422_comes_back(
+    monkeypatch,
+):
+    """O sintoma da producao, documentado: "context window too small" seguido
+    de 422. NADA na cadeia cabe (nem o `default_model`): o proxy ainda tenta
+    o `default_model` -- e a escolha do operador para "quando nada serve" --
+    e o 4xx do upstream volta no envelope do chamador, nao um 400 nosso.
+
+    A escada do `_chain_for` (589-593) NAO entra aqui: com `default_model`
+    declarado, `resolve` o anexa ao fim da cadeia e a linha 571 impede que ele
+    seja descartado por tamanho, entao o `kept` nunca fica vazio. O que corre
+    e o caminho normal: o `curto` cai no rastro (574) e o `grande` chega com
+    "taken anyway" (658-659), mas segue para o upstream."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            )
+        },
+        models={
+            "curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/curto",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "tambem_curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/tambem_curto",
+                context_window=100,
+                max_output_tokens=16,
+            ),
+        },
+        routes=[("opus", ["curto"])],
+        default_model="tambem_curto",
+    )
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(422, json={"error": {"message": "prompt too long"}})
+    )
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    pool = UpstreamPool(settings)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", {**BIG_BODY, "model": "my-opus"}, {}), settings, pool)
+    finally:
+        await pool.aclose()
+    # So o default_model foi chamado: o `curto` nem tentou.
+    assert route.call_count == 1
+    assert result.status == 422
+    assert result.body["error"]["type"] == "invalid_request_error"
+    assert "prompt too long" in result.body["error"]["message"]
+    joined = " | ".join(result.trace)
+    # a linha de descarte por tamanho aparece ANTES da tentativa do default
+    assert "vendor/curto: context window too small" in joined
+    # e traz OS NUMEROS do porquê (needed > context_window), como em
+    # capabilities.py -- sem eles o operador nao sabe por quanto passou.
+    assert re.search(
+        r"vendor/curto: context window too small \(\d+ > \d+\)", joined
+    ), f"descarte por tamanho sem numeros no rastro: {joined!r}"
+    assert "vendor/tambem_curto: taken anyway, nothing in the chain fits" in joined
+    assert joined.index("context window too small") < joined.index("taken anyway")
+
+
+@respx.mock
+async def test_a_transparent_candidate_without_a_default_is_tried_despite_the_window_note(
+    monkeypatch,
+):
+    """Transparente SEM default, tentado no laço sem caber: a nota
+    `(estimate > inferred window)` entra no rastro e a chamada SEGUE -- o
+    upstream decide com o 4xx dele, nao o proxy.
+
+    A chave esta em `_chain_for` devolver o transparente (o filtro nunca o
+    descarta) e a linha do laço registra a nota SEM `continue` e segue: uma
+    regra de pulo aqui mataria justamente o ultimo recurso. Caminho publico:
+    `claude-*` sem rota e sem "anthropic" no catalogo e o transparente so da
+    cadeia (como o teste de host oficial acima, mas com um corpo que nao
+    caberia em janela nenhuma do catalogo)."""
+    body = {**BIG_BODY, "model": "claude-opus-4-5"}
+    route = respx.post("https://api.anthropic.com/v1/messages").mock(
+        return_value=httpx.Response(
+            422,
+            json={"type": "error", "error": {"type": "invalid_request_error", "message": "prompt too long"}},
+        )
+    )
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    pool = UpstreamPool(NO_ANTHROPIC_DECLARED)
+    try:
+        result = await dispatch(ShuntRequest("anthropic", body, {}), NO_ANTHROPIC_DECLARED, pool)
+    finally:
+        await pool.aclose()
+    assert route.call_count == 1
+    joined = " | ".join(result.trace)
+    # a nota fica no rastro E a chamada sai para o host oficial
+    assert "context window too small (estimate > inferred window)" in joined
+    assert result.status == 422
+    assert "prompt too long" in result.body["error"]["message"]
+
+
+@respx.mock
+async def test_an_anthropic_result_reports_the_dict_output_config_effort(
+    monkeypatch,
+):
+    """Linha 803 do caminho bufferizado: quando o payload final tem
+    `output_config` como DICT (o caso normal do candidato Anthropic com effort
+    configurado), o `effort` enviado ao upstream e capturado e sai em
+    `ShuntResult.effort`. E o espelho positivo do teste do `output_config`
+    nao-dict acima, e fecha a linha do `.get("effort")`."""
+    from app.core.resolver import Resolution
+
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json=OFFICIAL_ANTHROPIC_OK)
+    )
+    pool = UpstreamPool(EFFORT_SETTINGS)
+    # candidato Anthropic com effort="high": `_override_effort` escreve
+    # output_config={"effort": "high"} no payload final
+    body = {**BODY, "model": "claude-a", "output_config": {"effort": "low"}}
+    try:
+        result = await dispatcher._dispatch(
+            ShuntRequest("anthropic", body, {}),
+            EFFORT_SETTINGS,
+            pool,
+            Resolution("exact", "claude-a", [ANT_HIGH]),
+        )
+    finally:
+        await pool.aclose()
+    assert result.status == 200
+    assert result.effort == "high"
+
+
+@respx.mock
+async def test_an_anthropic_result_with_a_non_dict_output_config_reports_none_effort(
+    monkeypatch,
+):
+    """Linha 803 do caminho bufferizado: o effort enviado vem de
+    `output_config` SO quando ela e dict. Um cliente pode mandar qualquer tipo
+    nesse campo; antes do guard (`isinstance(out_cfg, dict)`) o
+    `payload.get("output_config", {}).get("effort")` levantava AttributeError
+    no caminho 2xx -- a chamada ja tinha dado certo e virava um 500 nosso."""
+    from app.core.resolver import Resolution
+
+    original = dispatcher._payload
+
+    def payload_with_string_config(req, candidate, settings):
+        return {**original(req, candidate, settings), "output_config": "alto"}
+
+    monkeypatch.setattr(dispatcher, "_payload", payload_with_string_config)
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, json=OFFICIAL_ANTHROPIC_OK)
+    )
+    pool = UpstreamPool(EFFORT_SETTINGS)
+    try:
+        result = await dispatcher._dispatch(
+            ShuntRequest("anthropic", {**BODY, "model": "claude-a"}, {}),
+            EFFORT_SETTINGS,
+            pool,
+            Resolution("exact", "claude-a", [ANT_HIGH]),
+        )
+    finally:
+        await pool.aclose()
+    assert result.status == 200
+    # sem crash, e o effort nao inventado: None, nao uma AttributeError
+    assert result.effort is None
+
+
+@respx.mock
+async def test_an_exhausted_provider_is_skipped_and_recorded_with_the_next_candidate_serving(
+    monkeypatch,
+):
+    """678-681 do laço bufferizado: provedor no limite de concorrencia pula o
+    candidato AGORA (na fila dele que a requisicao nao espera) e a linha de
+    rastro diz `busy (1/1 in use)`; o proximo candidato atende."""
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste",
+                max_concurrency=1,
+            ),
+            "groq": ProviderConfig(
+                base_url="https://api.groq.test/v1", protocol="openai", api_key="sk-groq"
+            ),
+        },
+        models={
+            "free": ModelConfig(
+                provider="openrouter",
+                model="vendor/free",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
+            "fast": ModelConfig(
+                provider="groq",
+                model="vendor/fast",
+                context_window=64000,
+                max_output_tokens=8192,
+            ),
+        },
+        routes=[("opus", ["free", "fast"])],
+        default_model=None,
+    )
+    respx.post("https://api.test/v1/chat/completions")
+    respx.post("https://api.groq.test/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json=ok_payload("vendor/fast"))
+    )
+    monkeypatch.setattr(dispatcher, "backoff", lambda attempt: 0.0)
+    pool = UpstreamPool(settings)
+    held = pool.try_slot("openrouter")
+    assert held is not None
+    try:
+        result = await dispatch(ShuntRequest("anthropic", BODY, {}), settings, pool)
+    finally:
+        held.release()
+        await pool.aclose()
+    # o free pulou cheio; o fast respondeu
+    assert result.status == 200
+    assert result.real_model == "vendor/fast"
+    assert any("busy (1/1 in use)" in line for line in result.trace)
 
 
 # --- prazo: um servidor saturado nao pode consumir a cadeia inteira ----------

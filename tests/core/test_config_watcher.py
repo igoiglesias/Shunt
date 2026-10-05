@@ -60,6 +60,12 @@ async def _boot(watcher: ConfigWatcher) -> None:
     await watcher.start()
 
 
+def test_the_unknown_version_sentinel_has_a_stable_repr():
+    """O sentinela `seen` de antes da primeira leitura tem `repr` estavel: o
+    que aparece em log/erro quando o ciclo mostra a versao atual."""
+    assert repr(UNKNOWN_VERSION) == "UNKNOWN_VERSION"
+
+
 async def test_a_new_version_reloads_the_catalog_and_applies_it(tmp_path):
     engine = _engine(tmp_path)
     applied = _Applied()

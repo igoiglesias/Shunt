@@ -17,6 +17,7 @@ from app.core.token_auth import (
     mask_query,
     read_token,
     require_shunt_token,
+    require_shunt_token_or_transparent,
     token_hash,
 )
 from app.main import app
@@ -57,6 +58,52 @@ def test_cache_expires_by_injected_clock_and_invalidates_by_id():
     assert cache.lookup(h) == (False, None)
     cache.put(h, 7); cache.invalidate(7)
     assert cache.lookup(h) == (False, None)
+
+
+def test_purge_drops_only_the_expired_entries():
+    """`purge` varre o cache e remove so o que venceu: a entrada viva sobrevive.
+
+    Sem isso, o cache de validacao enche e o `put` no teto comecaria a
+    descartar entradas vivas por FIFO."""
+    now = [100.0]
+    cache = TokenCache(ttl=60, clock=lambda: now[0])
+    cache.put(token_hash("vivo"), 1)  # vence em 160
+    now[0] = 200.0
+    cache.put(token_hash("novo"), 2)  # vence em 260
+    now[0] = 230.0
+    cache.purge()
+    assert cache.lookup(token_hash("vivo")) == (False, None)  # expirado: sai no purge
+    assert cache.lookup(token_hash("novo")) == (True, 2)  # viva: o purge nao toca
+
+
+def test_put_at_the_ceiling_purges_the_expired_before_evicting():
+    """No teto: `put` chama `purge` e so depois decide evictar. Com uma entrada
+    expirada presente, o purge abre espaco e a entrada VIVA e preservada."""
+    now = [100.0]
+    cache = TokenCache(ttl=60, clock=lambda: now[0], max_entries=2)
+    cache.put(token_hash("vivo"), 1)
+    now[0] = 200.0
+    cache.put(token_hash("morto"), 2)  # ja ocupa uma vaga
+    # Cache cheio (2). O `put` novo dispara purge: o expirado sai, sobra vaga.
+    cache.put(token_hash("novo"), 3)
+    assert cache.lookup(token_hash("vivo")) == (False, None)  # expirou pelo ttl
+    # A entrada expirada saiu sem evictar nenhuma viva pelo FIFO.
+    assert cache.lookup(token_hash("novo")) == (True, 3)
+
+
+def test_put_at_the_ceiling_with_nothing_expired_evicts_one_entry():
+    """No teto sem nada expirado: o purge nao libera nada e o `put` evicta
+    UMA entrada (a mais antiga) para abrir a vaga -- o cache nunca passa do
+    teto."""
+    now = [100.0]
+    cache = TokenCache(ttl=3600, clock=lambda: now[0], max_entries=2)
+    cache.put(token_hash("a"), 1)
+    cache.put(token_hash("b"), 2)
+    cache.put(token_hash("c"), 3)  # teto: purge nao remove nada, evicta "a"
+    # "a" foi evictado (FIFO pela ordem de insercao do dict).
+    assert cache.lookup(token_hash("a")) == (False, None)
+    assert cache.lookup(token_hash("b")) == (True, 2)
+    assert cache.lookup(token_hash("c")) == (True, 3)
 
 
 def _request_with_token_cache(headers: dict, path: str = "/v1/messages") -> Request:
@@ -240,3 +287,158 @@ def test_a_dead_database_counts_a_non_explicit_credential_as_not_a_token(tmp_pat
     request.app.state.recorder = Recorder(engine)
     found = asyncio.run(_lookup(request, token_hash("sk-do-harness"), strict=False))
     assert found is None
+
+
+def _request_without_recorder(headers: dict) -> Request:
+    """Request sem `token_cache` semeado no alvo (miss garantido) e sem
+    `app.state.recorder`: o Shunt sem banco, o caso que cai no ramo `engine is
+    None` de `_lookup`."""
+    request = _request_with_token_cache(headers)
+    request.app.state.token_cache = TokenCache(ttl=3600)
+    request.app.state.token_cache.put(token_hash(TEST_SHUNT_TOKEN), TEST_SHUNT_TOKEN_ID)
+    if hasattr(request.app.state, "recorder"):
+        delattr(request.app.state, "recorder")
+    return request
+
+
+def test_lookup_without_engine_strict_raises_503():
+    """Forma explicita (strict=True) sem banco e sem cache: nao ha como conferir,
+    e a resposta e 503 (R4) -- nunca seguir fingindo que o valor nao e token."""
+    request = _request_without_recorder({})
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(_lookup(request, token_hash("desconhecido"), strict=True))
+    assert exc.value.status == 503
+    assert exc.value.message == "shunt has no database to check the token"
+
+
+def test_lookup_without_engine_non_strict_returns_none():
+    """Credencial do caller (strict=False) sem banco: conta como "nao e token"
+    e devolve None, em vez de derrubar com 503 todo pedido de um Shunt sem
+    banco (o 401 em /api/oauth/usage medido em producao)."""
+    request = _request_without_recorder({})
+    assert asyncio.run(_lookup(request, token_hash("sk-do-harness"), strict=False)) is None
+
+
+def test_require_shunt_token_without_any_credential_is_401():
+    """`require_shunt_token` sem nenhuma credencial (nem explicita, nem
+    `x-api-key`/`Authorization`): 401 pedindo a forma de envio do token."""
+    request = _request_without_recorder({})
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token(request))
+    assert exc.value.status == 401
+    assert "missing shunt token" in exc.value.message
+
+
+def _request_with_fresh_database(tmp_path, headers: dict, token_values: tuple = ()) -> Request:
+    """Request com banco REAL (sqlite em tmp) sem nenhum token semeado no
+    cache: o lookup cai no banco de verdade, e o caminho e o do producao."""
+    engine = create_engine(f"sqlite:///{tmp_path}/vazio.db")
+    Base.metadata.create_all(engine)
+    for value in token_values:
+        with Session(engine) as session:
+            session.add(ApiToken(name="t", token_hash=token_hash(value)))
+            session.commit()
+    request = _request_with_token_cache(headers)
+    request.app.state.token_cache = TokenCache(ttl=3600)
+    request.app.state.recorder = Recorder(engine)
+    return request
+
+
+def test_require_shunt_token_with_an_invalid_explicit_header_is_401(tmp_path):
+    """`x-shunt-token` EXPLICITO que nao existe no banco: 401 "unknown or
+    expired", e nao o 503 do banco ausente -- a recusa e por valor invalido."""
+    request = _request_with_fresh_database(tmp_path, {"x-shunt-token": "token-que-nao-existe"})
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token(request))
+    assert exc.value.status == 401
+    assert exc.value.message == "unknown or expired shunt token"
+
+
+def test_require_shunt_token_or_transparent_without_any_credential_is_401():
+    """A dependencia do relay sem credencial nenhuma: 401 nomeando tambem as
+    formas aceitas (`x-api-key`/`Authorization`) para o bypass transparente."""
+    request = _request_without_recorder({})
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token_or_transparent(request))
+    assert exc.value.status == 401
+    assert exc.value.message.startswith("missing shunt token or caller credentials")
+
+
+def test_require_shunt_token_or_transparent_with_an_invalid_explicit_header_is_401(tmp_path):
+    """Token Shunt explicito invalido no relay: 401 "unknown or expired", o
+    mesmo contrato do v1."""
+    request = _request_with_fresh_database(tmp_path, {"x-shunt-token": "token-que-nao-existe"})
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token_or_transparent(request))
+    assert exc.value.status == 401
+    assert exc.value.message == "unknown or expired shunt token"
+
+
+def test_or_transparent_reuses_the_validated_explicit_token_in_the_credential(tmp_path):
+    """`x-api-key` com o MESMO valor do token explicito ja validado: nao ha
+    segundo lookup, o header entra em `token_headers` (para ser removido no
+    repasse), mas a flag de credencial fica FALSA -- ali ja e o token."""
+    request = _request_with_fresh_database(
+        tmp_path, {"x-shunt-token": "tk-1", "x-api-key": "tk-1"}, token_values=("tk-1",)
+    )
+    token_id = asyncio.run(require_shunt_token_or_transparent(request))
+    assert token_id == 1
+    assert request.state.credential_is_token is False
+    assert request.state.token_headers == frozenset({"x-api-key"})
+
+
+def test_or_transparent_accepts_a_shunt_token_hidden_in_the_credential(tmp_path):
+    """`x-api-key` que NAO e o token explicito mas CASOU no banco como token
+    Shunt: autentica pelo token (a flag de credencial sobe para o dispatcher
+    injetar a chave do catalogo, e nao repassar o token como segredo)."""
+    request = _request_with_fresh_database(tmp_path, {"x-api-key": "tk-1"}, token_values=("tk-1",))
+    token_id = asyncio.run(require_shunt_token_or_transparent(request))
+    assert token_id == 1
+    assert request.state.credential_is_token is True
+    assert request.state.token_headers == frozenset({"x-api-key"})
+
+
+def test_require_shunt_token_on_an_exempt_path_skips_everything(monkeypatch):
+    """Path em `EXEMPT_PATHS`: nem header, nem banco, nem cache -- autenticacao
+    desligada e `shunt_token_id` 0 (isento)."""
+    from app.core import token_auth
+
+    monkeypatch.setattr(token_auth, "EXEMPT_PATHS", frozenset({"/v1/messages"}))
+    request = _request_without_recorder({})  # sem credencial nenhuma: o path isento salva
+    token_id = asyncio.run(require_shunt_token(request))
+    assert token_id == 0
+    assert request.state.shunt_token_id is None
+    assert request.state.token_headers == frozenset()
+
+
+def test_require_shunt_token_or_transparent_on_an_exempt_path_skips_everything(monkeypatch):
+    """Idem para a dependencia do relay: path isento volta 0 sem checar nada."""
+    from app.core import token_auth
+
+    monkeypatch.setattr(token_auth, "EXEMPT_PATHS", frozenset({"/v1/messages"}))
+    request = _request_without_recorder({})
+    token_id = asyncio.run(require_shunt_token_or_transparent(request))
+    assert token_id == 0
+    assert request.state.shunt_token_id is None
+    assert request.state.token_headers == frozenset()
+
+
+def test_require_shunt_token_conflicting_forms_is_400():
+    """Duas formas EXPLICITAS com valores diferentes: 400 antes de qualquer
+    validacao (o cliente mandou o token em mais de um lugar errado)."""
+    request = _request_without_recorder({"x-shunt-token": "abc"})
+    request.scope["query_string"] = b"token=xyz"
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token(request))
+    assert exc.value.status == 400
+    assert "more than one form" in exc.value.message
+
+
+def test_require_shunt_token_or_transparent_conflicting_forms_is_400():
+    """Mesma regra para a dependencia do relay."""
+    request = _request_without_recorder({"x-shunt-token": "abc"})
+    request.scope["query_string"] = b"token=xyz"
+    with pytest.raises(TokenRejected) as exc:
+        asyncio.run(require_shunt_token_or_transparent(request))
+    assert exc.value.status == 400
+    assert "more than one form" in exc.value.message

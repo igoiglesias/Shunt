@@ -36,6 +36,8 @@ You have been invoked in the following environment:
         ({"system": BLOCO, "messages": []}, CAMINHO),
         # No campo `system` como lista de blocos.
         ({"system": [{"type": "text", "text": BLOCO}], "messages": []}, CAMINHO),
+        # `content` como lista com bloco puro (string solta, sem wrapper de dict).
+        ({"messages": [{"role": "user", "content": ["oi", BLOCO]}]}, CAMINHO),
         # Caminho curto, com a linha seguinte colada.
         ({"system": "Primary working directory: /tmp\n - Is a git repository: false"}, "/tmp"),
         # Caminho com espaco: o corte e na quebra de linha, nao no espaco.
@@ -63,6 +65,13 @@ def test_corpo_sem_o_bloco_ou_torto_devolve_none(corpo):
     assert mod.project_of(corpo) is None
 
 
+def test_corpo_que_nao_e_dicionario_devolve_none_sem_levantar():
+    """Nada aqui levanta: corpo que nem e objeto (lista, string, None) vira
+    `None`, nunca uma excecao que mataria a requisicao."""
+    for corpo in ("texto puro", ["bloco"], None, 42):
+        assert mod.project_of(corpo) is None
+
+
 def test_le_a_sessao_do_metadata():
     corpo = {"metadata": {"user_id": '{"device_id":"d","session_id":"abc-123"}'}}
 
@@ -80,6 +89,43 @@ def test_le_a_sessao_do_metadata():
 )
 def test_sessao_ausente_ou_torta_devolve_none(corpo):
     assert mod.session_of(corpo) is None
+
+
+def test_sessao_de_corpo_que_nao_e_dicionario_devolve_none():
+    """Corpo que nem e objeto: `session_of` devolve `None` sem levantar."""
+    for corpo in ("texto", ["x"], None, 42):
+        assert mod.session_of(corpo) is None
+
+
+@pytest.mark.parametrize(
+    "corpo",
+    [
+        {"metadata": {"user_id": "[]"}},   # lista, sem session_id
+        {"metadata": {"user_id": '"abc"'}},  # escalar JSON, nao dict
+        {"metadata": {"user_id": "null"}},
+    ],
+)
+def test_user_id_que_e_json_valido_mas_nao_objeto_devolve_none(corpo):
+    """`user_id` parseia como JSON mas nao e um objeto: nao ha session_id."""
+    assert mod.session_of(corpo) is None
+
+
+@pytest.mark.parametrize(
+    "corpo",
+    [
+        {"metadata": {"user_id": 42}},  # nao string: nem chega no json.loads
+        {"metadata": {"user_id": None}},
+        {"metadata": {"outra_chave": '{"session_id":"x"}'}},
+    ],
+)
+def test_user_id_que_nao_e_string_devolve_none(corpo):
+    """`user_id` ausente ou de outro tipo: a extracao para antes do JSON."""
+    assert mod.session_of(corpo) is None
+
+
+def test_sessao_de_outro_tipo_e_string_devolve_none():
+    """`session_id` presente mas nao-string (numero) nao vira sessao."""
+    assert mod.session_of({"metadata": {"user_id": '{"session_id": 123}'}}) is None
 
 
 def test_a_sessao_carrega_o_projeto_para_as_requisicoes_seguintes():

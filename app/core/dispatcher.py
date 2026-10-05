@@ -571,7 +571,8 @@ def _chain_for(
             if candidate.alias == default_alias:
                 kept.append(candidate)
                 continue
-            dropped_lines.append((candidate.model, SIZE_DROP))
+            needed = reqs.input_tokens + reqs.output_tokens
+            dropped_lines.append((candidate.model, f"{SIZE_DROP} ({needed} > {model.context_window})"))
             dropped = True
         if not dropped:
             kept.append(candidate)
@@ -657,8 +658,9 @@ async def _dispatch(
                 if is_default:
                     trace.append(f"{label}: taken anyway, nothing in the chain fits")
                 else:
-                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")
-                    continue
+                    # Inalcançável: _chain_for já descartou não-default por tamanho.
+                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")  # pragma: no cover
+                    continue  # pragma: no cover
         elif candidate.transparent:
             # transparente SEM default: é o último recurso, tenta mesmo não cabendo
             # registra o tamanho no rastro
@@ -1178,8 +1180,9 @@ async def _stream_chain(
                 if is_default:
                     trace.append(f"{label}: taken anyway, nothing in the chain fits")
                 else:
-                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")
-                    continue
+                    # Inalcançável: _chain_for já descartou não-default por tamanho.
+                    trace.append(f"{label}: context window too small ({reqs.input_tokens + reqs.output_tokens} > {model.context_window})")  # pragma: no cover
+                    continue  # pragma: no cover
         elif candidate.transparent:
             # transparente SEM default: é o último recurso, tenta mesmo não cabendo
             # registra o tamanho no rastro

@@ -10,6 +10,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import httpx
+import pytest
 import respx
 
 from app.core import observability
@@ -438,6 +439,37 @@ def test_a_request_without_measured_duration_started_when_it_ended(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# as_event: effort vai para o evento, nunca some no caminho
+# --------------------------------------------------------------------------
+
+
+def test_as_event_copies_the_effort_from_the_entry():
+    """O dict do evento copia `entry.effort` (observability.py:257).
+
+    Antes da correcao a chave nao existia: o dispatcher media o effort
+    aplicado, mas a coluna do banco ficava sempre NULL mesmo com o effort
+    tendo ido para o upstream. Sem esta linha o teste falha com KeyError."""
+    entry = RequestLog(
+        request_id="r", requested_model="m", rule="exact", matched=None,
+        candidate=None, effort="high",
+    )
+    assert observability.as_event(entry)["effort"] == "high"
+
+
+def test_as_event_keeps_a_missing_effort_as_none():
+    """Sem effort aplicado (`entry.effort` None) o evento grava NULL, nunca uma
+    chave ausente: a coluna nova precisa do valor para separar silencio de
+    sobrescrita no painel."""
+    entry = RequestLog(
+        request_id="r", requested_model="m", rule="exact", matched=None,
+        candidate=None,
+    )
+    event = observability.as_event(entry)
+    assert "effort" in event
+    assert event["effort"] is None
+
+
+# --------------------------------------------------------------------------
 # kind: o painel precisa separar requisicao de modelo do trafego repassado
 # --------------------------------------------------------------------------
 
@@ -533,6 +565,73 @@ def test_log_relay_logs_a_line_and_stores_without_the_panel_bus(caplog):
     assert event["requested_model"] == ""
     assert event["input_tokens"] == 0
     assert event["candidate_model"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (504, "upstream_timeout"),
+        (502, "upstream_unreachable"),
+    ],
+)
+def test_log_relay_infers_the_error_type_from_the_status(caplog, status, expected):
+    """`log_relay` com `error_type=None`: 504 vira `upstream_timeout`, 502
+    vira `upstream_unreachable` -- a linha do log E o evento gravado usam o
+    nome inferido. Sem essa inferencia, um painel filtrando por `error_type`
+    nunca veria o repasse que o upstream nao respondeu."""
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    with caplog.at_level(logging.INFO, logger="shunt"):
+        try:
+            observability.set_recorder(spy)
+            observability.log_relay(observability.RelayLog(
+                path="/t/secreto/api/v1/messages",
+                target="anthropic",
+                status=status,
+                error_type=None,
+                duration_ms=5,
+            ))
+        finally:
+            observability.set_recorder(original)
+
+    linha = lines(caplog)[-1]
+    assert linha["status"] == status
+    assert linha["error_type"] == expected
+    event = spy.stored[0]
+    assert event["error_type"] == expected
+
+
+def test_log_relay_keeps_the_error_type_the_caller_already_named(caplog):
+    """So 504/502 inferem: um `error_type` ja nomeado pelo chamador e a unica
+    verdade -- inferir por cima apagaria o motivo real. E um outro status com
+    `error_type=None` nao inventa nada: fica nulo."""
+    spy = _SpyRecorder()
+    original = observability.recorder()
+    with caplog.at_level(logging.INFO, logger="shunt"):
+        try:
+            observability.set_recorder(spy)
+            observability.log_relay(observability.RelayLog(
+                path="/t/secreto/api/v1/messages",
+                target="openai",
+                status=502,
+                error_type="dns_failure",
+                duration_ms=5,
+            ))
+            observability.log_relay(observability.RelayLog(
+                path="/t/secreto/api/v1/messages",
+                target="openai",
+                status=500,
+                error_type=None,
+                duration_ms=5,
+            ))
+        finally:
+            observability.set_recorder(original)
+
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas[-2]["error_type"] == "dns_failure"
+    assert linhas[-1]["error_type"] is None
+    assert spy.stored[0]["error_type"] == "dns_failure"
+    assert spy.stored[1]["error_type"] is None
 
 
 # --------------------------------------------------------------------------

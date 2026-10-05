@@ -1757,6 +1757,125 @@ async def test_a_mixed_size_and_capability_drop_does_not_take_the_ladder(caplog)
 
 
 @respx.mock
+async def test_stream_the_size_drop_note_precedes_the_default_answer_in_the_trace(caplog):
+    """Streaming, espelho do caminho bufferizado (1181-1182): o candidato que
+    nao cabe e pulado COM a linha de tamanho no rastro, e o `default_model`
+    (neste caso "native") responde. A linha de log do banco carrega a ordem:
+    descarte por tamanho ANTES da resposta do default."""
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            content=b"event: message_start\n\nevent: message_stop\n\n",
+        )
+    )
+    # Rota "opus": [tiny (caiba por tamanho), native (default amarrado)]
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            ),
+            "anthropic": ProviderConfig(
+                base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
+            ),
+        },
+        models={
+            "tiny": ModelConfig(
+                provider="openrouter",
+                model="vendor/tiny",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            # window apertada de proposito: o default TAMBEM nao cabe, e por
+            # isso a linha "taken anyway" aparece (1177-1179 do laço) -- mas a
+            # chamada segue e o stream responde
+            "native": ModelConfig(
+                provider="anthropic", model="claude-real", context_window=100, max_output_tokens=16
+            ),
+        },
+        routes=[("opus", ["tiny"])],
+        default_model="native",
+    )
+    body = {
+        "model": "my-opus",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+    }
+    pool = UpstreamPool(settings)
+    stream = dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "a requisicao nao foi registrada"
+    linha = linhas[-1]
+    # a linha do default e a nota de descarte, nesta ordem
+    joined = "\n".join(linha["attempts"])
+    assert "vendor/tiny: context window too small" in joined
+    assert "claude-real: taken anyway, nothing in the chain fits" in joined
+    assert joined.index("context window too small") < joined.index("taken anyway")
+    assert linha["candidate"] == "claude-real"
+
+
+@respx.mock
+async def test_stream_nothing_fits_and_the_upstream_422_is_reported_in_band(caplog):
+    """Streaming, sintoma da producao: NADA cabe (nem o default) e o proxy
+    ainda tenta o `default_model`; o 4xx do upstream volta como evento de
+    erro no fio (502/api_error no envelope, com a mensagem do upstream) e a
+    linha do banco registra a nota de tamanho antes da recusa."""
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(422, json={"error": {"message": "prompt too long"}})
+    )
+    settings = Settings(
+        providers={
+            "openrouter": ProviderConfig(
+                base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+            )
+        },
+        models={
+            "curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/curto",
+                context_window=50,
+                max_output_tokens=16,
+            ),
+            "tambem_curto": ModelConfig(
+                provider="openrouter",
+                model="vendor/tambem_curto",
+                context_window=100,
+                max_output_tokens=16,
+            ),
+        },
+        routes=[("opus", ["curto"])],
+        default_model="tambem_curto",
+    )
+    body = {
+        "model": "my-opus",
+        "max_tokens": 64,
+        "stream": True,
+        "messages": [{"role": "user", "content": "x" * 8000}],
+    }
+    pool = UpstreamPool(settings)
+    stream = dispatch_stream(ShuntRequest("anthropic", body, {}), settings, pool)
+    fio = b""
+    with caplog.at_level("INFO", logger="shunt"):
+        fio = b"".join([chunk async for chunk in stream])
+    await pool.aclose()
+    texto = fio.decode()
+    # erro no fio com a mensagem do upstream, nao um 400 nosso
+    assert "prompt too long" in texto
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas
+    joined = "\n".join(linhas[-1]["attempts"])
+    assert "vendor/curto: context window too small" in joined
+    assert "vendor/tambem_curto: taken anyway, nothing in the chain fits" in joined
+    assert "422" in joined
+    # a recusa do upstream e quem respondeu no fim da cadeia
+    assert linhas[-1]["candidate"] is None
+
+
+@respx.mock
 async def test_an_empty_chain_with_mixed_drops_errors_with_the_trace(caplog):
     """Cadeia inteira descartada com motivo misto (tamanho + capacidade) e
     sem escada resolvel: o erro do fio leva os dois motivos e a linha do
@@ -2234,3 +2353,195 @@ async def test_a_chain_skipped_whole_keeps_provider_none(caplog):
     assert linhas[-1]["status"] == 400
     # Nenhum upstream foi chamado: nao ha provider para nomear.
     assert linhas[-1]["provider"] is None
+
+
+# --------------------------------------------------------------------------
+# Effort na linha gravada pelo stream
+# --------------------------------------------------------------------------
+
+# Candidato Anthropic configurado com effort: o override escreve
+# `output_config` no payload final e nenhuma das chaves do dialeto OpenAI
+# (`reasoning_effort`) existe no corpo que sai para o provedor.
+EFFORT_ANT_SETTINGS = Settings(
+    providers={
+        "anthropic": ProviderConfig(
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk-teste"
+        )
+    },
+    models={
+        "high": ModelConfig(
+            provider="anthropic", model="claude-high", context_window=64000,
+            max_output_tokens=8192, effort="high",
+        )
+    },
+    routes=[("opus-high", ["high"])],
+    default_model=None,
+)
+
+_ANT_DELTA = (
+    b'event: content_block_delta\ndata: '
+    b'{"type": "content_block_delta", "index": 0, '
+    b'"delta": {"type": "text_delta", "text": "oi"}}\n\n'
+)
+
+
+async def _last_shunt_line(caplog) -> dict:
+    linhas = [json.loads(r.message) for r in caplog.records if r.name == "shunt"]
+    assert linhas, "nenhuma linha do proxy foi registrada"
+    return linhas[-1]
+
+
+@respx.mock
+async def test_raw_anthropic_passthrough_stream_logs_the_output_config_effort(caplog):
+    """Passthrough cru anthropic -> anthropic: o effort vive em
+    `output_config.effort`, nunca em `reasoning_effort`.
+
+    Antes da correcao (dispatcher.py:1361-1364) o ramo de passthrough lia
+    SO `payload.get("reasoning_effort")`, que num corpo Anthropic nao existe:
+    a linha do banco gravava effort NULL mesmo com o effort "high" tendo ido
+    para o upstream."""
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(_ANT_DELTA))
+    )
+    pool = UpstreamPool(EFFORT_ANT_SETTINGS)
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", {"model": "opus-high", "max_tokens": 16}, {}),
+        EFFORT_ANT_SETTINGS,
+        pool,
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linha = await _last_shunt_line(caplog)
+    assert linha["stream"] is True
+    assert linha["candidate"] == "claude-high"
+    assert linha["effort"] == "high"
+
+
+@respx.mock
+async def test_translated_anthropic_stream_logs_the_candidate_output_config_effort(caplog):
+    """Cliente OpenAI, candidato Anthropic: o ramo `state.committed` do
+    `_stream_candidate` (dispatcher.py:1428-1431) guarda o effort no mesmo
+    lugar dos outros ramos do guard -- `output_config` como dict."""
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(_ANT_DELTA))
+    )
+    pool = UpstreamPool(EFFORT_ANT_SETTINGS)
+    stream = dispatch_stream(
+        ShuntRequest(
+            "openai",
+            {
+                "model": "opus-high",
+                "max_tokens": 16,
+                "stream": True,
+                "messages": [{"role": "user", "content": "oi"}],
+            },
+            {},
+        ),
+        EFFORT_ANT_SETTINGS,
+        pool,
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linha = await _last_shunt_line(caplog)
+    assert linha["candidate"] == "claude-high"
+    assert linha["effort"] == "high"
+
+
+@respx.mock
+async def test_translated_anthropic_stream_error_after_start_still_logs_the_effort(caplog):
+    """O site `state.committed` (dispatcher.py:1428-1431): o erro in-band
+    chegado DEPOIS do primeiro chunk vale como commit, e o effort e lido do
+    `output_config` antes do 502 -- o mesmo lugar dos outros ramos do guard."""
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(
+            200,
+            headers=SSE_HEADERS,
+            stream=Chunks(_ANT_DELTA, b'event: error\ndata: {"type": "error", "error": {"message": "caiu"}}\n\n'),
+        )
+    )
+    pool = UpstreamPool(EFFORT_ANT_SETTINGS)
+    stream = dispatch_stream(
+        ShuntRequest(
+            "openai",
+            {
+                "model": "opus-high",
+                "max_tokens": 16,
+                "stream": True,
+                "messages": [{"role": "user", "content": "oi"}],
+            },
+            {},
+        ),
+        EFFORT_ANT_SETTINGS,
+        pool,
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linha = await _last_shunt_line(caplog)
+    assert linha["status"] == 502
+    assert linha["error_type"] == "api_error"
+    assert linha["effort"] == "high"
+
+
+@respx.mock
+async def test_translated_anthropic_stream_that_ends_on_its_own_logs_the_effort_from_the_close(caplog):
+    """O site do fecho normal (dispatcher.py:1450-1453): o corpo terminou sem
+    erro in-band (sem commit fatal) e o effort e lido antes do `_finish`.
+    Traducao OpenAI <- Anthropic: o delta abre a mensagem e o fim do corpo
+    fecha a linha so aqui."""
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(_ANT_DELTA))
+    )
+    pool = UpstreamPool(EFFORT_ANT_SETTINGS)
+    stream = dispatch_stream(
+        ShuntRequest(
+            "openai",
+            {
+                "model": "opus-high",
+                "max_tokens": 16,
+                "stream": True,
+                "messages": [{"role": "user", "content": "oi"}],
+            },
+            {},
+        ),
+        EFFORT_ANT_SETTINGS,
+        pool,
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linha = await _last_shunt_line(caplog)
+    assert linha["status"] == 200
+    assert linha["effort"] == "high"
+
+
+@respx.mock
+async def test_anthropic_stream_with_a_non_dict_output_config_logs_none_effort(monkeypatch, caplog):
+    """O guard `isinstance(out_cfg, dict)` dos tres sites: um cliente pode
+    mandar `output_config` de qualquer tipo, e sem o guard o
+    `payload.get("output_config", {}).get("effort")` levantava AttributeError
+    num stream que ja tinha dado certo -- a mesma classe do bug do caminho
+    bufferizado travado em test_dispatcher.py. Nao-dict grava NULL, nao crash."""
+    original = dispatcher._payload
+
+    def payload_with_string_config(req, candidate, settings):
+        return {**original(req, candidate, settings), "output_config": "alto"}
+
+    monkeypatch.setattr(dispatcher, "_payload", payload_with_string_config)
+    respx.post("https://api.anthropic.test/v1/messages").mock(
+        return_value=httpx.Response(200, headers=SSE_HEADERS, stream=Chunks(_ANT_DELTA))
+    )
+    pool = UpstreamPool(EFFORT_ANT_SETTINGS)
+    stream = dispatch_stream(
+        ShuntRequest("anthropic", {"model": "opus-high", "max_tokens": 16}, {}),
+        EFFORT_ANT_SETTINGS,
+        pool,
+    )
+    with caplog.at_level("INFO", logger="shunt"):
+        await collect_into(stream)
+    await pool.aclose()
+    linha = await _last_shunt_line(caplog)
+    assert linha["status"] == 200
+    assert linha["effort"] is None

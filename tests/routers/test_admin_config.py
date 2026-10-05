@@ -5,7 +5,9 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -1739,3 +1741,254 @@ def test_rollback_of_an_old_snapshot_without_the_effort_restores_null(monkeypatc
     with Session(app.state.recorder.engine) as s:
         assert s.execute(select(Model)).scalar_one().effort is None
     assert app.state.settings.models["m1"].effort is None
+
+
+# ---- Lacunas de cobertura: helpers, test_provider, form-reset e 404s -------
+
+
+def test_create_config_version_prunes_versions_beyond_the_last_five(monkeypatch, tmp_path):
+    """create_config_version recicla o historico: apos criar a 7a versao,
+    as duas mais antigas (ids 1 e 2) sao deletadas e as cinco recentes
+    sobrevivem."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path):
+        with Session(app.state.recorder.engine) as s:
+            for _ in range(6):
+                s.add(ConfigVersion(snapshot_json="{}"))
+            s.commit()
+            create_config_version(s)
+        with Session(app.state.recorder.engine) as s:
+            ids = [v.id for v in s.execute(select(ConfigVersion).order_by(ConfigVersion.id)).scalars().all()]
+    assert ids == [3, 4, 5, 6, 7]
+
+
+@respx.mock
+def test_test_provider_openai_success_reports_connected(monkeypatch, tmp_path):
+    """protocol=openai: GET {base}/v1/models; sem /v1 no base_url o endpoint
+    adiciona. Sucesso -> 200 com 'Conectado' e a chave vai no Bearer."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    route = respx.get("https://up.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": []})
+    )
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test", "protocol": "openai", "api_key": "chave"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    assert "Conectado" in r.text
+    sent = route.calls.last.request
+    assert sent.url == "https://up.test/v1/models"
+    assert sent.headers["authorization"] == "Bearer chave"
+
+
+@respx.mock
+def test_test_provider_anthropic_posts_a_ping_with_headers(monkeypatch, tmp_path):
+    """protocol=anthropic: POST {base}/v1/messages com body minimo 'ping' e
+    anthropic-version; sem api_key, sem header Authorization."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    route = respx.post("https://up.test/v1/messages").mock(
+        return_value=httpx.Response(200, json={"id": "msg_x"})
+    )
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test/v1", "protocol": "anthropic"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 200
+    assert "Conectado" in r.text
+    sent = route.calls.last.request
+    assert sent.method == "POST"
+    body = json.loads(sent.content)
+    assert body["model"] == "ping"
+    assert body["messages"] == [{"role": "user", "content": "ping"}]
+    assert sent.headers["anthropic-version"] == "2023-06-01"
+    assert "authorization" not in sent.headers
+
+
+@respx.mock
+def test_test_provider_upstream_error_is_reported_as_400(monkeypatch, tmp_path):
+    """Upstream fora do sucesso (aqui 401) -> 400 com o codigo e o corpo do
+    upstream no fragmento."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    respx.get("https://up.test/v1/models").mock(
+        return_value=httpx.Response(401, text="invalid api key")
+    )
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert "401" in r.text
+    assert "invalid api key" in r.text
+
+
+@respx.mock
+def test_test_provider_timeout_is_408(monkeypatch, tmp_path):
+    """TimeoutException no upstream -> 408 'Timeout (10s)'."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    respx.get("https://up.test/v1/models").mock(
+        side_effect=httpx.ReadTimeout("estourou os 10s")
+    )
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 408
+    assert "Timeout" in r.text
+
+
+@respx.mock
+def test_test_provider_connection_error_is_500_with_error_name(monkeypatch, tmp_path):
+    """HTTPError nao-timeout (aqui ConnectError) -> 500 com o nome da classe
+    e a mensagem truncada no fragmento."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    respx.get("https://up.test/v1/models").mock(
+        side_effect=httpx.ConnectError("conexao recusada")
+    )
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test", "protocol": "openai"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 500
+    assert "ConnectError" in r.text
+
+
+@respx.mock
+def test_test_provider_unknown_protocol_is_400(monkeypatch, tmp_path):
+    """protocol fora de (openai, anthropic) -> 400 sem nenhuma chamada saida."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.post(
+            "/admin/config/providers/test",
+            data={"base_url": "https://up.test", "protocol": "gemini"},
+            cookies=COOKIE,
+        )
+    assert r.status_code == 400
+    assert "Protocolo desconhecido" in r.text
+
+
+def test_form_reset_unknown_section_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.get("/admin/config/sections/banana/form-reset", cookies=COOKIE)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Secao desconhecida"
+
+
+def test_form_reset_known_section_returns_empty_anchor(monkeypatch, tmp_path):
+    """Secao valida -> ancora vazia `id="{secao}-form"` para o swap outerHTML."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.get("/admin/config/sections/model/form-reset", cookies=COOKIE)
+    assert r.status_code == 200
+    assert r.text == '<div id="model-form"></div>'
+
+
+def test_create_model_as_default_unsets_the_previous_default(monkeypatch, tmp_path):
+    """Criar um modelo com is_default limpa o default anterior: so um
+    default por vez no banco."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(Model(alias="antigo", provider_id=p.id, upstream_model="x", context_window=1024, max_output_tokens=128, is_default=True))
+            s.commit()
+        r = c.post("/admin/config/models", data={
+            "alias": "novo", "provider_id": "1", "upstream_model": "y",
+            "is_default": "true",
+            "context_window": "2048", "max_output_tokens": "256",
+        }, cookies=COOKIE, follow_redirects=False)
+    assert r.status_code == 200
+    with Session(app.state.recorder.engine) as s:
+        defaults = [m.alias for m in s.execute(select(Model).where(Model.is_default == True)).scalars().all()]
+        antigo = s.execute(select(Model).where(Model.alias == "antigo")).scalar_one()
+    assert defaults == ["novo"]
+    assert antigo.is_default is False
+
+
+def test_delete_model_unknown_alias_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.delete("/admin/config/models/nao-existe", cookies=COOKIE)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Model nao encontrado"
+
+
+def test_delete_free_model_removes_it_and_applies_settings(monkeypatch, tmp_path):
+    """Model fora de rota e nao-default some do banco, a config ao vivo o
+    perde e o endpoint devolve a lista re-renderizada."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            p = Provider(name="p1", base_url="u", protocol="openai"); s.add(p); s.flush()
+            s.add(Model(alias="livre", provider_id=p.id, upstream_model="x", context_window=1024, max_output_tokens=128))
+            s.commit()
+        assert c.post("/admin/config/reload", cookies=COOKIE).status_code == 200
+        assert "livre" in app.state.settings.models
+        r = c.delete("/admin/config/models/livre", cookies=COOKIE)
+    assert r.status_code == 200
+    assert "livre" not in r.text
+    with Session(app.state.recorder.engine) as s:
+        assert s.execute(select(Model).where(Model.alias == "livre")).scalar_one_or_none() is None
+    assert "livre" not in app.state.settings.models
+
+
+def test_edit_model_form_unknown_alias_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.get("/admin/config/models/nao-existe/edit", cookies=COOKIE)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Model nao encontrado"
+
+
+def test_patch_route_empty_pattern_is_400(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.patch("/admin/config/routes/1", data={"pattern": "", "candidates": ["free"]}, cookies=COOKIE)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Pattern obrigatorio"
+
+
+def test_patch_route_no_candidates_is_400(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.patch("/admin/config/routes/1", data={"pattern": "x", "candidates": []}, cookies=COOKIE)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Pelo menos um candidato obrigatorio"
+
+
+def test_patch_route_unknown_candidate_is_400(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        with Session(app.state.recorder.engine) as s:
+            rt = Route(pattern="pat", order_index=0); s.add(rt); s.commit()
+            route_id = rt.id
+        r = c.patch(f"/admin/config/routes/{route_id}", data={"pattern": "pat", "candidates": ["fantasma"]}, cookies=COOKIE)
+    assert r.status_code == 400
+    assert r.json()["detail"] == "Model fantasma nao existe"
+
+
+def test_edit_route_form_unknown_id_is_404(monkeypatch, tmp_path):
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.get("/admin/config/routes/999/edit", cookies=COOKIE)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Route nao encontrado"
+
+
+def test_edit_provider_form_unknown_name_is_404(monkeypatch, tmp_path):
+    """GET do form de edicao de provider sem o provider no banco -> 404."""
+    monkeypatch.setenv("ADMIN_TOKEN", "t")
+    with client(tmp_path) as c:
+        r = c.get("/admin/config/providers/nao-existe/edit", cookies=COOKIE)
+    assert r.status_code == 404
+    assert r.json()["detail"] == "Provider nao encontrado"

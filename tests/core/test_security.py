@@ -166,3 +166,21 @@ class TestDecodeJwt:
             algorithm=_ALGORITHM,
         )
         assert decode_jwt(token, secret) is None
+
+    def test_decode_token_without_sub_returns_none(self):
+        """Token JWT valido mas sem claim `sub` -> None.
+
+        O RFC 7519 nao exige `sub`; um token assinado com segredo correto
+        mas sem `sub` nao identifica um usuario e deve cair como decode ruim.
+        """
+        import jwt as pyjwt
+
+        from app.core.security import _ALGORITHM
+
+        secret = "segredo-de-teste"
+        token = pyjwt.encode(
+            {"exp": 9999999999, "custom_claim": "value"},
+            secret,
+            algorithm=_ALGORITHM,
+        )
+        assert decode_jwt(token, secret) is None

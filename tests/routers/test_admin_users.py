@@ -6,6 +6,7 @@ usam engine SQLite temporaria por teste.
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -294,3 +295,57 @@ def test_require_admin_on_all_routes(tmp_path):
             _create_user(s, "bob")
         r = c.get("/admin/users/bob/edit", follow_redirects=False)
         assert r.status_code in (302, 303)
+
+def test_create_user_missing_username_or_password_is_422(tmp_path):
+    """Campo ausente no form chega como None (o Starlette trata o valor vazio
+    como ausente): o contrato HTTP e 422 do FastAPI, nao o 400 da guarda."""
+    with client(tmp_path) as c:
+        engine = app.state.recorder.engine
+        r1 = c.post("/admin/users", data={"username": "", "password": "senha123"}, cookies=_cookie(), follow_redirects=False)
+        r2 = c.post("/admin/users", data={"username": "novo", "password": ""}, cookies=_cookie(), follow_redirects=False)
+    assert r1.status_code == 422
+    assert r2.status_code == 422
+    with Session(engine) as s:
+        assert s.execute(select(User)).scalars().all() == []
+
+
+async def test_create_user_rejects_blank_username_before_touching_the_db(monkeypatch):
+    """A guarda `if not username or not password` (admin_users.py:64-65) e
+    inalcançavel pelo HTTP: o form nao entrega string vazia (o Starlette
+    trata vazio como ausente e o FastAPI responde 422 antes do handler).
+    Com username vazio em chamada direta o handler levanta o 400 ANTES de
+    tocar na engine, o que prova a ordem da guarda."""
+    from fastapi import HTTPException
+
+    from app.routers import admin_users
+    from app.routers.admin_users import create_user
+
+    def boom(*args, **kwargs):
+        raise AssertionError("banco tocado antes da guarda")
+
+    monkeypatch.setattr(admin_users, "request_engine", boom)
+    with pytest.raises(HTTPException) as exc:
+        await create_user(request=None, username="", password="senha123", _=None)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Usuario e senha sao obrigatorios"
+
+
+def test_edit_user_form_unknown_is_404(tmp_path):
+    with client(tmp_path) as c:
+        r = c.get("/admin/users/nao-existe/edit", cookies=_cookie())
+    assert r.status_code == 404
+    assert "Usuario nao encontrado" in r.text
+
+
+def test_update_user_unknown_is_404(tmp_path):
+    with client(tmp_path) as c:
+        r = c.patch("/admin/users/nao-existe", data={"new_username": "x"}, cookies=_cookie(), follow_redirects=False)
+    assert r.status_code == 404
+    assert "Usuario nao encontrado" in r.text
+
+
+def test_delete_user_unknown_is_404(tmp_path):
+    with client(tmp_path) as c:
+        r = c.delete("/admin/users/nao-existe", cookies=_cookie(), follow_redirects=False)
+    assert r.status_code == 404
+    assert "Usuario nao encontrado" in r.text
