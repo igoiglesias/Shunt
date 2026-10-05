@@ -84,6 +84,9 @@ class RequestLog:
     # O cache que o provedor reportou, quando reportou.
     cached_input_tokens: int | None = None
     cache_write_tokens: int | None = None
+    # O effort configurado no modelo (se houver) que foi aplicado na requisicao.
+    # None = o effort do harness passou; string = o modelo sobrescreveu.
+    effort: str | None = None
     # O texto da conversa, quando `SHUNT_STORE_BODIES` esta ligado. Fica FORA
     # do que vai para o log: uma conversa inteira no stdout do proxy seria
     # outra coisa, e o log e lido por quem so quer a linha estruturada.

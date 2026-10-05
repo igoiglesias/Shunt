@@ -170,6 +170,7 @@ class ShuntResult:
     real_model: str | None = None
     trace: list[str] = field(default_factory=list)
     real_provider: str | None = None
+    effort: str | None = None
 
 
 def _client_presented_credential(req: ShuntRequest) -> bool:
@@ -516,6 +517,7 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             session_id=session_id,
             cached_input_tokens=cached,
             cache_write_tokens=cache_written,
+            effort=result.effort,
             body=bodies.capture(
                 bodies.prompt_text(req.body), bodies.answer_text(result.body), req.body
             ),
@@ -793,8 +795,14 @@ async def _attempts(
                 tally.last_message = "upstream 2xx body is not a usable JSON object"
                 trace.append(f"{label}: unreadable body (attempt {attempt})")
                 return None
+            # Effort que foi efetivamente enviado ao upstream (ja no payload)
+            sent_effort = None
+            if candidate.protocol == "anthropic":
+                sent_effort = payload.get("output_config", {}).get("effort")
+            else:
+                sent_effort = payload.get("reasoning_effort")
             return ShuntResult(
-                response.status_code, data, candidate.model, trace, candidate.provider
+                response.status_code, data, candidate.model, trace, candidate.provider, sent_effort
             )
         if response is not None:
             tally.last_status, tally.last_message = response.status_code, _error_message(response)
@@ -998,6 +1006,7 @@ class _Tally:
     thinking_blocks: int = 0
     status: int = 200
     error_type: str | None = None
+    effort: str | None = None
 
 
 @dataclass
@@ -1347,6 +1356,7 @@ async def _stream_candidate(
     if candidate.protocol == req.protocol:
         passthrough.happened = True
         tally.candidate = candidate.model
+        tally.effort = payload.get("reasoning_effort")
         try:
             async for raw in response.aiter_bytes():
                 yield raw
@@ -1410,6 +1420,7 @@ async def _stream_candidate(
 
     if state.committed:
         tally.candidate = candidate.model
+        tally.effort = payload.get("output_config", {}).get("effort") if candidate.protocol == "anthropic" else payload.get("reasoning_effort")
         if state.erro_em_band:
             # O provedor terminou o stream com um `{"error": ...}` proprio e o
             # `event: error` (502/api_error) ja saiu para o cliente: a linha
@@ -1428,6 +1439,7 @@ async def _stream_candidate(
         return
 
     tally.candidate = candidate.model
+    tally.effort = payload.get("output_config", {}).get("effort") if candidate.protocol == "anthropic" else payload.get("reasoning_effort")
     for chunk_bytes in _finish(req, translator):
         yield chunk_bytes
     tally.usage = translator.usage()
@@ -1516,6 +1528,7 @@ async def dispatch_stream(
                 session_id=session_id,
                 cached_input_tokens=tally.usage.get("cache_read_input_tokens"),
                 cache_write_tokens=tally.usage.get("cache_creation_input_tokens"),
+                effort=tally.effort,
                 body=bodies.capture(
                     bodies.prompt_text(req.body), tally.answer_text, req.body
                 ),
