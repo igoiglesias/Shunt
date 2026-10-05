@@ -37,12 +37,12 @@
   <div class="form-group">
     <label for="effort">Effort</label>
     <select id="effort" name="effort" aria-describedby="effort-help">
-      <option value=""{% if not model or not model.effort %} selected{% endif %}>Usar o do harness</option>
+      <option value=""{% if not model or not model.effort %} selected{% endif %}>Vazio = usar o do harness</option>
       {% for e in efforts %}
       <option value="{{ e }}"{% if model and model.effort == e %} selected{% endif %}>{{ e }}</option>
       {% endfor %}
     </select>
-    <small id="effort-help" class="notice">Com valor, sobrescreve o effort que o harness mandar</small>
+    <small id="effort-help" class="notice">Vazio = usa o effort que o harness mandar</small>
   </div>
 </div>
 <div class="cap-group" role="group" aria-label="Capacidades do modelo" style="margin-top: 8px;">

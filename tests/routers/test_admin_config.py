@@ -1641,7 +1641,7 @@ def test_the_model_form_offers_the_effort_select(monkeypatch, tmp_path):
         new = c.get("/admin/config/models/new", cookies=COOKIE)
         edit = c.get("/admin/config/models/m1/edit", cookies=COOKIE)
     assert '<select id="effort" name="effort"' in new.text
-    assert '<option value="" selected>Usar o do harness</option>' in new.text
+    assert '<option value="" selected>Vazio = usar o do harness</option>' in new.text
     for value in ("low", "medium", "high", "xhigh"):
         assert f'<option value="{value}">{value}</option>' in new.text
     assert '<option value="medium" selected>medium</option>' in edit.text
@@ -1673,7 +1673,7 @@ def test_the_models_list_shows_the_effort_or_harness(monkeypatch, tmp_path):
         for m in re.finditer(r"<tr>\s*<td><b>(\w+)</b>.*?</tr>", r.text, re.DOTALL)
     }
     assert '<td class="mono effort" title="high">high</td>' in rows["com"]
-    assert '<td class="mono effort" title="Usando o effort do harness">harness</td>' in rows["sem"]
+    assert '<td class="mono effort" title="Usando o effort do harness"><span class="chip">—</span></td>' in rows["sem"]
 
 
 def test_snapshot_and_rollback_carry_the_effort(monkeypatch, tmp_path):

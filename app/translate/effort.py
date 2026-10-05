@@ -7,12 +7,16 @@ destino nao e escrito. No mesmo dialeto nada passa por aqui: o corpo do
 harness segue como veio, inclusive com valor que so o upstream entende.
 """
 
+import logging
+
 EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 
 # Valores de um dialeto que nao existem no outro, levados ao canonico mais
 # proximo. `none` vira `low` e nao "sem effort": descartar mudaria o
 # comportamento do upstream mais do que o nivel mais baixo muda.
 _ALIASES = {"none": "low", "minimal": "low", "max": "xhigh"}
+
+logger = logging.getLogger("app.translate.effort")
 
 
 def normalize_effort(value: object) -> str | None:
@@ -22,8 +26,14 @@ def normalize_effort(value: object) -> str | None:
     lista, bool, None ou string desconhecida viram None.
     """
     if not isinstance(value, str):
+        logger.debug("normalize_effort: valor nao-string descartado (%s)", type(value).__name__)
         return None
     text = value.strip().lower()
     if text in EFFORTS:
         return text
-    return _ALIASES.get(text)
+    if text in _ALIASES:
+        canonical = _ALIASES[text]
+        logger.debug("normalize_effort: alias %r mapeado para %r", text, canonical)
+        return canonical
+    logger.debug("normalize_effort: valor desconhecido descartado (%r)", text)
+    return None
