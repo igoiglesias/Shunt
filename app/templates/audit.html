@@ -378,6 +378,7 @@
           <th class="route">Rota</th>
           <th>Modelo pedido</th>
           <th>Modelo que respondeu</th>
+          <th class="effort">Effort</th>
           <th class="project">Projeto</th>
           <th title="streaming, troca de candidato, ferramenta chamada">Sinais</th>
           <th class="n">Tokens</th>
@@ -662,6 +663,7 @@ function rowOf(event) {
       : event.candidate_model
         ? esc(event.candidate_model)
         : `<span class="tag">${esc(servedLabel(event))}</span>`}</td>
+    <td class="effort" data-label="Effort">${event.effort ? esc(event.effort) : '<span class="none">—</span>'}</td>
     <td class="project" data-label="Projeto" title="${esc(event.project || "")}">${
       event.project ? esc(String(event.project).replace(/\/+$/, "").split("/").pop()) : "—"
     }</td>

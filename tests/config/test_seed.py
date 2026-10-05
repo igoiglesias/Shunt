@@ -198,6 +198,43 @@ def test_seed_migrates_api_key_env_to_api_key():
         _os.remove("/tmp/shunt-test-seed5.db")
 
 
+def test_seed_adds_missing_catalog_provider_and_keeps_the_custom_one():
+    """DB com catalogo incompleto mas com nomes JA do CATALOGO (provider
+    `local` e modelo `qwen-local`, sem rotas): o seed pula o que ja existe
+    (`continue` nos dois loops) e cria so o que falta, sem duplicar. Sem
+    rotas a tabela fica incompleta, entao o seed nao trata como catalogo do
+    operador."""
+    engine = create_engine("sqlite+pysqlite:////tmp/shunt-test-seed6.db")
+    try:
+        from app.stats.models import Base
+        Base.metadata.create_all(engine)
+        with Session(engine) as session:
+            p = Provider(name="local", base_url="http://custom", protocol="openai")
+            session.add(p)
+            session.flush()
+            session.add(Model(alias="qwen-local", provider_id=p.id, upstream_model="x",
+                              context_window=8192, max_output_tokens=1024))
+            session.commit()
+
+        seed.seed_catalog_if_empty(engine)
+
+        with Session(engine) as session:
+            names = {p.name for p in session.query(Provider)}
+            assert names == {"local", "openrouter", "groq"}
+            # o provider do CATALOGO nao foi recriado, so o que faltava entrou
+            assert session.query(Provider).filter_by(name="local").count() == 1
+            aliases = {m.alias for m in session.query(Model)}
+            assert aliases == {
+                "qwen-local", "open-free", "open-nemotron-ultra",
+                "open-deepseek-v4.1-flash", "open-gpt-oss-120", "groq-free",
+            }
+            assert session.query(Model).filter_by(alias="qwen-local").count() == 1
+            assert session.query(Route).count() == 10
+    finally:
+        import os as _os
+        _os.remove("/tmp/shunt-test-seed6.db")
+
+
 def test_catalog_settings_builds():
     """catalog_settings() retorna Settings com chaves do env."""
     from app.config import seed

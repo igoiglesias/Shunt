@@ -236,6 +236,68 @@ def test_a_medium_window_groups_by_five_minutes(make_engine):
     assert media["points"][1]["at"].endswith(":35")
 
 
+def test_a_six_hour_bucket_truncates_within_the_day(make_engine):
+    """O balde de mais de uma hora (concat + printf), e nao o de hora cheia.
+
+    Sem este ramo, um balde de seis horas cairia no `%H:00` e devolveria um
+    ponto por hora em vez de quatro pontos por dia -- o painel de duas semanas
+    encheria de barras. O intervalo tem de passar de 72 h para o balde de seis
+    horas ser escolhido; por isso a linha de quatro dias atras.
+    """
+    engine = make_engine()
+    base = (NOW - timedelta(days=1)).replace(minute=30, second=0, microsecond=0)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                # Mesmo bloco de seis horas (hora 0 do dia).
+                row(request_id="a", started_at=base.replace(hour=0)),
+                row(request_id="b", started_at=base.replace(hour=5)),
+                # Bloco seguinte (hora 6).
+                row(request_id="c", started_at=base.replace(hour=6)),
+                # Estica o intervalo alem de 72 h, o que escolhe o balde de 6 h.
+                row(request_id="d", started_at=NOW - timedelta(days=5)),
+            ]
+        )
+        session.commit()
+    largo = queries.series(engine, hours=24 * 10)
+    assert largo["bucket_minutes"] == 60 * 6
+    por_balde = {point["at"]: point["requests"] for point in largo["points"]}
+    dia = base.strftime("%Y-%m-%d")
+    # Duas linhas no bloco 00:00-05:59 e uma no bloco 06:00-11:59 do mesmo dia.
+    assert por_balde[f"{dia}T00:00"] == 2
+    assert por_balde[f"{dia}T06:00"] == 1
+    assert all(at.endswith(":00") for at in por_balde)
+
+
+def test_a_wide_window_groups_by_whole_days(make_engine):
+    """Balde de um dia inteiro (`%Y-%m-%dT00:00`), o ramo `>= DAY_MINUTES`.
+
+    E o teto do `bucket_minutes`: uma janela de um mes so desce a balde diario
+    quando o trafego de fato ocupa mais de 14 dias. Sem este ramo, um periodo
+    longo cairia no balde de seis horas e multiplicaria as barras.
+    """
+    engine = make_engine()
+    base = (NOW - timedelta(days=20)).replace(hour=9, minute=0, second=0, microsecond=0)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                # Duas linhas no mesmo dia, horas diferentes.
+                row(request_id="a", started_at=base),
+                row(request_id="b", started_at=base + timedelta(hours=3)),
+                # Dia seguinte.
+                row(request_id="c", started_at=base + timedelta(days=1, hours=1)),
+                # Estica o intervalo para alem de 14 dias.
+                row(request_id="d", started_at=NOW - timedelta(hours=1)),
+            ]
+        )
+        session.commit()
+    largo = queries.series(engine, hours=24 * 30)
+    assert largo["bucket_minutes"] == 60 * 24
+    por_dia = {point["at"]: point["requests"] for point in largo["points"]}
+    assert por_dia[f"{base.strftime('%Y-%m-%d')}T00:00"] == 2
+    assert all(at.endswith("T00:00") for at in por_dia)
+
+
 def test_a_long_window_groups_in_blocks_of_hours(make_engine):
     engine = make_engine()
     with Session(engine) as session:

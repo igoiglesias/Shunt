@@ -119,8 +119,13 @@ def safe_next(raw: str | None) -> str:
     if raw.startswith("//"):
         return NEXT_FALLBACK
     parts = urlsplit(raw)
-    if parts.scheme:
-        return NEXT_FALLBACK
+    # Defesa inalcançável (medido: varredura exaustiva de 1-6 chars sobre
+    # `/:ab0.+-%\ \t?#@` com os guards acima nao acha entrada com `scheme`):
+    # `urlsplit` so preenche `scheme` quando o `:` aparece antes de qualquer
+    # `/`, e todo valor que chega aqui comeca com `/` (guarda acima). Mantida
+    # como cinto e suspensorio caso a guarda "sem `/` no inicio" mude.
+    if parts.scheme:  # pragma: no cover
+        return NEXT_FALLBACK  # pragma: no cover
     path = unquote(parts.path)
     if path != "/admin" and not path.startswith("/admin/"):
         return NEXT_FALLBACK

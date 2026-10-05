@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -279,3 +280,32 @@ def test_shunt_token_invalid_on_v1_is_401(tmp_path):
             headers={"x-shunt-token": "nao-existe"},
         )
     assert r.status_code == 401
+
+
+def test_create_token_blank_name_is_400(tmp_path):
+    """Nome vazio (ou so espacos) -> 400, nenhum token gravado."""
+    with client(tmp_path) as c:
+        engine = app.state.recorder.engine
+        r = c.post("/admin/tokens", data={"name": "   "}, cookies=_cookie(), follow_redirects=False)
+    assert r.status_code == 400
+    assert "Informe um nome para o token" in r.text
+    with Session(engine) as s:
+        assert s.execute(select(ApiToken)).scalars().all() == []
+
+
+@pytest.mark.parametrize("raw", ["abc", "-5", "0"])
+def test_create_token_invalid_expires_days_never_expires(tmp_path, raw):
+    """expires_days invalido (nao-numerico, negativo ou zero) vira token sem
+    expiracao, em vez de 400: o valor so e usado quando e um numero > 0."""
+    with client(tmp_path) as c:
+        engine = app.state.recorder.engine
+        r = c.post(
+            "/admin/tokens",
+            data={"name": f"exp-{raw}", "expires_days": raw},
+            cookies=_cookie(),
+            follow_redirects=False,
+        )
+    assert r.status_code == 200
+    with Session(engine) as s:
+        token = s.execute(select(ApiToken).where(ApiToken.name == f"exp-{raw}")).scalar_one()
+    assert token.expires_at is None

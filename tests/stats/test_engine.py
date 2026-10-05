@@ -354,6 +354,89 @@ def test_um_banco_legado_afrouxa_a_constraint_dos_tokens(tmp_path):
         engine.dispose()
 
 
+def test_a_metadata_table_missing_from_the_database_is_skipped(tmp_path):
+    """Banco VAZIO: toda tabela da metadata esta ausente.
+
+    `create_all` cria o que falta; quem chama `add_missing_columns` num banco
+    sem as tabelas tem de sair pela primeira linha do laco. Sem o `continue`,
+    um ALTER/PRAGMA numa tabela que nao existe seria erro de boot em vez de
+    trabalho pulado.
+    """
+    from sqlalchemy import create_engine, inspect
+
+    from app.stats.engine import add_missing_columns, relax_strict_columns
+
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'vazio.db'}")
+    try:
+        assert inspect(engine).get_table_names() == []
+        assert add_missing_columns(engine) == []
+        assert relax_strict_columns(engine) == []
+    finally:
+        engine.dispose()
+
+
+def test_a_destination_that_refuses_to_relax_is_not_a_boot_failure(tmp_path, monkeypatch, caplog):
+    """Turso pode recusar o `PRAGMA writable_schema`; afrouxar e conveniencia.
+
+    A recusa nao pode derrubar o boot: o `recorder` isola a linha que viola, e
+    o operador ve o descarte subir no painel. Qualquer excecao dentro do bloco
+    vira warning e lista vazia -- a engine sobe igual.
+    """
+    import sqlite3
+
+    from sqlalchemy import create_engine
+
+    from app.stats import engine as engine_module
+
+    caminho = tmp_path / "legado-recusado.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute(
+        "CREATE TABLE request_events ("
+        " id INTEGER PRIMARY KEY, input_tokens INTEGER NOT NULL)"
+    )
+    antigo.execute("INSERT INTO request_events (id, input_tokens) VALUES (1, 100)")
+    antigo.commit()
+    antigo.close()
+
+    engine = create_engine(f"sqlite+pysqlite:///{caminho}")
+
+    def recusa(connection, table_name, columns):
+        raise RuntimeError("PRAGMA writable_schema recusado")
+
+    monkeypatch.setattr(engine_module, "_relax_table", recusa)
+    try:
+        assert engine_module.relax_strict_columns(engine) == []
+    finally:
+        engine.dispose()
+    assert "nao deu para afrouxar constraints legadas" in caplog.text
+
+
+def test_relax_table_without_the_table_returns_nothing(tmp_path):
+    """PRAGMA numa tabela ausente devolve zero linhas: nao ha o que reescrever."""
+    from app.stats.engine import _relax_table, build_engine
+
+    engine = build_engine(f"sqlite+pysqlite:///{tmp_path / 'sem-tabela.db'}")
+    assert engine is not None
+    try:
+        with engine.connect() as connection:
+            assert _relax_table(connection, "tabela_que_nao_existe", ["input_tokens"]) == []
+    finally:
+        engine.dispose()
+
+
+def test_relax_table_with_no_matching_strict_column_does_nothing(tmp_path):
+    """Nenhuma coluna pedida esta em `notnull`: nao ha DDL a reescrever."""
+    from app.stats.engine import _relax_table, build_engine
+
+    engine = build_engine(f"sqlite+pysqlite:///{tmp_path / 'sem-strict.db'}")
+    assert engine is not None
+    try:
+        with engine.connect() as connection:
+            assert _relax_table(connection, "request_events", ["coluna_inexistente"]) == []
+    finally:
+        engine.dispose()
+
+
 def test_uma_tabela_de_modelos_antiga_ganha_a_coluna_effort(tmp_path):
     """Banco criado antes do effort por modelo: `models` sem `effort`. O boot
     acrescenta a coluna e a linha antiga fica com NULL, que e "usar o do

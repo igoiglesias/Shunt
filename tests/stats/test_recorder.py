@@ -328,3 +328,51 @@ async def test_one_invalid_line_does_not_lose_the_valid_ones(make_engine, tmp_pa
     assert ids == {"boa-1", "boa-2"}, f"linhas validas perdidas: {ids}"
     assert recorder.failures >= 1, "a linha invalida tem que ser contada"
     assert recorder.commits >= 1
+
+
+async def test_the_salvage_split_keeps_the_good_lines_around_the_bad_one(make_engine, tmp_path):
+    """`_salvage` divide ao meio ate isolar SO a linha que violou a constraint.
+
+    A linha ruim esta no meio do lote: a divisao tem de commitar os pedacos
+    que entram, descartar so a linha invalida e contar um unico descarte --
+    nunca perder a vizinhanca nem contar as boas como perdidas.
+    """
+    engine = engine_for(make_engine, tmp_path)
+    recorder = Recorder(engine, max_queue=100, batch_size=100, interval=10.0)
+    await recorder.start()
+    recorder.record(event(request_id="a"))
+    recorder.record(event(request_id="b"))
+    # `started_at` e NOT NULL: esta e a linha que viola a constraint.
+    recorder.record(event(request_id="ruim", started_at=None))
+    recorder.record(event(request_id="d"))
+
+    await recorder.aclose()
+
+    with Session(engine) as session:
+        ids = {row.request_id for row in session.scalars(select(RequestEvent))}
+
+    assert ids == {"a", "b", "d"}, f"a divisao perdeu linha boa: {ids}"
+    assert recorder.failures == 1, "so a linha invalida pode ser contada"
+    assert recorder.commits >= 2, "a recursao commita cada pedaco que entra"
+    assert count(engine) == 3
+
+
+def test_a_chunk_that_fails_for_something_other_than_a_constraint_is_lost(
+    make_engine, tmp_path, caplog
+):
+    """`_salvage` so sabe isolar violacao de constraint.
+
+    Qualquer outra falha -- a engine caiu, uma coluna que nao existe -- nao
+    tem o que dividir: o pedaco inteiro e perdido e CONTADO, e a excecao nao
+    pode subir para o worker. Aqui a falha e um `TypeError` de construcao do
+    ORM, que nao e `IntegrityError`.
+    """
+    recorder = Recorder(engine_for(make_engine, tmp_path))
+    discarded: list[str] = []
+
+    result = recorder._salvage([event(request_id="ruim", coluna_que_nao_existe=1)], discarded)
+
+    assert result == 0, "um pedaco que nao e de constraint nao entra"
+    assert recorder.failures == 1, "o pedaco perdido precisa ser contado"
+    assert discarded == [], "so uma violacao de constraint nomeia uma linha descartada"
+    assert "pedaco de 1 eventos perdido" in caplog.text

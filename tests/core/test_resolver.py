@@ -149,6 +149,25 @@ def test_transparent_still_rejects_a_name_with_no_deducible_provider():
         resolve("um-modelo-qualquer", settings)
 
 
+def test_transparent_name_with_slash_but_openrouter_undeclared_raises():
+    """Nome com `/` (sem prefixo de dica) deduz provider `openrouter`: se ele
+    nao esta declarado no catalogo e tambem nao tem host oficial embutido
+    (apenas `anthropic`/`openai` tem), nao existe destino e o erro sobe em
+    vez de uma chamada para um provedor inventado."""
+    settings = Settings(
+        providers={
+            "local": ProviderConfig(
+                base_url="http://localhost:8080/v1", protocol="openai", api_key=None
+            )
+        },
+        models={},
+        routes=[],
+        default_model=None,
+    )
+    with pytest.raises(UnknownProviderError, match="vendor/algum-modelo"):
+        resolve("vendor/algum-modelo", settings)
+
+
 def test_unknown_model_with_no_route_and_no_default_is_official_transparent():
     """Caso a do usuario: modelo inexistente, sem rota, sem default e sem
     "anthropic" no catalogo -> transparente no host oficial da Anthropic."""

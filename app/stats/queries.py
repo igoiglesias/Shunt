@@ -799,6 +799,7 @@ def _as_event(row: RequestEvent) -> dict:
         "session_id": row.session_id,
         "cached_input_tokens": None if relay else row.cached_input_tokens,
         "cache_write_tokens": None if relay else row.cache_write_tokens,
+        "effort": row.effort,
     }
 
 
