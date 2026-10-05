@@ -254,6 +254,7 @@ def as_event(entry: RequestLog) -> dict:
         "session_id": entry.session_id,
         "cached_input_tokens": entry.cached_input_tokens,
         "cache_write_tokens": entry.cache_write_tokens,
+        "effort": entry.effort,
         **({"body": entry.body} if entry.body else {}),
     }
 

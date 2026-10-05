@@ -798,7 +798,9 @@ async def _attempts(
             # Effort que foi efetivamente enviado ao upstream (ja no payload)
             sent_effort = None
             if candidate.protocol == "anthropic":
-                sent_effort = payload.get("output_config", {}).get("effort")
+                out_cfg = payload.get("output_config")
+                if isinstance(out_cfg, dict):
+                    sent_effort = out_cfg.get("effort")
             else:
                 sent_effort = payload.get("reasoning_effort")
             return ShuntResult(
@@ -1356,7 +1358,10 @@ async def _stream_candidate(
     if candidate.protocol == req.protocol:
         passthrough.happened = True
         tally.candidate = candidate.model
-        tally.effort = payload.get("reasoning_effort")
+        out_cfg = payload.get("output_config")
+        tally.effort = out_cfg.get("effort") if isinstance(out_cfg, dict) else None
+        if candidate.protocol != "anthropic":
+            tally.effort = payload.get("reasoning_effort")
         try:
             async for raw in response.aiter_bytes():
                 yield raw
@@ -1420,7 +1425,10 @@ async def _stream_candidate(
 
     if state.committed:
         tally.candidate = candidate.model
-        tally.effort = payload.get("output_config", {}).get("effort") if candidate.protocol == "anthropic" else payload.get("reasoning_effort")
+        out_cfg = payload.get("output_config")
+        tally.effort = out_cfg.get("effort") if isinstance(out_cfg, dict) else None
+        if candidate.protocol != "anthropic":
+            tally.effort = payload.get("reasoning_effort")
         if state.erro_em_band:
             # O provedor terminou o stream com um `{"error": ...}` proprio e o
             # `event: error` (502/api_error) ja saiu para o cliente: a linha
@@ -1439,7 +1447,10 @@ async def _stream_candidate(
         return
 
     tally.candidate = candidate.model
-    tally.effort = payload.get("output_config", {}).get("effort") if candidate.protocol == "anthropic" else payload.get("reasoning_effort")
+    out_cfg = payload.get("output_config")
+    tally.effort = out_cfg.get("effort") if isinstance(out_cfg, dict) else None
+    if candidate.protocol != "anthropic":
+        tally.effort = payload.get("reasoning_effort")
     for chunk_bytes in _finish(req, translator):
         yield chunk_bytes
     tally.usage = translator.usage()
