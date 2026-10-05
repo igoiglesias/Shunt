@@ -103,6 +103,9 @@ class RequestEvent(Base):
     tools_offered: Mapped[list] = mapped_column(JSON, default=list)
     tools_called: Mapped[list] = mapped_column(JSON, default=list)
     thinking_blocks: Mapped[int] = mapped_column(Integer, default=0)
+    # Effort configurado no modelo que foi aplicado na requisicao.
+    # None = o effort do harness passou; string = o modelo sobrescreveu.
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Os tres eixos de toda consulta do painel: a janela de tempo, e o
     # agrupamento por provedor ou por modelo dentro dela. Indice composto e nao
