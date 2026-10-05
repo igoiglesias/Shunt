@@ -1,6 +1,8 @@
 import json
 import time
 
+import pytest
+
 from app.translate.to_anthropic_request import openai_request_to_anthropic
 from app.translate.to_openai import anthropic_response_to_openai
 
@@ -610,3 +612,65 @@ def test_response_with_only_a_tool_use_block_has_no_text_content():
     )
     message = out["choices"][0]["message"]
     assert message["content"] is None
+
+
+# ---- Effort do harness (spec R4) ---------------------------------------------
+
+
+def _chat(**extra):
+    return {"model": "m", "messages": [{"role": "user", "content": "oi"}], **extra}
+
+
+def _to_anthropic(body):
+    return openai_request_to_anthropic(body, "claude-a", 4096)
+
+
+def test_reasoning_effort_becomes_output_config_effort():
+    out = _to_anthropic(_chat(reasoning_effort="high"))
+    assert out["output_config"] == {"effort": "high"}
+    assert "reasoning_effort" not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("none", "low"), ("minimal", "low"), (" Medium ", "medium"), ("max", "xhigh")],
+)
+def test_reasoning_effort_is_normalized(raw, expected):
+    assert _to_anthropic(_chat(reasoning_effort=raw))["output_config"] == {"effort": expected}
+
+
+def test_reasoning_dot_effort_is_the_fallback():
+    out = _to_anthropic(_chat(reasoning={"effort": "medium", "summary": "auto"}))
+    assert out["output_config"] == {"effort": "medium"}
+    assert "reasoning" not in out
+
+
+def test_reasoning_effort_wins_over_reasoning_dot_effort():
+    out = _to_anthropic(_chat(reasoning_effort="low", reasoning={"effort": "high"}))
+    assert out["output_config"] == {"effort": "low"}
+
+
+def test_a_null_reasoning_effort_falls_back_to_reasoning_dot_effort():
+    out = _to_anthropic(_chat(reasoning_effort=None, reasoning={"effort": "high"}))
+    assert out["output_config"] == {"effort": "high"}
+
+
+def test_an_invalid_reasoning_effort_does_not_fall_back_to_reasoning_dot_effort():
+    """Presente e invalido e descartado: a spec so le `reasoning.effort` quando
+    `reasoning_effort` esta ausente."""
+    out = _to_anthropic(_chat(reasoning_effort="extreme", reasoning={"effort": "high"}))
+    assert "output_config" not in out
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"reasoning_effort": 3}, {"reasoning_effort": "x"}, {"reasoning": "high"}, {"reasoning": {}}],
+)
+def test_a_discarded_value_writes_no_output_config(extra):
+    assert "output_config" not in _to_anthropic(_chat(**extra))
+
+
+def test_effort_never_creates_thinking():
+    out = _to_anthropic(_chat(reasoning_effort="xhigh"))
+    assert "thinking" not in out
+    assert "budget_tokens" not in json.dumps(out)

@@ -225,6 +225,13 @@ def _transparent_cap(req: ShuntRequest) -> int:
 
 
 def _payload(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
+    """O corpo que sai para o candidato: montado no dialeto dele e, por cima,
+    o effort configurado no modelo (`_override_effort`). Ponto unico usado
+    pelo probe, pelo caminho JSON e pelo stream."""
+    return _override_effort(_body_for(req, candidate, settings), req, candidate, settings)
+
+
+def _body_for(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dict:
     if candidate.protocol == req.protocol:
         out = {**req.body, "model": candidate.model}
         raw = out.get("max_tokens")
@@ -239,6 +246,46 @@ def _payload(req: ShuntRequest, candidate: Candidate, settings: Settings) -> dic
     if req.protocol == "anthropic":
         return anthropic_request_to_openai(req.body, candidate.model, cap)
     return openai_request_to_anthropic(req.body, candidate.model, cap)
+
+
+# Onde effort existe. `count_tokens` nem passa por `_payload`; completions e
+# embeddings nao tem o campo em nenhum dos dois dialetos (spec R6).
+EFFORT_ENDPOINTS = ("messages", "chat")
+
+
+def _override_effort(
+    out: dict, req: ShuntRequest, candidate: Candidate, settings: Settings
+) -> dict:
+    """Effort configurado no modelo vence o do harness (spec R3).
+
+    So o candidato configurado: transparente nao tem configuracao nossa. Atua
+    na copia que `_body_for` devolveu, mas essa copia e rasa -- por isso cada
+    escrita troca o dict aninhado inteiro em vez de editar o que veio do
+    harness, e `req.body` nunca muda. `thinking` nunca e tocado.
+    """
+    if req.endpoint not in EFFORT_ENDPOINTS:
+        return out
+    if candidate.alias is None or candidate.transparent:
+        return out
+    effort = settings.models[candidate.alias].effort
+    if effort is None:
+        return out
+    if candidate.protocol == "anthropic":
+        current = out.get("output_config")
+        base = current if isinstance(current, dict) else {}
+        out["output_config"] = {**base, "effort": effort}
+        return out
+    out["reasoning_effort"] = effort
+    # Dois efforts no mesmo corpo seriam ambiguos para o upstream: o de
+    # `reasoning` sai, e as outras chaves de `reasoning` ficam.
+    reasoning = out.get("reasoning")
+    if isinstance(reasoning, dict) and "effort" in reasoning:
+        rest = {key: value for key, value in reasoning.items() if key != "effort"}
+        if rest:
+            out["reasoning"] = rest
+        else:
+            out.pop("reasoning")
+    return out
 
 
 def _translate_response(data: dict, req: ShuntRequest, candidate: Candidate) -> dict:

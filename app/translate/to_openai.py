@@ -46,6 +46,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from app.translate.effort import normalize_effort
 from app.translate.ids import to_openai_id
 from app.translate.usage import anthropic_usage_to_openai
 
@@ -233,6 +234,13 @@ def anthropic_request_to_openai(body: dict, target_model: str, max_output_tokens
                 f"OpenAI accepts at most {MAX_STOP_SEQUENCES} stop sequences, got {len(stops)}"
             )
         out["stop"] = stops
+    # Effort do harness atravessa normalizado (spec R4); valor descartado nao
+    # escreve o campo. `thinking` segue fora da traducao, de proposito.
+    config = body.get("output_config")
+    if isinstance(config, dict):
+        effort = normalize_effort(config.get("effort"))
+        if effort is not None:
+            out["reasoning_effort"] = effort
     return out
 
 

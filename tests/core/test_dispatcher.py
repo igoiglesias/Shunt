@@ -2133,3 +2133,188 @@ async def test_the_buffered_backoff_grows_with_the_attempt_number(monkeypatch):
     # Dois candidatos, cada um com esperas 1, 2, ... ate MAX_ATTEMPTS - 1.
     per_candidate = list(range(1, dispatcher.MAX_ATTEMPTS))
     assert seen == per_candidate * 2
+
+
+# --------------------------------------------------------------------------
+# Effort do modelo sobrescreve o do harness (spec R3)
+# --------------------------------------------------------------------------
+
+EFFORT_SETTINGS = Settings(
+    providers={
+        "oai": ProviderConfig(base_url="https://api.test/v1", protocol="openai", api_key="sk"),
+        "ant": ProviderConfig(
+            base_url="https://api.anthropic.test", protocol="anthropic", api_key="sk"
+        ),
+    },
+    models={
+        "oai-high": ModelConfig(
+            provider="oai", model="vendor/oai", context_window=64000,
+            max_output_tokens=8192, effort="high",
+        ),
+        "oai-plain": ModelConfig(
+            provider="oai", model="vendor/plain", context_window=64000, max_output_tokens=8192
+        ),
+        "ant-high": ModelConfig(
+            provider="ant", model="claude-a", context_window=200000,
+            max_output_tokens=8192, effort="high",
+        ),
+        "ant-plain": ModelConfig(
+            provider="ant", model="claude-b", context_window=200000, max_output_tokens=8192
+        ),
+    },
+    routes=[],
+    default_model=None,
+)
+
+OAI_HIGH = Candidate(alias="oai-high", provider="oai", model="vendor/oai", protocol="openai")
+OAI_PLAIN = Candidate(alias="oai-plain", provider="oai", model="vendor/plain", protocol="openai")
+ANT_HIGH = Candidate(alias="ant-high", provider="ant", model="claude-a", protocol="anthropic")
+ANT_PLAIN = Candidate(alias="ant-plain", provider="ant", model="claude-b", protocol="anthropic")
+
+CHAT = {"model": "opus", "max_tokens": 64, "messages": [{"role": "user", "content": "oi"}]}
+
+
+def _anthropic(**extra):
+    return ShuntRequest("anthropic", {**BODY, **extra}, {})
+
+
+def _openai(endpoint="chat", **extra):
+    return ShuntRequest("openai", {**CHAT, **extra}, {}, endpoint=endpoint)
+
+
+def test_effort_override_same_dialect_anthropic_keeps_other_output_config_keys():
+    fmt = {"type": "json_schema", "schema": {"type": "object"}}
+    payload = dispatcher._payload(
+        _anthropic(output_config={"effort": "low", "format": fmt}), ANT_HIGH, EFFORT_SETTINGS
+    )
+    assert payload["output_config"] == {"effort": "high", "format": fmt}
+
+
+def test_effort_override_creates_output_config_when_the_harness_sent_none():
+    payload = dispatcher._payload(_anthropic(), ANT_HIGH, EFFORT_SETTINGS)
+    assert payload["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.parametrize("bad", ["high", ["effort"], None, 3])
+def test_effort_override_replaces_an_output_config_that_is_not_a_dict(bad):
+    payload = dispatcher._payload(_anthropic(output_config=bad), ANT_HIGH, EFFORT_SETTINGS)
+    assert payload["output_config"] == {"effort": "high"}
+
+
+def test_effort_override_same_dialect_openai():
+    payload = dispatcher._payload(_openai(reasoning_effort="low"), OAI_HIGH, EFFORT_SETTINGS)
+    assert payload["reasoning_effort"] == "high"
+
+
+def test_effort_override_drops_a_reasoning_object_that_only_carried_effort():
+    payload = dispatcher._payload(_openai(reasoning={"effort": "low"}), OAI_HIGH, EFFORT_SETTINGS)
+    assert payload["reasoning_effort"] == "high"
+    assert "reasoning" not in payload
+
+
+def test_effort_override_keeps_the_other_reasoning_keys():
+    payload = dispatcher._payload(
+        _openai(reasoning={"effort": "low", "summary": "auto"}), OAI_HIGH, EFFORT_SETTINGS
+    )
+    assert payload["reasoning_effort"] == "high"
+    assert payload["reasoning"] == {"summary": "auto"}
+
+
+def test_effort_override_leaves_a_reasoning_object_without_effort_alone():
+    payload = dispatcher._payload(
+        _openai(reasoning={"summary": "auto"}), OAI_HIGH, EFFORT_SETTINGS
+    )
+    assert payload["reasoning_effort"] == "high"
+    assert payload["reasoning"] == {"summary": "auto"}
+
+
+def test_effort_override_anthropic_caller_openai_candidate():
+    payload = dispatcher._payload(
+        _anthropic(output_config={"effort": "low"}), OAI_HIGH, EFFORT_SETTINGS
+    )
+    assert payload["reasoning_effort"] == "high"
+    assert "output_config" not in payload
+
+
+def test_effort_override_openai_caller_anthropic_candidate():
+    payload = dispatcher._payload(_openai(reasoning_effort="low"), ANT_HIGH, EFFORT_SETTINGS)
+    assert payload["output_config"] == {"effort": "high"}
+    assert "reasoning_effort" not in payload
+
+
+def test_effort_override_never_touches_thinking():
+    thinking = {"type": "enabled", "budget_tokens": 2048}
+    payload = dispatcher._payload(
+        _anthropic(thinking=thinking, output_config={"effort": "low"}), ANT_HIGH, EFFORT_SETTINGS
+    )
+    assert payload["thinking"] == thinking
+    assert payload["output_config"] == {"effort": "high"}
+
+
+def test_a_model_without_effort_lets_the_harness_effort_through_untouched():
+    payload = dispatcher._payload(
+        _anthropic(output_config={"effort": "max"}), ANT_PLAIN, EFFORT_SETTINGS
+    )
+    # Mesmo dialeto: sem normalizacao, `max` segue como veio (spec R5).
+    assert payload["output_config"] == {"effort": "max"}
+    payload = dispatcher._payload(
+        _openai(reasoning={"effort": "minimal"}), OAI_PLAIN, EFFORT_SETTINGS
+    )
+    assert payload["reasoning"] == {"effort": "minimal"}
+    assert "reasoning_effort" not in payload
+
+
+def test_a_model_without_effort_still_gets_the_translated_harness_effort():
+    payload = dispatcher._payload(
+        _anthropic(output_config={"effort": "max"}), OAI_PLAIN, EFFORT_SETTINGS
+    )
+    assert payload["reasoning_effort"] == "xhigh"
+
+
+def test_a_transparent_candidate_gets_no_override():
+    transparent = Candidate(
+        alias="ant-high", provider="ant", model="claude-a", protocol="anthropic",
+        transparent=True,
+    )
+    payload = dispatcher._payload(
+        _anthropic(output_config={"effort": "low"}), transparent, EFFORT_SETTINGS
+    )
+    assert payload["output_config"] == {"effort": "low"}
+    no_alias = Candidate(
+        alias=None, provider="ant", model="claude-x", protocol="anthropic", transparent=True
+    )
+    assert "output_config" not in dispatcher._payload(_anthropic(), no_alias, EFFORT_SETTINGS)
+
+
+@pytest.mark.parametrize("endpoint", ["completions", "embeddings"])
+def test_completions_and_embeddings_get_no_override(endpoint):
+    body = {"model": "opus", "prompt": "oi", "input": "oi"}
+    payload = dispatcher._payload(
+        ShuntRequest("openai", body, {}, endpoint=endpoint), OAI_HIGH, EFFORT_SETTINGS
+    )
+    assert "reasoning_effort" not in payload
+    payload = dispatcher._payload(
+        ShuntRequest("openai", {**body, "reasoning_effort": "low"}, {}, endpoint=endpoint),
+        OAI_HIGH,
+        EFFORT_SETTINGS,
+    )
+    assert payload["reasoning_effort"] == "low"
+
+
+def test_the_override_never_mutates_the_harness_body():
+    """A copia de `_payload` e rasa: um override que editasse o dict aninhado
+    (`out["output_config"]["effort"] = ...`) mudaria o corpo do harness, e o
+    proximo candidato da cadeia receberia o effort do anterior."""
+    import copy
+
+    cases = [
+        (_anthropic(output_config={"effort": "low", "format": {"type": "json_schema"}}), ANT_HIGH),
+        (_openai(reasoning={"effort": "low", "summary": "auto"}), OAI_HIGH),
+        (_openai(reasoning={"effort": "low"}), OAI_HIGH),
+        (_anthropic(output_config={"effort": "low"}), OAI_HIGH),
+        (_openai(reasoning_effort="low"), ANT_HIGH),
+    ]
+    for req, candidate in cases:
+        before = copy.deepcopy(req.body)
+        dispatcher._payload(req, candidate, EFFORT_SETTINGS)
+        assert req.body == before

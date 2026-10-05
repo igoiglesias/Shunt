@@ -34,6 +34,16 @@
     <label for="max_output_tokens">Max Output Tokens *</label>
     <input type="number" id="max_output_tokens" name="max_output_tokens" required min="1" value="{{ model.max_output_tokens if model else 8192 }}">
   </div>
+  <div class="form-group">
+    <label for="effort">Effort</label>
+    <select id="effort" name="effort" aria-describedby="effort-help">
+      <option value=""{% if not model or not model.effort %} selected{% endif %}>Vazio = usar o do harness</option>
+      {% for e in efforts %}
+      <option value="{{ e }}"{% if model and model.effort == e %} selected{% endif %}>{{ e }}</option>
+      {% endfor %}
+    </select>
+    <small id="effort-help" class="notice">Vazio = usa o effort que o harness mandar</small>
+  </div>
 </div>
 <div class="cap-group" role="group" aria-label="Capacidades do modelo" style="margin-top: 8px;">
   <div class="cap">

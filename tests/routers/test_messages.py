@@ -423,3 +423,79 @@ def test_count_tokens_on_an_unknown_model_is_an_anthropic_shaped_400():
     # O 400 e o da resolucao, e nao o da validacao de corpo: o corpo aqui e
     # valido, o que nao existe e o modelo.
     assert "provider" in body["error"]["message"]
+
+
+# --------------------------------------------------------------------------
+# Effort do modelo chega ao corpo do upstream (spec R3), JSON e stream
+# --------------------------------------------------------------------------
+
+EFFORT_SETTINGS = Settings(
+    providers={
+        "openrouter": ProviderConfig(
+            base_url="https://api.test/v1", protocol="openai", api_key="sk-teste"
+        )
+    },
+    models={
+        "free": ModelConfig(
+            provider="openrouter", model="vendor/free", context_window=64000,
+            max_output_tokens=8192, effort="high",
+        )
+    },
+    routes=[("opus", ["free"])],
+    default_model=None,
+)
+
+
+@respx.mock
+def test_the_models_effort_reaches_the_upstream_body_over_the_harness_one():
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "model": "vendor/free",
+                "choices": [{"message": {"content": "pronto"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+    )
+    with client(EFFORT_SETTINGS) as c:
+        response = c.post(
+            "/v1/messages",
+            json={**ASK, "output_config": {"effort": "low"}},
+            headers={"x-api-key": "sk-do-cliente"},
+        )
+    assert response.status_code == 200
+    import json as _json
+
+    sent = _json.loads(route.calls[0].request.content)
+    assert sent["reasoning_effort"] == "high"
+    assert "output_config" not in sent
+
+
+@respx.mock
+def test_the_models_effort_reaches_the_upstream_body_when_streaming():
+    route = respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text='data: {"choices": [{"delta": {"content": "oi"}}]}\n\n'
+            'data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}\n\n'
+            "data: [DONE]\n\n",
+        )
+    )
+    with (
+        client(EFFORT_SETTINGS) as c,
+        c.stream(
+            "POST",
+            "/v1/messages",
+            json={**ASK, "stream": True, "output_config": {"effort": "low"}},
+        ) as response,
+    ):
+        body = "".join(response.iter_text())
+    assert "event: message_stop" in body
+    import json as _json
+
+    sent = _json.loads(route.calls[0].request.content)
+    assert sent["reasoning_effort"] == "high"
+    assert sent["stream"] is True

@@ -20,6 +20,7 @@ from app.stats.models import (
     RouteCandidate,
 )
 from app.templates import render
+from app.translate.effort import EFFORTS
 
 # Sem tag no router: as telas HTML ficam fora do /docs, e a unica rota
 # publicada (`/reload`) declara a sua propria tag.
@@ -94,6 +95,25 @@ def _max_concurrency(raw: str | None) -> int | None:
     return int(text)
 
 
+EFFORT_ERROR = "Effort deve ser vazio ou um de: " + ", ".join(EFFORTS)
+
+
+def _effort(raw: str | None) -> str | None:
+    """Le o effort do form: vazio = usar o do harness (NULL).
+
+    So os quatro valores canonicos, com espacos nas pontas tolerados como no
+    limite de concorrencia. Sem normalizar `max`/`none` aqui: isso e regra da
+    traducao, e o operador escolhe num select. Qualquer outro valor e 400
+    antes de commitar, para nunca chegar gravado ao corpo do upstream.
+    """
+    if raw is None or not raw.strip():
+        return None
+    text = raw.strip()
+    if text not in EFFORTS:
+        raise HTTPException(status_code=400, detail=EFFORT_ERROR)
+    return text
+
+
 def snapshot_current_settings(session: Session) -> dict:
     """Gera snapshot JSON da configuracao atual."""
     providers = session.execute(select(Provider).order_by(Provider.id)).scalars().all()
@@ -136,6 +156,8 @@ def snapshot_current_settings(session: Session) -> dict:
                 "context_window": m.context_window,
                 "max_output_tokens": m.max_output_tokens,
                 "is_default": m.is_default,
+                # Snapshot antigo nao tem a chave: o rollback usa `.get`, NULL.
+                "effort": m.effort,
             }
             for m in models
         ],
@@ -455,8 +477,10 @@ async def create_model(
     context_window: Annotated[int, Form()] = 131072,
     max_output_tokens: Annotated[int, Form()] = 8192,
     is_default: Annotated[list[str] | None, Form()] = None,
+    effort: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
+    chosen_effort = _effort(effort)
     tools = _flag(supports_tools, True)
     streaming = _flag(supports_streaming, True)
     vision = _flag(supports_vision, False)
@@ -482,6 +506,7 @@ async def create_model(
             context_window=context_window,
             max_output_tokens=max_output_tokens,
             is_default=default_flag,
+            effort=chosen_effort,
         )
         session.add(m)
         session.commit()
@@ -506,13 +531,18 @@ async def update_model(
     context_window: Annotated[int | None, Form()] = None,
     max_output_tokens: Annotated[int | None, Form()] = None,
     is_default: Annotated[list[str] | None, Form()] = None,
+    effort: Annotated[str | None, Form()] = None,
     _: None = Depends(require_admin),
 ):
+    # O FastAPI entrega ausente e vazio como o mesmo None; aqui vazio limpa
+    # e ausente preserva, entao a presenca vem do form cru.
+    effort_sent = "effort" in await request.form()
     engine = request_engine(request)
     with Session(engine) as session:
         m = session.execute(select(Model).where(Model.alias == alias)).scalar_one_or_none()
         if not m:
             raise HTTPException(status_code=404, detail="Model nao encontrado")
+        chosen_effort = _effort(effort)
         # Campo ausente preserva o valor atual (o form sempre envia, mas um
         # cliente direto pode omitir; nesse caso nao inventar default). Vale
         # para os flags e para os dois ints: omisso nunca zera nem reseta.
@@ -543,6 +573,8 @@ async def update_model(
         m.context_window = context_window
         m.max_output_tokens = max_output_tokens
         m.is_default = default_flag
+        if effort_sent:
+            m.effort = chosen_effort
         session.commit()
         create_config_version(session)
         settings = load_settings_from_db(session)
@@ -582,7 +614,9 @@ async def new_model_form(request: Request, _: None = Depends(require_admin)):
     engine = request_engine(request)
     with Session(engine) as session:
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
-    return render("_model_form.html", request=request, model=None, providers=providers)
+    return render(
+        "_model_form.html", request=request, model=None, providers=providers, efforts=EFFORTS
+    )
 
 
 @router.get("/models/{alias}/edit", response_class=HTMLResponse, include_in_schema=False)
@@ -593,7 +627,9 @@ async def edit_model_form(request: Request, alias: str, _: None = Depends(requir
         if not m:
             raise HTTPException(status_code=404, detail="Model nao encontrado")
         providers = session.execute(select(Provider).order_by(Provider.name)).scalars().all()
-    return render("_model_form.html", request=request, model=m, providers=providers)
+    return render(
+        "_model_form.html", request=request, model=m, providers=providers, efforts=EFFORTS
+    )
 
 
 # --- Routes ---
@@ -896,6 +932,7 @@ async def rollback_config(
                 context_window=mdata["context_window"],
                 max_output_tokens=mdata["max_output_tokens"],
                 is_default=mdata.get("is_default", False),
+                effort=mdata.get("effort"),
             )
             session.add(m)
         session.flush()

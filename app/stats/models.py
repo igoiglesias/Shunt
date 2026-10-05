@@ -219,6 +219,10 @@ class Model(Base):
     context_window: Mapped[int] = mapped_column(Integer, nullable=False)
     max_output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Effort que o Shunt impoe ao candidato (low/medium/high/xhigh). NULL =
+    # usar o do harness. Sem default de proposito: banco antigo ganha a coluna
+    # vazia no boot (`add_missing_columns`) e segue se comportando como antes.
+    effort: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
 

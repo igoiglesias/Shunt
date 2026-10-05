@@ -707,3 +707,52 @@ def test_an_empty_or_non_string_thinking_block_adds_no_reasoning_field():
             4096,
         )
         assert "reasoning_content" not in out["messages"][-1], vazio
+
+
+# ---- Effort do harness (spec R4) ---------------------------------------------
+
+
+def _ask(**extra):
+    messages = [{"role": "user", "content": "oi"}]
+    return {"model": "m", "max_tokens": 10, "messages": messages, **extra}
+
+
+def test_output_config_effort_becomes_reasoning_effort():
+    out = convert(_ask(output_config={"effort": "high"}))
+    assert out["reasoning_effort"] == "high"
+    assert "output_config" not in out
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"), [("max", "xhigh"), ("MAX", "xhigh"), (" Low ", "low")]
+)
+def test_output_config_effort_is_normalized(raw, expected):
+    assert convert(_ask(output_config={"effort": raw}))["reasoning_effort"] == expected
+
+
+@pytest.mark.parametrize("raw", ["extreme", 3, None, {"level": "high"}])
+def test_a_discarded_effort_writes_no_reasoning_effort(raw):
+    assert "reasoning_effort" not in convert(_ask(output_config={"effort": raw}))
+
+
+def test_an_output_config_without_effort_writes_nothing():
+    out = convert(_ask(output_config={"format": {"type": "json_schema"}}))
+    assert "reasoning_effort" not in out
+    assert "output_config" not in out
+
+
+@pytest.mark.parametrize("bad", ["high", ["high"], 7])
+def test_an_output_config_that_is_not_a_dict_is_ignored(bad):
+    assert "reasoning_effort" not in convert(_ask(output_config=bad))
+
+
+def test_effort_crosses_but_thinking_still_does_not():
+    out = convert(
+        _ask(
+            thinking={"type": "enabled", "budget_tokens": 2048},
+            output_config={"effort": "medium"},
+        )
+    )
+    assert out["reasoning_effort"] == "medium"
+    assert "thinking" not in out
+    assert "budget_tokens" not in json.dumps(out)
