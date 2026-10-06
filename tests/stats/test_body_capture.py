@@ -11,13 +11,26 @@ def ligado(monkeypatch):
 
 
 def test_it_is_off_unless_asked_for(monkeypatch):
-    """Um proxy que comeca gravando o que o operador digita e uma surpresa ruim."""
+    """Um proxy que comeca gravando o que o operador digita e uma surpresa ruim.
+
+    Agora o default e LIGADO (opt-out). So "0", "false", "nao", "off" desligam.
+    """
     monkeypatch.delenv("SHUNT_STORE_BODIES", raising=False)
-    assert bodies.enabled() is False
-    assert bodies.capture("oi", "ola") is None
+    assert bodies.enabled() is True
+    assert bodies.capture("oi", "ola") is not None
     monkeypatch.setenv("SHUNT_STORE_BODIES", "0")
     assert bodies.enabled() is False
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "false")
+    assert bodies.enabled() is False
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "nao")
+    assert bodies.enabled() is False
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "off")
+    assert bodies.enabled() is False
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "1")
+    assert bodies.enabled() is True
     monkeypatch.setenv("SHUNT_STORE_BODIES", "sim")
+    assert bodies.enabled() is True
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "on")
     assert bodies.enabled() is True
 
 

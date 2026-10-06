@@ -532,6 +532,43 @@ def test_clearing_takes_the_conversation_with_it(make_engine):
         assert session.scalar(select(func.count()).select_from(RequestBody)) == 0
 
 
+def test_body_of_returns_the_upstream_error_body(make_engine):
+    """A aba "Erro" da auditoria le o corpo do erro por aqui."""
+    from app.stats.models import RequestBody
+
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all(
+            [
+                row(request_id="falhou", status=422, error_type="invalid_request_error"),
+                RequestBody(
+                    request_id="falhou",
+                    prompt="user: oi",
+                    answer="",
+                    error='{"error":{"message":"prompt too long"}}',
+                    error_bytes=42,
+                ),
+            ]
+        )
+        session.commit()
+    body = queries.body_of(engine, "falhou")
+    assert body["error"] == '{"error":{"message":"prompt too long"}}'
+    assert body["error_bytes"] == 42
+
+
+def test_body_of_answers_empty_error_when_none_was_recorded(make_engine):
+    """Sem erro gravado a tela diz isso, e nao quebra."""
+    from app.stats.models import RequestBody
+
+    engine = make_engine()
+    with Session(engine) as session:
+        session.add_all([row(request_id="ok"), RequestBody(request_id="ok", prompt="oi", answer="tudo bem")])
+        session.commit()
+    body = queries.body_of(engine, "ok")
+    assert body["error"] == ""
+    assert body["error_bytes"] == 0
+
+
 def test_the_tool_table_stops_at_eight_rows(make_engine):
     """Um harness oferece o catalogo inteiro; a nona nunca foi chamada.
 

@@ -98,6 +98,14 @@ def seed(path) -> None:
             prompt_bytes=4000 if index else 90_000,
             answer_bytes=30,
             truncated=index == 0,
+            # A linha 6 falha (`index % 6 == 0`, status 429) e carrega o corpo
+            # do erro do provedor: e o que a aba "Erro" mostra.
+            error=(
+                '{"error":{"message":"rate limit exceeded","type":"rate_limit_error"}}'
+                if index == 6
+                else None
+            ),
+            error_bytes=68 if index == 6 else 0,
         )
         for index in range(0, 24, 2)
     ]
@@ -560,7 +568,7 @@ def test_a_cut_conversation_says_how_much_is_missing(browser, server):
     assert "90.0k" in said or "90k" in said
 
 
-def test_a_request_with_no_stored_conversation_says_how_to_turn_it_on(browser, server):
+def test_a_request_with_no_stored_conversation_says_it_was_off(browser, server):
     page, problems = open_audit(browser, server)
     page.click('#rows tr[data-id="req-01"]')
     page.wait_for_selector("#detail .tabs")
@@ -572,7 +580,6 @@ def test_a_request_with_no_stored_conversation_says_how_to_turn_it_on(browser, s
     # console: o que nao pode aparecer e erro de JavaScript.
     assert [p for p in problems if "Failed to load resource" not in p] == []
     assert "nao gravada" in said
-    assert "SHUNT_STORE_BODIES=1" in said
 
 
 def test_the_summary_comes_back_when_the_tab_switches_back(browser, server):
@@ -587,6 +594,21 @@ def test_the_summary_comes_back_when_the_tab_switches_back(browser, server):
     page.close()
     assert problems == []
     assert hidden is True
+
+
+def test_the_error_tab_shows_the_upstream_error_body(browser, server):
+    """A aba "Erro" so existe na falha e mostra o corpo que o provedor mandou."""
+    page, problems = open_audit(browser, server)
+    page.click('#rows tr[data-id="req-06"]')
+    page.wait_for_selector("#detail .tabs")
+    # A linha 429 tem a aba; uma linha 200 nao teria.
+    page.get_by_role("tab", name="Erro").click()
+    page.wait_for_selector("#error pre")
+    body = page.inner_text("#error pre")
+    page.close()
+    assert problems == []
+    assert "rate limit exceeded" in body
+    assert "rate_limit_error" in body
 
 
 def test_the_period_shortcut_becomes_an_instant_in_the_url(browser, server):

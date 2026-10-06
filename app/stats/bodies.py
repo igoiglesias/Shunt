@@ -3,8 +3,8 @@
 Tres decisoes moram aqui, e as tres existem porque conversa e o dado mais
 sensivel que atravessa este proxy:
 
-- **Desligado por padrao.** `SHUNT_STORE_BODIES=1` liga. Um proxy que comeca
-  gravando o que o operador digita seria uma surpresa desagradavel.
+- **Ligado por padrao.** `SHUNT_STORE_BODIES=0` desliga. Um proxy que nao
+  grava erros perde diagnostico; gravar conversa e escolha do operador.
 - **Teto por campo.** Um prompt de agente carrega o repositorio inteiro; sem
   corte, um dia de uso enche o disco. O tamanho ORIGINAL e guardado, para que a
   tela diga quanto ficou de fora em vez de fingir que a conversa acabou ali.
@@ -42,8 +42,11 @@ REDACTED = "[redigido]"
 
 
 def enabled() -> bool:
-    """`SHUNT_STORE_BODIES` ligado? Vazio, ausente ou "0" contam como nao."""
-    return os.environ.get("SHUNT_STORE_BODIES", "").strip().lower() in {"1", "true", "sim", "on"}
+    """`SHUNT_STORE_BODIES` ligado? Default True (opt-out). So "0", "false", "nao", "off" desligam."""
+    val = os.environ.get("SHUNT_STORE_BODIES", "").strip().lower()
+    if val == "":
+        return True
+    return val not in {"0", "false", "nao", "off"}
 
 
 def limit() -> int:
@@ -159,23 +162,31 @@ def request_json(body: dict) -> str:
     return redact(raw)[:limit()]
 
 
-def capture(prompt: str, answer: str, body: dict | None = None) -> dict | None:
+def capture(prompt: str, answer: str, body: dict | None = None, upstream_error: str | None = None) -> dict | None:
     """O par pronto para gravar, ou None quando nao ha nada que valha a pena.
 
     Devolve o tamanho ORIGINAL de cada lado junto do texto cortado: sem isso a
     tela nao teria como dizer que a conversa continua.
+
+    `upstream_error`: corpo bruto do erro do provedor (JSON ou texto), quando a
+    requisicao falhou. Sera redigido e cortado pelo mesmo teto.
     """
     if not enabled():
         return None
     ceiling = limit()
     prompt, answer = redact(prompt or ""), redact(answer or "")
-    if not prompt and not answer:
+    if not prompt and not answer and not upstream_error:
         return None
+    error = redact(upstream_error)[:ceiling] if upstream_error else None
     return {
         "prompt": prompt[:ceiling],
         "answer": answer[:ceiling],
         "request_json": request_json(body) if body is not None else None,
         "prompt_bytes": len(prompt),
         "answer_bytes": len(answer),
-        "truncated": len(prompt) > ceiling or len(answer) > ceiling,
+        "truncated": len(prompt) > ceiling
+        or len(answer) > ceiling
+        or (upstream_error is not None and len(upstream_error) > ceiling),
+        "error": error,
+        "error_bytes": len(upstream_error) if upstream_error else 0,
     }

@@ -1026,6 +1026,8 @@ def body_of(engine: Engine, request_id: str) -> dict | None:
             "prompt_bytes": row.prompt_bytes,
             "answer_bytes": row.answer_bytes,
             "truncated": row.truncated,
+            "error": row.error or "",
+            "error_bytes": row.error_bytes,
         }
 
 

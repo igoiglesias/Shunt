@@ -555,12 +555,12 @@ would show numbers. **Exportar CSV** hands the same result to a spreadsheet.
 
 ### Reading the conversation
 
-Off by default, because the text of a conversation is the most sensitive thing
-that passes through this proxy. Turn it on and the **Conversa** tab of any
+On by default, because the body of an upstream error is the difference between
+"422" and "422: `messages.3.content` is too long". The **Conversa** tab of any
 request shows what went up and what came back:
 
 ```bash
-SHUNT_STORE_BODIES=1
+SHUNT_STORE_BODIES=0      # turn capture off
 SHUNT_BODY_LIMIT=64000   # characters per side; 64000 is the default
 ```
 
@@ -581,6 +581,11 @@ prompt would otherwise store the key forever.
 The **Requisição** tab beside it shows the raw body that was sent, redacted and
 cut the same way, with a button that copies it as a `curl` — the conversation
 says what was said, this says how to reproduce it.
+
+A request that failed has an **Erro** tab instead, showing the raw body the
+provider returned with the error: the field it rejected, the `error.code`, the
+validation message. The status line and the trace carry only a short excerpt;
+this carries the whole document, redacted and cut the same way.
 
 Clearing the history takes the stored conversations with it.
 
@@ -773,7 +778,8 @@ both tools. `SHUNT_LOG_LEVEL` sets the level; a name Python's `logging` does not
 recognise falls back to `INFO` rather than stop the service. Neither bodies nor
 credentials appear in it: `authorization`, `x-api-key`, `api-key`,
 `proxy-authorization` and `x-shunt-token` are redacted with the header name left
-in, and the conversation text is stored only when `SHUNT_STORE_BODIES=1`.
+in, and the conversation text is stored in the separate `request_bodies` table
+rather than the log line.
 
 The test targets run on `pytest-xdist` with `--dist loadfile`, so each test
 file stays in one worker. `uv run pytest -q <file>` still runs one file serially.
@@ -868,11 +874,12 @@ Stated plainly so none of it reads as an oversight:
 - **It does not make a small model behave like a large one.** Routing
   `claude-opus-4-5` to a 27B model gives you that 27B model, under a name Claude
   Code recognises.
-- **It does not store your conversations unless you ask it to.** The usage panel
-  keeps one row per request — which model, which provider, how many tokens, how
-  long — and nothing of what was said. `SHUNT_STORE_BODIES=1` adds the text, in
-  its own table, cut at a limit and with anything that looks like a credential
-  redacted. Tool-call ids are still encoded rather than remembered.
+- **It stores your conversations, and the bodies of upstream errors.** The usage
+  panel keeps one row per request — which model, which provider, how many tokens,
+  how long — and, since the error body is what diagnoses a 422, the text is on by
+  default in its own table, cut at a limit and with anything that looks like a
+  credential redacted. `SHUNT_STORE_BODIES=0` turns it off. Tool-call ids are
+  still encoded rather than remembered.
 - **It does not filter a provider's response.** Whatever the provider answers is
   translated and handed on. A field Shunt has never heard of reaches you intact,
   and so does a field you would rather it dropped.
