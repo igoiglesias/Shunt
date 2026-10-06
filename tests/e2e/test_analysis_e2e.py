@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.core.observability import set_recorder
@@ -166,6 +166,42 @@ def test_an_upstream_failure_is_reported_and_not_cached(shunt_with_history, prov
 
     provider.queue(json_body=resposta_do_modelo())
     assert client.post("/api/analysis").status_code == 200
+
+
+def test_a_failed_request_stores_the_upstream_error_body(shunt_with_history, provider):
+    """O 422 do provedor chega ao banco: e o que a aba "Erro" da auditoria le.
+
+    A analise e a rota que passa pelo dispatcher com banco ligado, entao e aqui
+    que o par `prompt`/`error` se prova de ponta a ponta.
+    """
+    from app.stats.models import RequestBody
+
+    client, engine = shunt_with_history
+    provider.queue(
+        status=422,
+        json_body={"error": {"message": "prompt too long", "code": "context_length_exceeded"}},
+    )
+    provider.queue(
+        status=422,
+        json_body={"error": {"message": "prompt too long", "code": "context_length_exceeded"}},
+    )
+
+    resposta = client.post("/api/analysis")
+    assert resposta.status_code >= 400
+
+    def bodies():
+        with Session(engine) as session:
+            return list(session.scalars(select(RequestBody)))
+
+    deadline = time.monotonic() + 2
+    gravados = bodies()
+    while not gravados and time.monotonic() < deadline:
+        time.sleep(0.02)
+        gravados = bodies()
+    (gravado,) = gravados
+    assert "prompt too long" in gravado.error
+    assert "context_length_exceeded" in gravado.error
+    assert gravado.error_bytes > 0
 
 
 def test_without_a_declared_model_the_analysis_refuses(shunt_with_history, provider):

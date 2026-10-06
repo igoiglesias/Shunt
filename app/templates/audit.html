@@ -633,6 +633,13 @@ const tokensOf = (event) => {
   return entrada + saida || null;
 };
 
+function lastReason(attempts) {
+  if (!attempts || !attempts.length) return "";
+  const last = attempts[attempts.length - 1];
+  const idx = last.indexOf(": ");
+  return idx >= 0 ? last.slice(idx + 2) : last;
+}
+
 function rowOf(event) {
   // O relay e rastro de rede, e nao uma chamada de modelo: nenhuma das
   // medidas abaixo foi medido por ninguem. Em JS `null + null === 0`, e
@@ -659,7 +666,7 @@ function rowOf(event) {
     <td class="route" data-label="Rota">${esc((event.route || "").replace("/v1/", ""))}</td>
     <td data-label="Pedido">${esc(event.requested_model || "—")}</td>
     <td data-label="Respondeu">${bad && event.error_type
-      ? `<span class="tag bad" data-label="Respondeu">${esc(event.error_type)}</span>`
+      ? `<span class="tag bad" data-label="Respondeu" title="${esc(lastReason(event.attempts))}">${esc(event.error_type)}</span>`
       : event.candidate_model
         ? esc(event.candidate_model)
         : `<span class="tag">${esc(servedLabel(event))}</span>`}</td>
@@ -732,8 +739,7 @@ async function loadTalk(requestId) {
   const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/body`);
   const body = await response.json();
   if (!response.ok) {
-    target.innerHTML = `<p class="empty">${esc(body.error || "sem conversa gravada")}<br><br>
-      Ligue com <code>SHUNT_STORE_BODIES=1</code> para gravar as próximas.</p>`;
+    target.innerHTML = `<p class="empty">${esc(body.error || "a gravacao estava desligada quando esta requisicao passou")}</p>`;
     return;
   }
   talkCache.set(requestId, body);
@@ -779,6 +785,33 @@ async function loadRaw(requestId) {
       ].join("\n")
     )
   );
+}
+
+// Aba "Erro": mostra o corpo bruto do erro upstream (quando status >= 400).
+async function loadError(requestId) {
+  const target = el("error");
+  if (!target) return;
+  if (!talkCache.has(requestId)) {
+    target.innerHTML = `<p class="empty loading" role="status">Carregando…</p>`;
+    const response = await fetch(`/api/requests/${encodeURIComponent(requestId)}/body`);
+    const body = await response.json();
+    if (!response.ok) {
+      target.innerHTML = `<p class="empty">${esc(body.error || "sem erro gravado")}</p>`;
+      return;
+    }
+    talkCache.set(requestId, body);
+  }
+  const body = talkCache.get(requestId);
+  if (!body.error) {
+    target.innerHTML = `<p class="empty">Nenhum corpo de erro foi gravado para esta requisicao.</p>`;
+    return;
+  }
+  target.innerHTML = `
+    <div class="body-bar">
+      <button type="button" class="ghost" id="copy-error">Copiar JSON</button>
+    </div>
+    <div class="turn"><pre>${esc(body.error)}</pre></div>`;
+  el("copy-error").addEventListener("click", () => copyTo("copy-error", body.error));
 }
 
 async function copyTo(id, text) {
@@ -860,8 +893,10 @@ function wireTabs(requestId) {
       el("summary").hidden = tab.dataset.tab !== "summary";
       el("talk").hidden = tab.dataset.tab !== "talk";
       el("raw").hidden = tab.dataset.tab !== "raw";
+      el("error").hidden = tab.dataset.tab !== "error";
       if (tab.dataset.tab === "talk") loadTalk(requestId);
       if (tab.dataset.tab === "raw") loadRaw(requestId);
+      if (tab.dataset.tab === "error") loadError(requestId);
     });
   }
 }
@@ -900,6 +935,7 @@ function relayDetailOf(event) {
     </div>
     <div id="raw" hidden></div>
     <div id="talk" hidden></div>
+    <div id="error" hidden></div>
     <div id="summary">
     <dl>
       <dt>Quando</dt><dd>${esc(day(event.started_at))} ${esc(clock(event.started_at, true))}</dd>
@@ -949,9 +985,11 @@ function detailOf(event) {
       <button type="button" role="tab" data-tab="summary" aria-selected="true">Resumo</button>
       <button type="button" role="tab" data-tab="talk" aria-selected="false">Conversa</button>
       <button type="button" role="tab" data-tab="raw" aria-selected="false">Requisição</button>
+      ${event.status >= 400 ? `<button type="button" role="tab" data-tab="error" aria-selected="false">Erro</button>` : ""}
     </div>
     <div id="raw" hidden></div>
     <div id="talk" hidden></div>
+    <div id="error" hidden></div>
     <div id="summary">
     <dl>
       <dt>Quando</dt><dd>${esc(day(event.started_at))} ${esc(clock(event.started_at, true))}</dd>

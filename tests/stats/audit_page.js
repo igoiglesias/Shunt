@@ -483,6 +483,32 @@ const SCENARIOS = {
       detalho_parcial: page.probe(`detailOf(${JSON.stringify(parcial)})`),
     };
   },
+
+  // A aba "Erro" so existe quando a requisicao falhou, e a linha da tabela
+  // carrega o motivo no `title` do badge para o hover explicar sem abrir.
+  async error_tab_and_tooltip() {
+    const page = buildPage();
+    const failed = {
+      ...MODEL_EVENT,
+      request_id: "422",
+      candidate_model: null,
+      status: 422,
+      error_type: "invalid_request_error",
+      attempts: ["vendor/free: 422 prompt too long (attempt 1)"],
+    };
+    await page.openDetail(failed);
+    const detail = page.registry.detail.innerHTML;
+    return {
+      detail_html: detail,
+      // A aba "Erro" aparece SO na falha; a de modelo 200 nao tem.
+      has_error_tab: detail.includes('data-tab="error"'),
+      model_has_no_error_tab: page
+        .probe(`detailOf(${JSON.stringify(MODEL_EVENT)})`)
+        .includes('data-tab="error"'),
+      // O badge da linha carrega o motivo do ultimo candidato.
+      row_title: page.probe(`rowOf(${JSON.stringify(failed)})`),
+    };
+  },
 };
 
 async function main() {

@@ -127,8 +127,8 @@ class RequestBody(Base):
     pergunta que ela nem faz. O texto so e lido quando alguem abre UMA
     requisicao.
 
-    Guardar conversa e escolha do operador, e vem desligada por variavel de
-    ambiente: e o dado mais sensivel que passa por este proxy.
+    Guardar conversa e escolha do operador, e ligado por padrao: e o dado mais
+    sensivel que passa por este proxy.
     """
 
     __tablename__ = "request_bodies"
@@ -147,6 +147,10 @@ class RequestBody(Base):
     prompt_bytes: Mapped[int] = mapped_column(Integer, default=0)
     answer_bytes: Mapped[int] = mapped_column(Integer, default=0)
     truncated: Mapped[bool] = mapped_column(default=False)
+    # Corpo do erro upstream quando a requisicao falha (status >= 400).
+    # Mesmo tratamento de prompt/answer: redigido, cortado no teto.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_bytes: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class Analysis(Base):

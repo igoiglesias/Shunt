@@ -171,6 +171,10 @@ class ShuntResult:
     trace: list[str] = field(default_factory=list)
     real_provider: str | None = None
     effort: str | None = None
+    # Corpo bruto do erro do ultimo provedor que respondeu, quando falhou. Vai
+    # para `RequestBody.error` na auditoria: o status e a mensagem nao bastam
+    # para diagnosticar um 4xx de validacao (campo recusado, schema, limite).
+    upstream_error: str | None = None
 
 
 def _client_presented_credential(req: ShuntRequest) -> bool:
@@ -519,7 +523,10 @@ async def dispatch(req: ShuntRequest, settings: Settings, pool: UpstreamPool) ->
             cache_write_tokens=cache_written,
             effort=result.effort,
             body=bodies.capture(
-                bodies.prompt_text(req.body), bodies.answer_text(result.body), req.body
+                bodies.prompt_text(req.body),
+                bodies.answer_text(result.body),
+                req.body,
+                upstream_error=result.upstream_error,
             ),
         )
     )
@@ -721,7 +728,11 @@ async def _dispatch(
         return ShuntResult(400, error_body(req.protocol, 400, message), None, trace)
     message = f"{tally.last_message} - tried: " + "; ".join(trace)
     return ShuntResult(
-        tally.last_status, error_body(req.protocol, tally.last_status, message), None, trace
+        tally.last_status,
+        error_body(req.protocol, tally.last_status, message),
+        None,
+        trace,
+        upstream_error=tally.last_raw_error,
     )
 
 
@@ -736,6 +747,10 @@ class _Buffered:
     last_status: int = 502
     last_message: str = "no candidate answered"
     tried: bool = False  # algum candidato chegou a ter slot e laco de tentativas
+    # Corpo BRUTO do erro do ultimo candidato que respondeu 4xx/5xx. So para a
+    # auditoria: o `last_message` e o extrato legivel (cap 300) que entra no
+    # rastro e no envelope; isto e o documento inteiro que o provedor mandou.
+    last_raw_error: str | None = None
 
 
 async def _attempts(
@@ -810,6 +825,11 @@ async def _attempts(
             )
         if response is not None:
             tally.last_status, tally.last_message = response.status_code, _error_message(response)
+            # O corpo BRUTO para a aba "Erro": o `last_message` e o extrato
+            # legivel (cap 300) que vai ao rastro e ao envelope; este e o
+            # documento inteiro que o provedor mandou. A resposta ja foi lida
+            # pelo `client.post`, e `.text` so acessa a memoria.
+            tally.last_raw_error = response.text
         else:
             tally.last_status, tally.last_message = 502, _exception_text(exc)
         # O motivo que o provedor devolveu entra no rastro: o status sozinho
@@ -1011,6 +1031,9 @@ class _Tally:
     status: int = 200
     error_type: str | None = None
     effort: str | None = None
+    # Corpo BRUTO do erro do ultimo candidato que respondeu 4xx/5xx no streaming.
+    # Preenchido via `leg.last_raw_error` quando a cadeia segue.
+    last_raw_error: str | None = None
 
 
 @dataclass
@@ -1221,6 +1244,8 @@ async def _stream_chain(
                     yield chunk
         if leg.last_message is not None:
             last_message = leg.last_message
+        if leg.last_raw_error is not None:
+            tally.last_raw_error = leg.last_raw_error
         if leg.done:
             return
 
@@ -1261,6 +1286,8 @@ async def _stream_chain(
                         yield chunk
             if leg.last_message is not None:
                 last_message = leg.last_message
+            if leg.last_raw_error is not None:
+                tally.last_raw_error = leg.last_raw_error
             if leg.done:
                 return
 
@@ -1284,6 +1311,9 @@ class _Leg:
 
     done: bool = False  # a requisicao terminou aqui (sucesso ou erro ja no fio)
     last_message: str | None = None  # motivo da falha, quando a cadeia segue
+    # Corpo BRUTO do erro deste candidato, para a auditoria. Preenchido quando
+    # response.status_code >= 400.
+    last_raw_error: str | None = None
 
 
 async def _stream_candidate(
@@ -1344,6 +1374,9 @@ async def _stream_candidate(
         outcome = classify(response.status_code, None, _retry_after(response))
         await response.aread()
         message = _error_message(response)
+        # Corpo bruto para a aba "Erro": `aread()` acima ja materializou o
+        # stream, entao `.text` so le o que esta na memoria.
+        leg.last_raw_error = response.text
         # Mesmo motivo do caminho bufferizado: o status so nao diagnostica.
         trace.append(
             f"{label}: {response.status_code} {message[:300]} (attempt {attempt})"
@@ -1544,7 +1577,10 @@ async def dispatch_stream(
                 cache_write_tokens=tally.usage.get("cache_creation_input_tokens"),
                 effort=tally.effort,
                 body=bodies.capture(
-                    bodies.prompt_text(req.body), tally.answer_text, req.body
+                    bodies.prompt_text(req.body),
+                    tally.answer_text,
+                    req.body,
+                    upstream_error=tally.last_raw_error,
                 ),
             )
         )

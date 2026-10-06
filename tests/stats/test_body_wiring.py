@@ -87,7 +87,7 @@ def test_a_streaming_request_stores_the_answer_too(gravando):
 
 @respx.mock
 def test_nothing_is_stored_when_the_feature_is_off(gravando, monkeypatch):
-    monkeypatch.setenv("SHUNT_STORE_BODIES", "")
+    monkeypatch.setenv("SHUNT_STORE_BODIES", "0")
     respx.post("https://api.test/v1/chat/completions").mock(
         return_value=httpx.Response(
             200,
@@ -101,6 +101,61 @@ def test_nothing_is_stored_when_the_feature_is_off(gravando, monkeypatch):
     with TestClient(app) as c:
         c.post("/v1/messages", json=ASK)
     assert gravando() == []
+
+
+@respx.mock
+def test_the_upstream_error_body_is_stored_for_a_failed_request(gravando, monkeypatch):
+    """Um 422 do provedor so diz o numero; o corpo diz o campo recusado.
+
+    A cadeia precisa acabar no openrouter: sem `default_model`, o resolver
+    anexa o transparente `claude-opus-4-5` (api.anthropic.com) no fim, e sem
+    credencial do cliente ele e tentado -- o mock so cobre o openrouter.
+    """
+    settings = SETTINGS.model_copy(update={"default_model": "free"})
+    app.state.settings = settings
+    app.state.pool = UpstreamPool(settings)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(
+            422,
+            json={
+                "error": {
+                    "message": "prompt too long",
+                    "code": "context_length_exceeded",
+                    "param": "messages",
+                }
+            },
+        )
+    )
+    try:
+        with TestClient(app) as c:
+            c.post("/v1/messages", json=ASK)
+    finally:
+        # O `lifespan` fechou este pool na saida do TestClient; a fixture
+        # recria o dela no proximo teste.
+        app.state.settings = SETTINGS
+    (body,) = gravando()
+    assert "prompt too long" in body.error
+    assert "context_length_exceeded" in body.error
+    assert "sk-teste" not in body.error
+    assert body.error_bytes > 0
+
+
+@respx.mock
+def test_the_upstream_error_body_is_stored_for_a_failed_stream(gravando, monkeypatch):
+    """O mesmo no streaming: o 422 chega nos headers antes do primeiro byte."""
+    settings = SETTINGS.model_copy(update={"default_model": "free"})
+    app.state.settings = settings
+    app.state.pool = UpstreamPool(settings)
+    respx.post("https://api.test/v1/chat/completions").mock(
+        return_value=httpx.Response(422, json={"error": {"message": "prompt too long"}})
+    )
+    try:
+        with TestClient(app) as c, c.stream("POST", "/v1/messages", json={**ASK, "stream": True}) as r:
+            "".join(r.iter_text())
+    finally:
+        app.state.settings = SETTINGS
+    (body,) = gravando()
+    assert "prompt too long" in body.error
 
 
 @respx.mock

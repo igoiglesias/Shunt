@@ -203,3 +203,22 @@ def test_a_linha_de_modelo_sem_tokens_nao_finge_que_mediu_zero():
     assert "— entrada · 1.2k saída" in resultado["detalho_parcial"], (
         "o detalhe mostra traco no lado que o provedor nao informou"
     )
+
+
+@node
+def test_a_aba_de_erro_so_existe_quando_a_requisicao_falhou():
+    """Um 422 na tabela so diz o numero; a aba "Erro" e onde o corpo do
+    provedor aparece, e ela so existe quando `status >= 400`.
+
+    O badge de `error_type` na linha carrega o motivo do ultimo candidato no
+    `title`, para o hover explicar sem precisar abrir o detalhe.
+    """
+    resultado = _run(["error_tab_and_tooltip"])["error_tab_and_tooltip"]
+    assert resultado["has_error_tab"] is True, "falha tem a aba Erro"
+    assert resultado["model_has_no_error_tab"] is False, "sucesso nao tem a aba Erro"
+    # O badge da linha traz o motivo no title do hover.
+    assert 'title="422 prompt too long (attempt 1)"' in resultado["row_title"], (
+        "o badge de erro carrega o motivo do ultimo candidato no title"
+    )
+    # A linha de sucesso nao ganha o title do motivo.
+    assert 'class="tag bad"' not in _run(["model_row_and_detail"])["model_row_and_detail"]["rows_html"]
